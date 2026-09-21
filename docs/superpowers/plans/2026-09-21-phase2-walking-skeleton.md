@@ -2285,6 +2285,7 @@ git commit -m "feat: 边缘状态机与坐标映射 —— 比例入屏、回程
 1. `ClipCursor(IntPtr.Zero)` 必须是 `Release()` 的**第一条语句**，在任何条件判断之前。
 2. `Release()` 必须在 `OnFormClosing` / `ApplicationExit` / 心跳超时 / 前台丢失 **四条路径**上都可达。
 3. **夺取失败时绝不调 `ClipCursor`**——此时前台仍在别的程序，锁光标会让用户够不到本程序的窗口，只能 taskkill。
+4. **未连接时绝不夺取前台**（第二轮跨任务扫描新增）。失效路径：手机掉线后 `tracker` 已回 IDLE，用户**再**把鼠标推到边缘会重新触发 `EnterTakeover` → 若此时 `Engage()` 成功，前台被夺 + 光标被钳在一个像素上，而 Task 8 的心跳恢复里有 `if (!transport.IsConnected) return;`，**救不了这个状态**——用户只剩 `Ctrl+Alt+Esc` 一条退路。故 `EnterTakeover` 的第一件事就是连接检查。
 
 - [ ] **Step 1: 编写抑制器**
 
@@ -2459,6 +2460,13 @@ namespace PcKvm
 
             tracker.EnterTakeover += delegate(short px, short py)
             {
+                // 安全不变量 4：未连接时绝不夺取前台/锁光标（见上方不变量清单）
+                if (!transport.IsConnected)
+                {
+                    log.WriteLine("# 未连接设备，放弃这次跨越");
+                    tracker.AbortTakeover();
+                    return;
+                }
                 if (!supp.Engage())
                 {
                     // 夺取失败就放弃这次跨越，保持 IDLE，绝不能让用户被困在锁死光标的状态里
@@ -2560,18 +2568,26 @@ PC 侧每 1 秒发一次 PING，记录最后收到 PONG 的时间；超过 2 秒
             heartbeat.Interval = 1000;
             heartbeat.Tick += delegate
             {
+                // 先做安全网：处于 TAKEOVER 时，「没连接」与「PONG 超时」都要立刻解除抑制。
+                // 原写法把 `if (!transport.IsConnected) return;` 放在最前，会在掉线后让
+                // 安全网整体短路——用户此时再推到边缘会重新进入 TAKEOVER 并夺取前台，
+                // 而没有任何东西能把他救出来（见 Task 7 安全不变量 4，第二轮跨任务扫描发现）。
+                if (tracker.Current == KvmState.Takeover)
+                {
+                    double age = (DateTime.UtcNow - new DateTime(lastPongTicks)).TotalSeconds;
+                    if (!transport.IsConnected || age > 2.0)
+                    {
+                        log.WriteLine("# 心跳失联（" + age.ToString("F1") + "s, connected="
+                                      + transport.IsConnected + "），强制解除抑制");
+                        tracker.AbortTakeover();
+                        supp.Release();
+                        host.SetStatus("IDLE");
+                    }
+                }
+
                 if (!transport.IsConnected) return;
                 pingSeq++;
                 transport.Send(Protocol.EncodePing(pingSeq));
-
-                double sincePong = (DateTime.UtcNow - new DateTime(lastPongTicks)).TotalSeconds;
-                if (sincePong > 2.0 && tracker.Current == KvmState.Takeover)
-                {
-                    log.WriteLine("# 心跳超时（" + sincePong.ToString("F1") + "s），强制解除抑制");
-                    tracker.AbortTakeover();
-                    supp.Release();
-                    host.SetStatus("IDLE");
-                }
             };
             heartbeat.Start();
 ```
