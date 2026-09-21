@@ -20,3 +20,6 @@ Write-Host "编译 $($sources.Count) 个源文件..." -ForegroundColor Cyan
 if ($LASTEXITCODE -ne 0) { throw "编译失败" }
 $exe = Get-Item "$dist\pc-kvm.exe"
 Write-Host ("编译成功: {0}  ({1:N1} KB)" -f $exe.FullName, ($exe.Length / 1KB)) -ForegroundColor Green
+
+Copy-Item "$env:TEMP\pckvm.jar" "$dist\pckvm.jar" -Force
+Write-Host "已复制 pckvm.jar 到 dist\" -ForegroundColor Green

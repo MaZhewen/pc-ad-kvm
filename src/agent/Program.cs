@@ -63,6 +63,34 @@ namespace PcKvm
                     + (e.IsUp ? " UP" : " DOWN"));
             };
 
+            Transport transport = new Transport(DeviceLauncher.Port);
+            if (!transport.Start())
+            {
+                MessageBox.Show("TCP 端口 " + DeviceLauncher.Port + " 监听失败，程序退出。",
+                    "PC-KVM", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+            string jar = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "pckvm.jar");
+            if (!DeviceLauncher.Prepare(jar))
+            {
+                MessageBox.Show("adb 隧道/推送失败。确认手机已连接且 USB 调试已开。",
+                    "PC-KVM", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+            System.Diagnostics.Process devProc = DeviceLauncher.Start();
+
+            transport.Connected += delegate
+            {
+                log.WriteLine("# 设备已连接");
+                transport.Send(Protocol.EncodePing(1));
+            };
+            transport.Disconnected += delegate { log.WriteLine("# 设备已断开"); };
+            transport.MessageReceived += delegate(byte type, byte[] payload)
+            {
+                if (type == Protocol.MsgPong)
+                    log.WriteLine("# PONG seq=" + Protocol.GetU32(payload, 0));
+            };
+
             NotifyIcon tray = new NotifyIcon();
             tray.Icon = SystemIcons.Application;
             tray.Text = "PC-KVM（阶段二骨架）";
@@ -75,6 +103,8 @@ namespace PcKvm
             {
                 log.WriteLine("# 退出");
                 tray.Visible = false;
+                transport.Stop();
+                DeviceLauncher.Cleanup(devProc);
                 log.Close();
             };
 
