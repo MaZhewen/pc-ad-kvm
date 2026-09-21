@@ -7,8 +7,8 @@ namespace PcKvm
     /// </summary>
     public class CursorModel
     {
-        readonly int _w;
-        readonly int _h;
+        int _w;
+        int _h;
 
         public int X { get; private set; }
         public int Y { get; private set; }
@@ -26,6 +26,16 @@ namespace PcKvm
         {
             X = 0;
             Y = 0;
+        }
+
+        /// <summary>屏幕旋转/尺寸变化时更新边界，并把当前位置钳进新边界。</summary>
+        public void SetBounds(int w, int h)
+        {
+            if (w <= 0 || h <= 0) return;
+            _w = w;
+            _h = h;
+            if (X > _w - 1) X = _w - 1;
+            if (Y > _h - 1) Y = _h - 1;
         }
 
         /// <summary>直接定位（用于跨越入屏）。不发送任何东西，只改模型。</summary>

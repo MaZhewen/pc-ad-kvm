@@ -24,6 +24,10 @@ namespace PcKvm
 
     static class Program
     {
+        static volatile int _phoneW = 0;
+        static volatile int _phoneH = 0;
+        static volatile bool _geometryChanged = false;
+
         [STAThread]
         static void Main()
         {
@@ -59,7 +63,6 @@ namespace PcKvm
             // 阶段骨架：只把事件落到日志，后续任务接管这两个事件
             int mc = 0, kc = 0;
             CursorModel cursor = null;
-            bool cursorResetPending = false;
             ri.MouseMoved += delegate(RawMouseEvent e)
             {
                 mc++;
@@ -69,11 +72,13 @@ namespace PcKvm
 
                 if (cursor != null)
                 {
-                    if (cursorResetPending)
+                    if (_geometryChanged)
                     {
+                        _geometryChanged = false;
+                        cursor.SetBounds(_phoneW, _phoneH);
+                        log.WriteLine("# 几何已应用 " + _phoneW + "x" + _phoneH);
                         transport.Send(Protocol.EncodeHome());
                         cursor.Reset();
-                        cursorResetPending = false;
                     }
                     short sdx = cursor.NextDx(e.Dx);
                     short sdy = cursor.NextDy(e.Dy);
@@ -110,8 +115,19 @@ namespace PcKvm
             transport.Connected += delegate
             {
                 log.WriteLine("# 设备已连接");
-                cursor = new CursorModel(2136, 3200);   // 目标机手机分辨率，后续任务改成从 CONFIG 协商
-                cursorResetPending = true;
+                int dw, dh;
+                if (DeviceLauncher.QueryDisplay(out dw, out dh))
+                {
+                    _phoneW = dw; _phoneH = dh;
+                    log.WriteLine("# 屏幕几何 " + dw + "x" + dh);
+                }
+                else
+                {
+                    _phoneW = 2136; _phoneH = 3200;   // 查询失败时的保守回退
+                    log.WriteLine("# 屏幕几何查询失败，回退 " + _phoneW + "x" + _phoneH);
+                }
+                cursor = new CursorModel(_phoneW, _phoneH);
+                _geometryChanged = true;   // 首次鼠标移动时消费：SetBounds + HOME 归零
                 transport.Send(Protocol.EncodePing(1));
             };
             transport.Disconnected += delegate { log.WriteLine("# 设备已断开"); };
@@ -120,6 +136,24 @@ namespace PcKvm
                 if (type == Protocol.MsgPong)
                     log.WriteLine("# PONG seq=" + Protocol.GetU32(payload, 0));
             };
+
+            System.Threading.Thread rotPoll = new System.Threading.Thread(delegate()
+            {
+                while (true)
+                {
+                    System.Threading.Thread.Sleep(2000);
+                    if (!transport.IsConnected) continue;
+                    int w, h;
+                    if (!DeviceLauncher.QueryDisplay(out w, out h)) continue;   // 掉线时静默跳过，不刷日志
+                    if (w != _phoneW || h != _phoneH)
+                    {
+                        _phoneW = w; _phoneH = h;
+                        _geometryChanged = true;
+                    }
+                }
+            });
+            rotPoll.IsBackground = true;
+            rotPoll.Start();
 
             NotifyIcon tray = new NotifyIcon();
             tray.Icon = SystemIcons.Application;
