@@ -2344,7 +2344,10 @@ namespace PcKvm
 
             // 必须在 UI 线程调用：AttachThreadInput 需要的是拥有窗口输入队列的那个线程
             uint myThread = GetCurrentThreadId();
-            uint fgThread = GetWindowThreadProcessId(_prevForeground, out uint _);
+            // 注意：C# 5 不支持内联 out 声明（`out uint _` 是 C# 7 语法，本机 csc 4.0.30319
+            // 直接编不过）。必须先声明再传——本计划 Ruling 2 就是在这一行上抓到的。
+            uint fgPid;
+            uint fgThread = GetWindowThreadProcessId(_prevForeground, out fgPid);
 
             bool attached = false;
             if (fgThread != 0)
@@ -2455,9 +2458,9 @@ namespace PcKvm
             host.Show();   // 必须真实显示，隐藏窗口无法持有前台
 ```
 
-```csharp
-            Suppressor supp = new Suppressor(hwnd, delegate(string s) { log.WriteLine(s); });
+**声明位置（第三轮跨任务扫描修正，必读）**：`Suppressor supp = new Suppressor(hwnd, delegate(string s) { log.WriteLine(s); });` 这一行**不能**留在"transport 装配之后"。Task 8 会在 `transport.Disconnected` 处理器与心跳定时器里调 `supp.Release()`，而那两个订阅位于 `Main` **前段**的 transport 装配块内——**C# 局部变量不支持前向引用**（Task 4 正是因为这个把装配块整体上移过）。故 `supp` 必须声明在 `log` 这个 `StreamWriter` 创建**之后、transport 装配块之前**；它只依赖 `hwnd` 与 `log`，放在那里没有任何障碍。下面的处理器订阅仍按原位（transport 装配之后）放置。
 
+```csharp
             tracker.EnterTakeover += delegate(short px, short py)
             {
                 // 安全不变量 4：未连接时绝不夺取前台/锁光标（见上方不变量清单）
@@ -2801,6 +2804,8 @@ E0 前缀键的写法（示例，按同样方式补齐其余）：
 ```csharp
             byte modifiers = 0;
 ```
+
+**声明位置**：必须放在 `int mc = 0, kc = 0;` 那一组旁边（即 `ri.KeyChanged += ...` 订阅**之前**）。`KeyChanged` 处理器会捕获并修改它，而 C# 局部变量不支持前向引用（Task 4 与 Task 7 的 `supp` 都栽在这上面）。
 
 **注意**：`modifiers` 被 lambda 捕获并修改，C# 5 下需要它是**局部变量而非字段**（lambda 捕获局部变量是 C# 3 特性，可以）。若编译器报错，改为用一个 `byte[] modifiersBox = new byte[1];` 包装。
 
