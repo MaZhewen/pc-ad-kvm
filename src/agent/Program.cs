@@ -73,9 +73,11 @@ namespace PcKvm
 
             // 声明必须早于 ri.MouseMoved 订阅（C# 局部变量不能前向引用——Task 4 踩过）
             double sensitivity = 1.0;
-            // 目标机几何：手机挂在 DISPLAY1（1920,0,1920x1080）的右侧，故边界 x = 3840
+            // 目标机几何：手机挂在 DISPLAY1（1920,0,1920x1080）的右侧。
+            // edgeX 约定 = 触发侧最外侧有效像素列：3840x1080 桌面上光标最远只能到 3839
+            //（Windows 钳制），传 3840 会让入口条件永远不可达。
             EdgeTracker tracker = new EdgeTracker(
-                edgeX: 3840, edgeTop: 0, edgeBottom: 1080,
+                edgeX: 3839, edgeTop: 0, edgeBottom: 1080,
                 phoneW: 2136, phoneH: 3200, phoneRight: true);   // 占位初值，真值经 SetPhoneSize 灌入
 
             tracker.EnterTakeover += delegate(short px, short py)
@@ -126,7 +128,9 @@ namespace PcKvm
                         short sdy = cursor.NextDy((int)(e.Dy * sensitivity));
                         if (sdx != 0 || sdy != 0)
                             transport.Send(Protocol.EncodeMove(sdx, sdy));
-                        tracker.OnTakeoverMove(sdx, sdy, cursor.X, cursor.Y);
+                        // 用原始增量判定回程方向（用户意图）；钳制后的 sdx 在 x=0 处
+                        // 对负增量恒为 0，会让"刚入屏就推回"永远无法离开
+                        tracker.OnTakeoverMove(e.Dx, e.Dy, cursor.X, cursor.Y);
                     }
                 }
 

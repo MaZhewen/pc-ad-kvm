@@ -11,7 +11,10 @@ namespace PcKvm
     /// </summary>
     public class EdgeTracker
     {
-        readonly int _edgeX;            // 触发边界的 x（屏幕像素）
+        readonly int _edgeX;            // 触发侧最外侧有效像素列的 x（右挂 = 3839，左挂 = 0）。
+                                        // 约定：不是"边界外那条虚线"，而是光标真实可达的最后一列——
+                                        // Windows 把光标钳在最后一列内，GetCursorPos 永远到不了 3840。
+                                        // 左右两侧在此约定下天然对称（atEdge/安全带判定无需分侧特判）。
         readonly int _edgeTop;
         readonly int _edgeBottom;
         int _phoneW;                    // 可变：旋转/尺寸变化时由 SetPhoneSize 更新
@@ -25,7 +28,8 @@ namespace PcKvm
         public event Action LeaveTakeover;
 
         /// <summary>phoneW/phoneH 为占位初值（竖屏 2136x3200），非权威常量；
-        /// 真值在连接后首次鼠标移动、及每次旋转变化时经 SetPhoneSize 灌入（Task 5B 几何轮询）。</summary>
+        /// 真值在连接后首次鼠标移动、及每次旋转变化时经 SetPhoneSize 灌入（Task 5B 几何轮询）。
+        /// edgeX 约定：触发侧最外侧有效像素列的 x（右挂传 3839，左挂传 0），见字段注释。</summary>
         public EdgeTracker(int edgeX, int edgeTop, int edgeBottom,
                            int phoneW, int phoneH, bool phoneRight)
         {
@@ -90,8 +94,11 @@ namespace PcKvm
             if (h != null) h((short)phoneX, (short)phoneY);
         }
 
-        /// <summary>TAKEOVER 态下、每次鼠标事件调用，传入游标模型算出的实际增量。</summary>
-        public void OnTakeoverMove(int actualDx, int actualDy, int vx, int vy)
+        /// <summary>TAKEOVER 态下、每次鼠标事件调用。rawDx/rawDy 为原始（未钳制）增量，
+        /// 表达用户意图；CursorModel 钳制后的增量表达实际位移，回程判定要的是前者——
+        /// 入口处虚拟光标在 x=0，NextDx 对负增量恒钳成 0，用钳后值判定会让"刚进去就推回"
+        /// 永远无法离开。vx/vy 为虚拟光标当前坐标。</summary>
+        public void OnTakeoverMove(int rawDx, int rawDy, int vx, int vy)
         {
             if (Current != KvmState.Takeover) return;
 
@@ -99,8 +106,8 @@ namespace PcKvm
             bool backAtEdge = _phoneRight ? vx <= 0 : vx >= _phoneW - 1;
             if (!backAtEdge) return;
 
-            // 必须仍在继续往外推，否则光标停在边上就会立刻回程
-            bool pushingBack = _phoneRight ? actualDx < 0 : actualDx > 0;
+            // 必须仍在继续往外推（用原始增量=用户意图），否则光标停在边上就会立刻回程
+            bool pushingBack = _phoneRight ? rawDx < 0 : rawDx > 0;
             if (!pushingBack) return;
 
             Current = KvmState.Idle;
