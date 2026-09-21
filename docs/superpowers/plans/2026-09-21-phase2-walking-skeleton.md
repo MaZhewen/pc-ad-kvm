@@ -2040,7 +2040,7 @@ namespace PcKvm
     /// </summary>
     public class EdgeTracker
     {
-        readonly int _edgeX;            // 触发边界的 x（屏幕像素）
+        readonly int _edgeX;            // 触发侧「最外侧像素列」的 x —— 注意不是边界坐标，见下方注释
         readonly int _edgeTop;
         readonly int _edgeBottom;
         readonly int _phoneW;
@@ -2053,6 +2053,12 @@ namespace PcKvm
         public event Action<short, short> EnterTakeover;
         public event Action LeaveTakeover;
 
+        /// <summary>
+        /// edgeX 的约定：**触发侧最外侧那一列有效像素的 x**（不是"边界坐标"）。
+        /// 手机挂在 PC 右侧时为 3839（虚拟桌面 x∈[0,3839]，Windows 把光标钳在最右像素上，
+        /// 实测 SetCursorPos(3840/3841) 都会回落到 3839）；挂在左侧时为 0。
+        /// 这个约定让左右两侧的 `atEdge` 与安全带判定写法对称，无需各自的 ±1。
+        /// </summary>
         public EdgeTracker(int edgeX, int edgeTop, int edgeBottom,
                            int phoneW, int phoneH, bool phoneRight)
         {
@@ -2109,8 +2115,15 @@ namespace PcKvm
             if (h != null) h((short)phoneX, (short)phoneY);
         }
 
-        /// <summary>TAKEOVER 态下、每次鼠标事件调用，传入游标模型算出的实际增量。</summary>
-        public void OnTakeoverMove(int actualDx, int actualDy, int vx, int vy)
+        /// <summary>
+        /// TAKEOVER 态下、每次鼠标事件调用。
+        /// **rawDx/rawDy 必须是 Raw Input 的原始增量，不能是 CursorModel 钳制后的增量。**
+        /// 原因（Task 6 审查抓到的真缺陷）：进入接管时虚拟光标被 SetPosition 落在 x=0，
+        /// 此时 CursorModel.NextDx(负值) 恒返回 0 —— 若用钳制后的增量判"是否在往外推"，
+        /// 「跨进去后立刻推回」这个手势永远无法触发 LEAVE，用户被困在接管态。
+        /// 原始增量表达的是用户意图，钳制后的增量表达的是实际位移，回程判定要的是前者。
+        /// </summary>
+        public void OnTakeoverMove(int rawDx, int rawDy, int vx, int vy)
         {
             if (Current != KvmState.Takeover) return;
 
@@ -2119,7 +2132,7 @@ namespace PcKvm
             if (!backAtEdge) return;
 
             // 必须仍在继续往外推，否则光标停在边上就会立刻回程
-            bool pushingBack = _phoneRight ? actualDx < 0 : actualDx > 0;
+            bool pushingBack = _phoneRight ? rawDx < 0 : rawDx > 0;
             if (!pushingBack) return;
 
             Current = KvmState.Idle;
@@ -2188,7 +2201,9 @@ namespace PcKvm
                         short sdy = cursor.NextDy((int)(e.Dy * sensitivity));
                         if (sdx != 0 || sdy != 0)
                             transport.Send(Protocol.EncodeMove(sdx, sdy));
-                        tracker.OnTakeoverMove(sdx, sdy, cursor.X, cursor.Y);
+                        // 回程判定用**原始**增量（用户意图），不是钳制后的 sdx/sdy：
+                        // 接管入口处 vx=0，钳制后 sdx 恒为 0，用它会让"跨进去再推回"失灵
+                        tracker.OnTakeoverMove(e.Dx, e.Dy, cursor.X, cursor.Y);
                     }
                 }
 
@@ -2210,9 +2225,13 @@ namespace PcKvm
 
 ```csharp
             double sensitivity = 1.0;
-            // 目标机几何：手机挂在 DISPLAY1（1920,0,1920x1080）的右侧，故边界 x = 3840
+            // 目标机几何：手机挂在 DISPLAY1（1920,0,1920x1080）的右侧。
+            // edgeX 传 **3839** 而非 3840 —— 虚拟桌面 x∈[0,3839]，Windows 把光标钳在最右
+            // 像素上，`cursorX >= 3840` 永远不成立（实测 SetCursorPos(3840)/(3841) 均回落到
+            // 3839）。传 3840 会让 TAKEOVER 永远进不去 —— Task 6 审查抓到的真缺陷。
+            // 注意 phoneW/phoneH 只是占位初值，真值由 Task 5B 的几何消费点经 SetPhoneSize 灌入。
             EdgeTracker tracker = new EdgeTracker(
-                edgeX: 3840, edgeTop: 0, edgeBottom: 1080,
+                edgeX: 3839, edgeTop: 0, edgeBottom: 1080,
                 phoneW: 2136, phoneH: 3200, phoneRight: true);
 
             tracker.EnterTakeover += delegate(short px, short py)
@@ -2618,6 +2637,8 @@ PC 侧每 1 秒发一次 PING，记录最后收到 PONG 的时间；超过 2 秒
                 }
             };
 ```
+
+**这一段不是可选的**：Task 6 的审查把它列为 Important —— 掉线时 `tracker` 会**卡在 TAKEOVER**（`Disconnected` 只打日志、`cursor` 保持非 null、`Armed` 也不复位），而重连时 `Connected` 会装一个**全新的 `CursorModel`**，两者状态不再配套；此后所有 PC 鼠标移动都会走接管分支并镜像给手机。控制方裁决此条**在 Task 8 关闭**（ledger Ruling 22）：Task 8 本就是"边界情况"，且它的 `AbortTakeover()` 正好把 `Current` 与 `Armed` 一起复位。**Task 8 实现者不得省略这一段。**
 
 - [ ] **Step 2: 加紧急逃逸键**
 
