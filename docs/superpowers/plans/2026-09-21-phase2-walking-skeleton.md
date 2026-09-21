@@ -1950,7 +1950,7 @@ mRotation=ROTATION_90
 3. **轮询必须无条件运行**（只判 `IsConnected`）：Task 6 才有 IDLE/TAKEOVER 状态机，本任务**不要**自己造状态机。
 4. **轮询在后台线程做 I/O，UI 线程只消费标志位**。绝不要在 `Timer.Tick`（UI 线程）里跑 adb——那会阻塞 Raw Input 消息泵。
 5. 掉线时 `QueryDisplay` 会失败：**静默 `continue`，不要打日志**，否则每 2 秒一条会把日志刷爆。
-6. `Program.cs` 体量红线 **250 行**（Ruling 3）：改完若超线，报 `DONE_WITH_CONCERNS`，不要自行拆分。
+6. `Program.cs` 体量红线 **320 行**（Ruling 20 由 250 上调；预算与理由见 Task 7 Step 2）：改完若超线，报 `DONE_WITH_CONCERNS`，不要自行拆分。
 7. **不要动 `RunAdb`**：它已被 3 处调用且有已评审的行为，只新增 `RunAdbCapture`。
 8. 本任务**不涉及输入路径**，所以 GameViewer.exe 开不开都不影响本任务的验证。
 
@@ -2416,9 +2416,18 @@ namespace PcKvm
 }
 ```
 
-- [ ] **Step 2: 在 Program.cs 接入**
+- [ ] **Step 2: 接入（分两个 commit：先纯搬迁，再改写）**
 
-把 `MessageHost` 改成**可见但极小的置顶窗口**（夺取前台需要有真实窗口，且用户要能看见当前状态）：
+**(a) 先做纯搬迁：把 `MessageHost` 类从 `src/agent/Program.cs` 整体剪到新文件 `src/agent/MessageHost.cs`，一个字都不改，单独一个 commit。**
+
+理由（控制方 Ruling 20）：①一个 `Form` 子类不是装配代码，本就该独立成文件——这与"按风险域分文件"的设计初衷一致；②不搬的话 `Program.cs` 会撞破体量红线（见下方"体量预算"）。搬迁单独成 commit，审查者才能干净地确认"纯移动、零行为变化"。
+
+**(b) 再在 `MessageHost.cs` 里把它改成可见但极小的置顶窗口**（夺取前台需要有真实窗口，且用户要能看见当前状态）：
+
+**体量预算（控制方实算，必读）**：`Program.cs` 在 Task 6 结束时是 **230 行**。Task 7/8/9 还需往里加约 65 行纯接线（Task 7 约 +20、Task 8 约 +36、Task 9 约 +30）。因此：
+- `MessageHost` 搬出后 `Program.cs` 约 215 行 → Task 7 后约 235 → Task 8 后约 271 → Task 9 后约 301。
+- **故 Program.cs 的体量红线由 250 行上调为 320 行**（Ruling 20，理由与代价见 ledger）。本任务结束时若超过 320 行，报 `DONE_WITH_CONCERNS`，不要自行拆分。
+
 
 ```csharp
     class MessageHost : Form
