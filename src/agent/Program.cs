@@ -58,6 +58,8 @@ namespace PcKvm
 
             // 阶段骨架：只把事件落到日志，后续任务接管这两个事件
             int mc = 0, kc = 0;
+            CursorModel cursor = null;
+            bool cursorResetPending = false;
             ri.MouseMoved += delegate(RawMouseEvent e)
             {
                 mc++;
@@ -65,7 +67,19 @@ namespace PcKvm
                     log.WriteLine("MOUSE dx=" + e.Dx + " dy=" + e.Dy
                         + " btn=0x" + e.ButtonFlags.ToString("X4") + " wheel=" + e.WheelDelta);
 
-                transport.Send(Protocol.EncodeMove((short)e.Dx, (short)e.Dy));
+                if (cursor != null)
+                {
+                    if (cursorResetPending)
+                    {
+                        transport.Send(Protocol.EncodeHome());
+                        cursor.Reset();
+                        cursorResetPending = false;
+                    }
+                    short sdx = cursor.NextDx(e.Dx);
+                    short sdy = cursor.NextDy(e.Dy);
+                    if (sdx != 0 || sdy != 0)
+                        transport.Send(Protocol.EncodeMove(sdx, sdy));
+                }
 
                 short wheel = (short)(e.WheelDelta / 120);   // Windows 一格 = 120，HID 一格 = 1
                 if (wheel != 0) transport.Send(Protocol.EncodeScroll((short)0, wheel));
@@ -96,6 +110,8 @@ namespace PcKvm
             transport.Connected += delegate
             {
                 log.WriteLine("# 设备已连接");
+                cursor = new CursorModel(2136, 3200);   // 目标机手机分辨率，后续任务改成从 CONFIG 协商
+                cursorResetPending = true;
                 transport.Send(Protocol.EncodePing(1));
             };
             transport.Disconnected += delegate { log.WriteLine("# 设备已断开"); };

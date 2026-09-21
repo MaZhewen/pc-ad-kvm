@@ -10,7 +10,8 @@ public class Injector {
     static final int PORT = 27183;
     static final byte MSG_ENTER = 0x01, MSG_MOVE = 0x02, MSG_BUTTON = 0x03,
                       MSG_SCROLL = 0x04, MSG_KEY = 0x05, MSG_LEAVE = 0x06,
-                      MSG_CONFIG = 0x07, MSG_PING = 0x08, MSG_PONG = 0x09;
+                      MSG_CONFIG = 0x07, MSG_PING = 0x08, MSG_PONG = 0x09,
+                      MSG_HOME = 0x0A;
 
     /** 当前按下的鼠标按钮位图（bit0 左, bit1 右, bit2 中）。 */
     static int buttonsDown = 0;
@@ -101,6 +102,12 @@ public class Injector {
             r[4] = (byte) ((seq >>> 24) & 0xFF);
             out.write(r);
             out.flush();
+        } else if (type == MSG_HOME) {
+            // 8 位相对轴每报告最多走 127，按屏幕尺寸算够用的次数硬顶到左上角。
+            // 3200 像素需要 ceil(3200/127)=26 次；取 40 次留余量，代价是几十毫秒。
+            for (int i = 0; i < 40; i++) {
+                dev.sendMouse((byte) buttonsDown, (byte) -127, (byte) -127, (byte) 0);
+            }
         }
         // MSG_ENTER / MSG_LEAVE / MSG_CONFIG 由后续任务接管
     }
@@ -123,6 +130,7 @@ public class Injector {
             case MSG_CONFIG: return 7;
             case MSG_PING:   return 4;
             case MSG_PONG:   return 4;
+            case MSG_HOME:   return 0;
             default:         return -1;
         }
     }

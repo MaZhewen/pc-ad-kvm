@@ -14,6 +14,7 @@ namespace PcKvm
         public const byte MsgConfig = 0x07;   // uint8 edge, uint16 pcEdgeLen, uint16 phoneW, uint16 phoneH
         public const byte MsgPing   = 0x08;   // uint32 seq
         public const byte MsgPong   = 0x09;   // uint32 seq
+        public const byte MsgHome   = 0x0A;   // 无负载：让设备把光标硬顶到 (0,0)
 
         public static byte[] EncodeEnter(short x, short y)
         {
@@ -67,6 +68,11 @@ namespace PcKvm
             return b;
         }
 
+        public static byte[] EncodeHome()
+        {
+            return new byte[] { MsgHome };
+        }
+
         public static byte[] EncodePing(uint seq) { return EncodeU32(MsgPing, seq); }
         public static byte[] EncodePong(uint seq) { return EncodeU32(MsgPong, seq); }
 
@@ -92,6 +98,7 @@ namespace PcKvm
                 case MsgConfig: return 7;
                 case MsgPing: return 4;
                 case MsgPong: return 4;
+                case MsgHome: return 0;
                 default: return -1;
             }
         }
