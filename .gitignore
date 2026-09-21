@@ -1,0 +1,4 @@
+tools/r8.jar
+probes/**/classes/
+probes/**/*.exe
+probes/**/*.log
