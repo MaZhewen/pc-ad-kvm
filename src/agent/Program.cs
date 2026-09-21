@@ -47,6 +47,15 @@ namespace PcKvm
             log.AutoFlush = true;
             log.WriteLine("# 启动 " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
 
+            // transport 需在 MouseMoved 处理器之前就绪（C# 局部变量在声明点之后才可见）
+            Transport transport = new Transport(DeviceLauncher.Port);
+            if (!transport.Start())
+            {
+                MessageBox.Show("TCP 端口 " + DeviceLauncher.Port + " 监听失败，程序退出。",
+                    "PC-KVM", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
             // 阶段骨架：只把事件落到日志，后续任务接管这两个事件
             int mc = 0, kc = 0;
             ri.MouseMoved += delegate(RawMouseEvent e)
@@ -55,6 +64,18 @@ namespace PcKvm
                 if (mc % 50 == 0)   // 降频，避免日志爆炸
                     log.WriteLine("MOUSE dx=" + e.Dx + " dy=" + e.Dy
                         + " btn=0x" + e.ButtonFlags.ToString("X4") + " wheel=" + e.WheelDelta);
+
+                transport.Send(Protocol.EncodeMove((short)e.Dx, (short)e.Dy));
+
+                short wheel = (short)(e.WheelDelta / 120);   // Windows 一格 = 120，HID 一格 = 1
+                if (wheel != 0) transport.Send(Protocol.EncodeScroll((short)0, wheel));
+
+                if (e.ButtonFlags != 0)
+                {
+                    EmitButton(transport, e.ButtonFlags, 0x0001, 1);   // 左
+                    EmitButton(transport, e.ButtonFlags, 0x0004, 2);   // 右
+                    EmitButton(transport, e.ButtonFlags, 0x0010, 3);   // 中
+                }
             };
             ri.KeyChanged += delegate(RawKeyEvent e)
             {
@@ -63,13 +84,6 @@ namespace PcKvm
                     + (e.IsUp ? " UP" : " DOWN"));
             };
 
-            Transport transport = new Transport(DeviceLauncher.Port);
-            if (!transport.Start())
-            {
-                MessageBox.Show("TCP 端口 " + DeviceLauncher.Port + " 监听失败，程序退出。",
-                    "PC-KVM", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return;
-            }
             string jar = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "pckvm.jar");
             if (!DeviceLauncher.Prepare(jar))
             {
@@ -109,6 +123,14 @@ namespace PcKvm
             };
 
             Application.Run(host);
+        }
+
+        /// <summary>把 Windows 的 down/up 位对翻译成协议的单次按钮事件。</summary>
+        static void EmitButton(Transport t, ushort flags, ushort downBit, byte btn)
+        {
+            ushort upBit = (ushort)(downBit << 1);
+            if ((flags & downBit) != 0) t.Send(Protocol.EncodeButton(btn, 1));
+            else if ((flags & upBit) != 0) t.Send(Protocol.EncodeButton(btn, 0));
         }
     }
 }
