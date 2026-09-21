@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Drawing;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace PcKvm
@@ -27,6 +28,12 @@ namespace PcKvm
         static volatile int _phoneW = 0;
         static volatile int _phoneH = 0;
         static volatile bool _geometryChanged = false;
+
+        [DllImport("user32.dll")]
+        static extern bool GetCursorPos(out POINT p);
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct POINT { public int X; public int Y; }
 
         [STAThread]
         static void Main()
@@ -63,27 +70,64 @@ namespace PcKvm
             // 阶段骨架：只把事件落到日志，后续任务接管这两个事件
             int mc = 0, kc = 0;
             CursorModel cursor = null;
+
+            // 声明必须早于 ri.MouseMoved 订阅（C# 局部变量不能前向引用——Task 4 踩过）
+            double sensitivity = 1.0;
+            // 目标机几何：手机挂在 DISPLAY1（1920,0,1920x1080）的右侧，故边界 x = 3840
+            EdgeTracker tracker = new EdgeTracker(
+                edgeX: 3840, edgeTop: 0, edgeBottom: 1080,
+                phoneW: 2136, phoneH: 3200, phoneRight: true);   // 占位初值，真值经 SetPhoneSize 灌入
+
+            tracker.EnterTakeover += delegate(short px, short py)
+            {
+                log.WriteLine("# ENTER takeover at phone(" + px + "," + py + ")");
+                transport.Send(Protocol.EncodeHome());
+                cursor.Reset();
+                cursor.SetPosition(px, py);
+                transport.Send(Protocol.EncodeEnter(px, py));
+            };
+            tracker.LeaveTakeover += delegate
+            {
+                log.WriteLine("# LEAVE takeover");
+                transport.Send(Protocol.EncodeLeave());
+            };
+
             ri.MouseMoved += delegate(RawMouseEvent e)
             {
                 mc++;
-                if (mc % 50 == 0)   // 降频，避免日志爆炸
+                if (mc % 50 == 0)
                     log.WriteLine("MOUSE dx=" + e.Dx + " dy=" + e.Dy
                         + " btn=0x" + e.ButtonFlags.ToString("X4") + " wheel=" + e.WheelDelta);
 
+                // 未连接时 cursor 为 null：此时绝不能让状态机跑起来，
+                // 否则推到边缘会触发 EnterTakeover → cursor.Reset() 空引用（异常被
+                // RawInput 的 catch{} 吞掉，表现为状态机卡死在 TAKEOVER 且无任何报错）
                 if (cursor != null)
                 {
                     if (_geometryChanged)
                     {
                         _geometryChanged = false;
                         cursor.SetBounds(_phoneW, _phoneH);
+                        tracker.SetPhoneSize(_phoneW, _phoneH);
                         log.WriteLine("# 几何已应用 " + _phoneW + "x" + _phoneH);
                         transport.Send(Protocol.EncodeHome());
                         cursor.Reset();
                     }
-                    short sdx = cursor.NextDx(e.Dx);
-                    short sdy = cursor.NextDy(e.Dy);
-                    if (sdx != 0 || sdy != 0)
-                        transport.Send(Protocol.EncodeMove(sdx, sdy));
+
+                    if (tracker.Current == KvmState.Idle)
+                    {
+                        POINT p;
+                        GetCursorPos(out p);
+                        tracker.OnIdleMove(e.Dx, e.Dy, p.X, p.Y);
+                    }
+                    else
+                    {
+                        short sdx = cursor.NextDx((int)(e.Dx * sensitivity));
+                        short sdy = cursor.NextDy((int)(e.Dy * sensitivity));
+                        if (sdx != 0 || sdy != 0)
+                            transport.Send(Protocol.EncodeMove(sdx, sdy));
+                        tracker.OnTakeoverMove(sdx, sdy, cursor.X, cursor.Y);
+                    }
                 }
 
                 short wheel = (short)(e.WheelDelta / 120);   // Windows 一格 = 120，HID 一格 = 1
