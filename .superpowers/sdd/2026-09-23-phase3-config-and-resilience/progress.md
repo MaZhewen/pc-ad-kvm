@@ -190,3 +190,41 @@ Task 1: minor (deferred): `Program.cs` 里 `using System.Drawing;` 在 `NotifyIc
 Task 1: fix round 1/5 dispatched（resume 原实现者，**只**带 Important 1 + 折进去的 Minor 1）；
   已同时改计划正文（删掉那行日志、删掉对应的"有意改动"条目、修 `NotifyIcon` 笔误、
   把 R9 落进 Task 8 的 `Report`/`LogFromWorker` 与静态核对表）。
+Task 1: fix round 1/5 implementer **DONE** — commit **64c350b**（2 文件 +2/−4，追加提交未 amend）。
+  Important 1 按 R8 删除：`GeometryQueried` 处理器现为三行纯字段赋值（比较 → 赋 `_phoneW/_phoneH`
+  → 置 `_geometryChanged`），**无任何 I/O**。Minor 1 折进：类头"重连监督/Report()"各补"（任务 8 落地）"。
+  自报：`Program.cs` **281**（283−2）；build 零警告 exit 0；两套 harness 15/15 与 45/45，均 exit 0。
+Task 1: **控制方独立核实（未采信自述）**：`rg 'log\.WriteLine|_log\(' src/agent/{Watchers,TrayUi}.cs`
+  只有 3 处，**全部在 UI 线程上**（`TrayUi.cs:58` 退出路径 / `Watchers.cs:62` 逃逸键（MessageHost 热键）/
+  `Watchers.cs:125` 心跳（WinForms Timer tick））；几何轮询后台线程**零写日志点**；
+  `GeometryQueried` 处理器实测 3 行无 I/O；`wc -l Program.cs` = 281 ✅。
+Task 1: scoped re-review package：`review-ccf74b8..64c350b.diff`（1 commit, 3836 B，同样做了 BASE 簿记修正
+  —— 我在 ccf32a7 之后插了文档提交 ccf74b8）。dispatched **scoped re-reviewer（sonnet）**，
+  除两条 finding 外点名了一个聚焦检查："删掉那一行是否**完整**堵住竞态，还是仍有别的路径从非 UI 线程写 log"。
+Task 1: fix round 1/5 复审 **clean** —— scoped re-reviewer（sonnet）判
+  **All findings addressed, no new Critical/Important breakage**。
+  两条逐条给出行号证据：①`Program.cs:82-87` 处理器现为纯字段赋值、无 I/O，与改动前行为一致；
+  ②`Watchers.cs:15-16` 两处前向引用已补"（任务 8 落地）"，且 diff 显示 Watchers.cs **零代码改动**。
+  它另做了一项我点名的聚焦检查：报告里那份 `rg` 的 3 个日志点**确系全在 UI 线程**
+  （`TrayUi.cs:58` ApplicationExit / `Watchers.cs:62` 逃逸键走 MessageHost 的 ProcessCmdKey /
+  `Watchers.cs:125` WinForms Timer.Tick），故该竞态由本次修复**完整堵住**。
+Task 1: minor (deferred) —— **复审者发现的既有隐患（先于本次改动）**：`Program.cs` 仍在 Transport 的
+  **后台 accept 线程**上写日志（`Program.cs:262` 的 `# PONG seq=`、`:224/:245` 的 Connected/Disconnected）。
+  理论上退出时存在同形状的"写已关闭 writer"窗口，但目前靠退出顺序缓解
+  （`TrayUi.cs:53` 的 `_transport.Stop()` 早于 `:63` 的 `_log.Close()`）。
+  **本次不修**：它是 Task 1 之前就有的形状，且 Task 1 的章程是零行为变化。
+  交终审 triage：要么把这三处也 marshal，要么把退出顺序硬化（`Transport.Stop()` 之后 Join accept 线程）。
+  **代价（若不修）**：一条理论性的退出竞态残留；实际触发需要 accept 线程恰在 `log.Close()` 后收到一个
+  消息，概率极低，但后果与 R8 那一处相同（进程被终结而非干净退出）。
+  **已预判给 Task 8**：`Transport.Stop()` 若在那轮被改动，顺手评估是否加 Join。
+Task 1: **complete**（代码提交 `ccf32a7` + 修轮 `64c350b`；派发前 BASE = `ae78fdc`，
+  中间夹两个控制方文档提交 `339115f`/`ccf74b8`，故审查包做了两次 BASE 簿记修正）
+  —— review clean after 1 fix round。
+
+## Task 2 准备
+
+- 简报已预生成：`task-2-brief.md`（362 行）。
+- 注意：Task 1 的教训要随派发下发 —— ①Git Bash 会改写 `/路径` 参数，跑 csc/adb 一律用 PowerShell；
+  ②`wc -l` 口径；③新建 `.ps1` 必须带 UTF-8 BOM（Write 工具产出无 BOM，须查前三字节并补）；
+  ④**只有 `Watchers`/`TrayUi` 因为吃 `MessageHost` 而必须 internal**，`Config`/`MouseScaler`/
+  `SettingsForm` 只吃 public 类型，可以（也应该）是 `public`——别把 internal 规则过度套用。
