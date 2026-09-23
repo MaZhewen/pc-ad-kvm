@@ -186,7 +186,19 @@ namespace PcKvm
                 _geometryChanged = true;   // 首次鼠标移动时消费：SetBounds + HOME 归零
                 transport.Send(Protocol.EncodePing(1));
             };
-            transport.Disconnected += delegate { log.WriteLine("# 设备已断开"); };
+            // 掉线时必须把 tracker 从 TAKEOVER 里拉出来（Task 6 审查 Important）：
+            // 只打日志会让 Current 卡在 TAKEOVER、cursor 保持非 null、Armed 不复位，
+            // 而重连时装的是全新 CursorModel，此后所有鼠标移动都会误走接管分支。
+            transport.Disconnected += delegate
+            {
+                log.WriteLine("# 设备已断开");
+                if (tracker.Current == KvmState.Takeover)
+                {
+                    tracker.AbortTakeover();
+                    supp.Release();
+                    host.SetStatus("IDLE");
+                }
+            };
             transport.MessageReceived += delegate(byte type, byte[] payload)
             {
                 if (type == Protocol.MsgPong)
@@ -224,6 +236,59 @@ namespace PcKvm
             guard.Interval = 250;
             guard.Tick += delegate { supp.CheckForeground(); };
             guard.Start();
+
+            // ---- Task 8 安全网：心跳失联强制解锁 + Ctrl+Alt+Esc 逃逸键 ----
+            // 必须是 WinForms Timer（UI 线程）：Abort 路径会碰 host/tracker/supp，
+            // 换 System.Threading.Timer 会引入跨线程调用（Task 7 审查遗留的隐患点）。
+            uint pingSeq = 0;
+            long lastPongTicks = DateTime.UtcNow.Ticks;
+            transport.MessageReceived += delegate(byte type, byte[] payload)
+            {
+                if (type == Protocol.MsgPong)
+                    lastPongTicks = DateTime.UtcNow.Ticks;
+            };
+
+            Timer heartbeat = new Timer();
+            heartbeat.Interval = 1000;
+            heartbeat.Tick += delegate
+            {
+                // 先做安全网：处于 TAKEOVER 时，「没连接」与「PONG 超时」都要立刻解除抑制。
+                // 原写法把 `if (!transport.IsConnected) return;` 放在最前，会在掉线后让
+                // 安全网整体短路——用户此时再推到边缘会重新进入 TAKEOVER 并夺取前台，
+                // 而没有任何东西能把他救出来（见 Task 7 安全不变量 4，第二轮跨任务扫描发现）。
+                if (tracker.Current == KvmState.Takeover)
+                {
+                    double age = (DateTime.UtcNow - new DateTime(lastPongTicks)).TotalSeconds;
+                    if (!transport.IsConnected || age > 2.0)
+                    {
+                        log.WriteLine("# 心跳失联（" + age.ToString("F1") + "s, connected="
+                                      + transport.IsConnected + "），强制解除抑制");
+                        // 与逃逸键同理：放弃路径要通知设备侧清 buttonsDown/按键槽位。
+                        // 若连接已断，Send 是安全 no-op（Transport.Send 在 _stream 为 null 时直接返回）。
+                        transport.Send(Protocol.EncodeLeave());
+                        tracker.AbortTakeover();
+                        supp.Release();
+                        host.SetStatus("IDLE");
+                    }
+                }
+
+                if (!transport.IsConnected) return;
+                pingSeq++;
+                transport.Send(Protocol.EncodePing(pingSeq));
+            };
+            heartbeat.Start();
+
+            host.Escape += delegate
+            {
+                log.WriteLine("# 逃逸键触发");
+                // 放弃路径也必须通知设备侧清状态：接管期间若按着鼠标键/修饰键再逃逸，
+                // 不补发 LEAVE 会让手机侧 buttonsDown 与按键槽位永久残留（leave 才会清）。
+                // 设备侧处理 MSG_LEAVE 时会 buttonsDown=0 并 KeyState.releaseAll。
+                transport.Send(Protocol.EncodeLeave());
+                tracker.AbortTakeover();
+                supp.Release();
+                host.SetStatus("IDLE");
+            };
 
             host.FormClosing += delegate { supp.Release(); };
             Application.ApplicationExit += delegate

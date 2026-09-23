@@ -34,5 +34,30 @@ namespace PcKvm
         }
 
         public void SetStatus(string s) { _status.Text = s; }
+
+        /// <summary>紧急逃逸键 Ctrl+Alt+Esc。抑制生效时本窗口持有前台，此键一定能收到。</summary>
+        public event Action Escape;
+
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            if (keyData == (Keys.Control | Keys.Alt | Keys.Escape))
+            {
+                Action h = Escape;
+                if (h != null) h();
+                return true;
+            }
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+
+        protected override bool ProcessDialogKey(Keys keyData)
+        {
+            if (keyData == (Keys.Control | Keys.Alt | Keys.Escape))
+            {
+                Action h = Escape;
+                if (h != null) h();
+                return true;
+            }
+            return base.ProcessDialogKey(keyData);
+        }
     }
 }
