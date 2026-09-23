@@ -1821,7 +1821,10 @@ Expected: 零警告 exit 0；行数 ≤ 360。
 
 ```bash
 cd /g/pc-kvm
-git add assets/pc-kvm.ico build/build-agent.ps1 src/agent/Program.cs
+# 托盘那行在 TrayUi.cs（Task 1 把托盘从 Program.cs 搬走了），不在 Program.cs。
+# 初稿这里写的是 src/agent/Program.cs —— 实现者按任务上下文判断并提交了 TrayUi.cs，判断正确。
+git add assets/pc-kvm.ico assets/pc-kvm-preview-256.png assets/pc-kvm-preview-16.png \
+        build/build-agent.ps1 src/agent/TrayUi.cs
 git commit -F - <<'EOF'
 feat(#3): exe 与托盘图标
 
@@ -2013,6 +2016,8 @@ pwsh -File G:\pc-kvm\tests\agent-logic\run.ps1
 pwsh -File G:\pc-kvm\tests\scancode-map\run.ps1
 ```
 Expected: `agent-logic` `TOTAL: pass=22 fail=0`（C 8 + S 8 + N1/N2/N3/N4 4 + N5/N5b 2）；
+> ⚠️ **这个 22 是陈旧数字**（初稿写于 Task 3 加 C9/C10 之前）。实测正确值是 **24**
+> （C1–C10 = 10，S1–S8 = 8，N 组 6）。实现者按 24 报、并在报告里指出了这处陈旧 —— 判断正确。
 `scancode-map` `TOTAL: 58/58 passed, 0 failed`（45 + 13）。
 
 - [ ] **Step 7: 在 `Program.cs` 里接线**
@@ -2134,6 +2139,17 @@ EOF
   - `static bool DeviceLauncher.KillAllAdb()`
   - `bool Watchers.StartDevice()`、`void Watchers.AttachConfig(Config cfg)`、
     `Process Watchers.DeviceProcess { get; }`、`void Watchers.Stop()`
+
+> ⚠️ **R13 —— 行数预案（实测比初稿预测紧得多，务必先读这一条）**
+> 本计划初稿推演"收尾时 `Program.cs` 约 337 行、余量 23"，**实测已到 353 行**（Task 3 的 +13、
+> Task 5 的 +36、Task 7 的 +19 都比估的高），**距 360 只剩 7 行**。
+> 好消息是本任务的 `Program.cs` 增量很小（把 `Process devProc = DeviceLauncher.Start();` 换成
+> `watchers.AttachConfig(cfg)` + `StartDevice()`，并把 `TrayUi` 构造里的 `devProc` 去掉，约 ±3 行），
+> 主体在 `Watchers.cs`。
+> **若本任务发现 `Program.cs` 需要超过那 7 行：必须先抽 `src/agent/InputRouter.cs`
+> （把 `MouseMoved` 与 `KeyChanged` 两个处理器搬进去，实测约 81 行）来腾地方，
+> 绝不允许上调 360 红线。** 这是 Ruling 26 的原话，也是 R1 当时就写好的下一步。
+> 代价：本任务多一个前置纯搬迁步骤。
 
 - [ ] **Step 1: 改 `DeviceLauncher.cs` —— 拆分与新增**
 

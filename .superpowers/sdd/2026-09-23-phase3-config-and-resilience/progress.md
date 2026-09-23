@@ -680,3 +680,29 @@ Task 7: minor (deferred): **按住小键盘键的途中切换 NumLock** —— �
 Task 7: minor (deferred): `N4` 的断言被 `N1` 的精确相等断言包含（简报逐字如此，保留不算错，仅记录可合并）。
 Task 7: minor (deferred): `tests/scancode-map` 控制台对中文用例名显示乱码（代码页问题）。
   这是**既有**的显示行为（原有 45 条也用中文名），非本次引入或加重。
+
+## Task 8 的派发时机（控制方决定，非滞后）
+
+Task 8 **暂不派发**，理由具体而不只是"守规矩"：
+- 正在跑的 **Task 6 返工轮**与本任务**都要动 `src/agent/TrayUi.cs`**（本任务要把 `Process devProc`
+  参数从 `TrayUi` 构造里去掉、改用 `watchers.DeviceProcess`）。
+- skill 明令"Never dispatch multiple implementation subagents in parallel (conflicts)"。
+- 在这里违反它有**具体的可见代价**：两路同时提交会让**审查包的 commit 区间被对方的提交污染**，
+  本会话已经因此做过**三次** BASE 簿记修正（Task 1 的 `339115f`、Task 5 的 `b5235ca`、Task 6 的 `4def56f`）。
+- 故等 Task 6 返工落地后再派 Task 8。
+
+Task 8: 已把 **R13 的行数预案写进计划正文**（`Program.cs` 实测 353、距 360 仅 7 行；
+若本任务需要超过那 7 行，**必须先抽 `InputRouter.cs`**，不得上调红线）。
+Task 8: 派发时要随附的承重信息已梳理：
+  ①Task 1 在 `Watchers.cs` 里已建好的东西（`_stop`/`Stop()`、`GeometryQueried`、PONG 订阅、逃逸键处理器）
+    ——本任务是往同一个类里叠加，不是新建；
+  ②**R9**：后台线程**绝不直接写日志**（`LogFromWorker`/`Report` 内部 `BeginInvoke`），
+    因为 `log` 会在退出时被 `TrayUi` 关掉，而 `Stop()` 只置标志不 Join——写已关闭的 writer
+    就是后台线程未捕获异常 = 进程被终结（Task 1 审查 Important 1 与 R8 就是这个形状）；
+  ③**R13** 的行数预案；
+  ④设备侧进程**所有权从 `Program.cs` 移到 `Watchers`**（重连会换进程）；
+  ⑤幂等：重启注入器前先 Kill 旧的，否则设备侧堆多个 `app_process`；
+  ⑥jar 只推一次（`Prepare` 拆成 `EnsureTunnel` + `PushJar`）；
+  ⑦Step 7 要往**上一阶段 ledger** 追加"#4 覆盖边界"一节（按 R4：**只追加、不改写**）；
+  ⑧R11：不许启动 exe，三档演练（杀注入器 / `adb kill-server` / 拔线）并入用户的汇总真机会话
+    ——而且**手机此刻离线，这一条现在也做不了**，如实挂账。
