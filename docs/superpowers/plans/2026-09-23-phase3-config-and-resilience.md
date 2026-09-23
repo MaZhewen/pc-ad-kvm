@@ -1104,10 +1104,37 @@ cd /g/pc-kvm && wc -l src/agent/Program.cs
 ```
 Expected: **≤ 360**。若超了，停下来报 BLOCKED——Ruling 26 不允许再上调红线。
 
-- [ ] **Step 5: 真机前的人工检查（不需要手机）**
+- [ ] **Step 5: 用机器可核的手段代替 GUI 清单（R10）**
 
-启动 `dist\pc-kvm.exe`（**手机可以不在线**，此时 `DeviceLauncher.Prepare` 会失败并弹一次
-模态框——那是既有行为，点掉即可，本次不修）。确认：
+> ⚠️ **原 Step 5 的"启动 exe 手工看托盘/对话框"已作废，改为下面的机器检查。**
+> 三条理由：①子代理看不见也点不了 GUI；②手机不在线时 `DeviceLauncher.Prepare` 会失败并弹
+> **模态 MessageBox 永久阻塞**（本项目有记录的同类事故）；③跑起来的 app 会锁住
+> `dist\pc-kvm.exe`，后面 4 个任务都编不了。
+> GUI 那几项**并入任务 4/5 的真机验收**（那时本来就要用户在场，而设置对话框正是给速度与
+> 手机侧用的）。
+
+**顺带补一个 spec 缺口**：spec §11 要求给 `Config` 写「**写回往返**」用例，而已有的 8 条
+（C1–C8）**完全没覆盖 `Save()`**。故本步骤在 `tests/agent-logic/Main.cs` 追加两条：
+
+- **C9 —— `Save()` → `Load()` 往返**：构造一个四项全非默认的 `Config`，`Save()` 后
+  `Config.Load(null)`，断言四个值原样回来。`Save`/`Load` 用的是
+  `AppDomain.CurrentDomain.BaseDirectory`，在 harness 里就是 `%TEMP%\pckvm-tests\agent-logic\`
+  输出目录，故**自包含**；测完删掉自己写的文件，保证重跑干净。
+- **C10 —— `Save()` 写出的文件是 UTF-8 带 BOM 且键名正确**：读前三字节断言
+  `0xEF,0xBB,0xBF`；断言文本含 `MouseSensitivity=1.25` 与 `PhoneSide=Left`。
+
+runner 的计数从 `pass=8 fail=0` 变为 **`pass=10 fail=0`**（报实际值）。
+
+**另外两条机器检查（原始输出贴进报告）**：
+
+```powershell
+rg -n 'MenuItem' src/agent/TrayUi.cs
+# 期望：恰两个菜单项（设置… 与 退出）
+rg -n 'Config.Load|SettingsApplied' src/agent/Program.cs src/agent/TrayUi.cs
+# 期望：1 次 Load 调用、1 处事件声明、1 处订阅
+```
+
+**以下原 GUI 清单已移交用户**（并入任务 4/5 的真机验收，那时用户在场；**实现者不要执行、也不要启动 exe**）：
 
 - [ ] 托盘右键能看到「设置…」与「退出」两项
 - [ ] 设置对话框打开后，滑块显示当前值（首次应为 `0.50`）

@@ -278,3 +278,27 @@ Task 2: minor (deferred): `tests/agent-logic/Main.cs:3` 的 `using System.IO;` �
 Task 2: minor (deferred): `run.ps1` 的"文件不存在则跳过"过滤是计划授予的自由度；长期看它**静默容忍
   多余文件的缺失**（`KeyMap.cs` 目前被编进来但零测试引用它）。计划本意，仅记录。
 Task 2: **complete**（提交 `014d55a`，review clean，无需修轮）。BASE 前后无控制方文档提交，审查包无簿记修正。
+
+## 执行记录 · Task 3
+
+Task 3: dispatched implementer (**sonnet**) at BASE **29ce7e1**。派发随附 Task 1/2 的接口事实
+  （`TrayUi` 是 `internal class`、构造签名、属性名是 **`Tray`** 不是 `NotifyIcon`、`Install()` 现状；
+  `SettingsForm` 应为 public；`Config.Load` 必须放在 `log` 创建之后、`supp` 之前——因为 T4 的
+  `scaler`、T5 的 `edgeX`、`TrayUi` 构造都要用它，而 C# 局部量不能前向引用）。
+Task 3: **R10 —— 计划里的 Step 5「启动 exe 手工看托盘/对话框」作废，改为机器可核的手段。**
+  三条理由：①**子代理看不见也点不了 GUI**；②手机不在线时 `DeviceLauncher.Prepare` 失败会弹
+  **模态 MessageBox 永久阻塞**（本项目有记录的同类事故，交接 §六 也提过）；③跑起来的 app 会锁住
+  `dist\pc-kvm.exe`，**后面 4 个任务全都编不了**——这是最硬的一条。
+  处置：GUI 那几项**并入 Task 4/5 的真机验收**（那时用户本来就在场，而设置对话框正是给速度与
+  手机侧用的），实现者不启动 exe。
+Task 3: **R10 顺带补上一个 spec 缺口** —— spec §11 明写 `Config` 要覆盖「**写回往返**」，
+  而计划里的 C1–C8 **完全没碰 `Save()`**（只有 `Parse` 被测）。故本任务追加 C9（Save→Load 四项往返，
+  自包含在 `%TEMP%\pckvm-tests\agent-logic\`，测完自删）与 C10（Save 写出的文件前三字节是
+  `EF BB BF`、且文本含 `MouseSensitivity=1.25` 与 `PhoneSide=Left`）。runner 计数 8→10。
+  **代价（若判错）**：两条用例把 `Save()` 的实现细节（F2 格式、键名拼写）钉住了，
+  将来改 ini 格式要同时改用例——这正是回归测试该有的样子，可接受。
+Task 3: minor (deferred) → **转交 Task 4**（那轮同样编辑 `tests/agent-logic/Main.cs`）：
+  ①Task 2 审查指出的 **C5 没钉住 InvariantCulture**（本机 zh-CN 小数分隔符就是句点，
+  删掉 `InvariantCulture` 参数套件仍全绿）；
+  ②`tests/README.md` 的跑法区块仍有"两个脚本"字样，而现在是三套——一个词的事。
+  两条都在 Task 4 触碰的同一个子系统内，一并处理比单开修轮划算。
