@@ -228,3 +228,53 @@ Task 1: **complete**（代码提交 `ccf32a7` + 修轮 `64c350b`；派发前 BAS
   ②`wc -l` 口径；③新建 `.ps1` 必须带 UTF-8 BOM（Write 工具产出无 BOM，须查前三字节并补）；
   ④**只有 `Watchers`/`TrayUi` 因为吃 `MessageHost` 而必须 internal**，`Config`/`MouseScaler`/
   `SettingsForm` 只吃 public 类型，可以（也应该）是 `public`——别把 internal 规则过度套用。
+
+## 执行记录 · Task 2
+
+Task 2: dispatched implementer (**sonnet** —— 3 新文件 + 新 runner 基建，属"多文件集成"档) at BASE **0cfa1fc**。
+  派发时把 Task 1 换来的教训一并下发：①**别过度套用 internal 规则**（只有 `Watchers`/`TrayUi`
+  因吃 internal 的 `MessageHost` 才必须 internal；`Config` 只吃 public 类型，该保持 `public`）；
+  ②新建 `.ps1` 必须查前三字节并补 BOM；③Git Bash 会改写 `/路径` 参数，csc/pwsh 一律走 PowerShell。
+  另下发歧义处置：RED 必须是 `CS0246 找不到 Config` 这一种编译失败；同一问题两次不成即停报 BLOCKED；
+  **报告实际用例数**，不要为了凑 8 去改任何东西。
+Task 2: implementer **DONE** — commit **014d55a**（4 文件 +274）。
+  TDD 证据齐全：RED = `error CS0246: 未能找到类型或命名空间名称"Config"`（Config.cs 尚不存在）；
+  GREEN = 同一命令 → C1–C8 全 PASS、`TOTAL: pass=8 fail=0`、exit 0。
+  **BOM 陷阱复现并被正确处理**：`run.ps1` 首写出为 `24 45 72`（无 BOM），用
+  `[IO.File]::WriteAllText(..., UTF8Encoding($true))` 重写后核实 `ef bb bf`。
+  自审对比：`Main.cs`/`Config.cs` 与简报代码块逐字节一致，`run.ps1` 仅差所需 BOM。
+Task 2: **控制方独立核实（未采信自述）**：三套 harness 全部复跑 —— `agent-logic` exit 0
+  `TOTAL: pass=8 fail=0`、`edge-tracker` exit 0 `pass=15 fail=0`、`scancode-map` exit 0 `45/45`；
+  `run.ps1` 前三字节实测 `efbbbf` ✅；**`git diff 0cfa1fc..014d55a -- src/agent/Program.cs` 为空**
+  —— 本任务确实没碰 `Program.cs`（仍 281）✅；`wc -l`：`Config.cs` 163 / `Main.cs` 78 / `run.ps1` 31。
+Task 2: review package → `review-0cfa1fc..014d55a.diff`（1 commit, 15459 B，**无需 BASE 簿记修正**
+  —— 本轮前后没有控制方文档提交）。dispatched **task reviewer（sonnet）**，除 Global Constraints 原文外
+  点名了四个聚焦风险面：①"绝不因配置坏掉而启动失败"的契约有没有漏路径（会不会返回半应用的 Config 或抛异常）；
+  ②InvariantCulture 的写读往返是否自洽；③新 runner 的"源文件不存在则跳过"过滤是不是简报的本意
+  （后续任务才加 `MouseScaler.cs`）还是有静默弱化构建；④`tests/README.md` 加入第三套 harness 后是否自相矛盾。
+  **未预判任何结论**。
+Task 2: minor (deferred) —— **我自己又踩了 Ruling 12**：独立核实那一步我用 Git Bash 跑
+  `pwsh -File G:\...\run.ps1`，拿到的是乱码报错。改用 PowerShell 工具后三套全绿。
+  这条已在本项目 ledger 里记过一次（阶段二 Ruling 12），**我这次仍然犯了**——说明"写在文档里"
+  不足以阻止复发。对策：把"跑 pwsh/csc/adb 一律用 PowerShell 工具"写进本工作区的派发模板级提醒。
+Task 2: **review 回来 —— Spec ✅ 合规 / Task quality Approved**；**0 Critical、0 Important、5 Minor**。
+  审查者逐条核了硬约束（C# 5 的 out 全是先声明后使用、phase-2 等值默认、无模态框/无异常逃逸的
+  启动保证、首次运行不建文件、Save 带 BOM、InvariantCulture 写读往返），并对四个聚焦风险面各跑了一次检查。
+  关键结论：`Parse` 无任何抛出路径（`eq <= 0` 同时挡住 -1 与空键；`Substring(eq+1)` 不会越界）；
+  某个键解析失败**只影响该键**、已解析的键原样保留——这正是 C4「不牵连」契约要求的形状，不是半应用损坏。
+Task 2: **按流程 Minor 不进修轮** —— Task 2 直接 **complete**（提交 `014d55a`，review clean，无需修轮）。
+Task 2: minor (deferred): `tests/README.md` 的"两个脚本都会…"在加入第三套后仍有"两个"字样
+  （跑法区块已列了三条命令）。一个词的事。
+Task 2: minor (deferred) → **转交 Task 4**：`tests/agent-logic/Main.cs:52-53` 的 **C5 实际上没有钉住
+  InvariantCulture**。本机 locale 是 zh-CN、小数分隔符就是句点，所以一个依赖 locale 的 `double.TryParse`
+  同样会通过 C5；将来有人删掉 `CultureInfo.InvariantCulture` 参数，本机套件仍然全绿（而换成逗号小数
+  地区的用户会静默回退默认值）。**这是计划里我自己写的用例**，非实现者之过。
+  处置：Task 4 本来就要往同一个 `Main.cs` 追加 S1–S8，**顺手把 C5 改成有判别力的形式**
+  （解析前把 `Thread.CurrentThread.CurrentCulture` 设成逗号小数地区，如 `de-DE`；C# 5 合法）。
+  **代价（若不改）**：一条回归保不住——症状是"某些地区设置下配置静默失效"，很难查。
+Task 2: minor (deferred): `Save` 把灵敏度静默四舍五入到两位小数（`Parse` 接受 `1.234`，`Save` 写成 `1.23`）。
+  一分钱的漂移、实际不可观测，但往返不自洽。属计划写死的代码。
+Task 2: minor (deferred): `tests/agent-logic/Main.cs:3` 的 `using System.IO;` 未使用（简报逐字如此，无害）。
+Task 2: minor (deferred): `run.ps1` 的"文件不存在则跳过"过滤是计划授予的自由度；长期看它**静默容忍
+  多余文件的缺失**（`KeyMap.cs` 目前被编进来但零测试引用它）。计划本意，仅记录。
+Task 2: **complete**（提交 `014d55a`，review clean，无需修轮）。BASE 前后无控制方文档提交，审查包无簿记修正。
