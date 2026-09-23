@@ -58,6 +58,9 @@ namespace PcKvm
 
             // 阶段骨架：只把事件落到日志，后续任务接管这两个事件
             int mc = 0, kc = 0;
+            // 修饰键位图（HID 键盘报告的 modifier 字节）。必须声明在 KeyChanged 订阅之前：
+            // 处理器会捕获并修改它，而 C# 局部变量不支持前向引用（Task 4 与 Task 7 都栽过）
+            byte modifiers = 0;
             CursorModel cursor = null;
 
             // 声明必须早于 ri.MouseMoved 订阅（C# 局部变量不能前向引用——Task 4 踩过）
@@ -100,7 +103,14 @@ namespace PcKvm
                 log.WriteLine("# LEAVE takeover");
                 transport.Send(Protocol.EncodeLeave());
             };
-            supp.ForegroundLost += delegate { tracker.AbortTakeover(); host.SetStatus("IDLE"); };
+            supp.ForegroundLost += delegate
+            {
+                // 与逃逸键/心跳失联同理：放弃路径必须补发 LEAVE，清手机侧 buttonsDown
+                // 与按键槽位（若连接已断，Send 是安全 no-op）
+                transport.Send(Protocol.EncodeLeave());
+                tracker.AbortTakeover();
+                host.SetStatus("IDLE");
+            };
 
             ri.MouseMoved += delegate(RawMouseEvent e)
             {
@@ -142,14 +152,19 @@ namespace PcKvm
                     }
                 }
 
-                short wheel = (short)(e.WheelDelta / 120);   // Windows 一格 = 120，HID 一格 = 1
-                if (wheel != 0) transport.Send(Protocol.EncodeScroll((short)0, wheel));
-
-                if (e.ButtonFlags != 0)
+                // 滚轮与鼠标键只在接管期转发：IDLE 态用户是在操作 PC，
+                // 此时转发会在手机光标停留处产生误点击/误滚动（既有缺陷，Ruling 27）
+                if (cursor != null && tracker.Current == KvmState.Takeover)
                 {
-                    EmitButton(transport, e.ButtonFlags, 0x0001, 1);   // 左
-                    EmitButton(transport, e.ButtonFlags, 0x0004, 2);   // 右
-                    EmitButton(transport, e.ButtonFlags, 0x0010, 3);   // 中
+                    short wheel = (short)(e.WheelDelta / 120);   // Windows 一格 = 120，HID 一格 = 1
+                    if (wheel != 0) transport.Send(Protocol.EncodeScroll((short)0, wheel));
+
+                    if (e.ButtonFlags != 0)
+                    {
+                        EmitButton(transport, e.ButtonFlags, 0x0001, 1);   // 左
+                        EmitButton(transport, e.ButtonFlags, 0x0004, 2);   // 右
+                        EmitButton(transport, e.ButtonFlags, 0x0010, 3);   // 中
+                    }
                 }
             };
             ri.KeyChanged += delegate(RawKeyEvent e)
@@ -157,6 +172,19 @@ namespace PcKvm
                 kc++;
                 log.WriteLine("KEY scancode=0x" + e.Scancode.ToString("X")
                     + (e.IsUp ? " UP" : " DOWN"));
+
+                byte bit = KeyMap.ModifierBit(e.Scancode, e.IsE0);
+                if (bit != 0)
+                {
+                    if (e.IsUp) modifiers &= (byte)~bit; else modifiers |= bit;
+                    // 修饰键变化也要发一条报告，否则手机侧修饰态不更新
+                    if (tracker.Current == KvmState.Takeover)
+                        transport.Send(Protocol.EncodeKey((ushort)e.Scancode, (byte)(e.IsUp ? 0 : 1), modifiers));
+                    return;
+                }
+
+                if (tracker.Current != KvmState.Takeover) return;   // IDLE 态不转发，PC 正常用
+                transport.Send(Protocol.EncodeKey((ushort)e.Scancode, (byte)(e.IsUp ? 0 : 1), modifiers));
             };
 
             string jar = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "pckvm.jar");

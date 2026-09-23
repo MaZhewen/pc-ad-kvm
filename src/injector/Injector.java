@@ -108,8 +108,14 @@ public class Injector {
             for (int i = 0; i < 40; i++) {
                 dev.sendMouse((byte) buttonsDown, (byte) -127, (byte) -127, (byte) 0);
             }
+        } else if (type == MSG_LEAVE) {
+            // 防修饰键/鼠标键卡在按下态（遥控类软件经典 bug）：接管期间按着 Ctrl 或鼠标键
+            // 退出，不清理的话手机上会一直"按住"。PC 侧所有放弃路径都会补发 LEAVE。
+            buttonsDown = 0;
+            dev.sendMouse((byte) 0, (byte) 0, (byte) 0, (byte) 0);
+            KeyState.releaseAll(dev);
         }
-        // MSG_ENTER / MSG_LEAVE / MSG_CONFIG 由后续任务接管
+        // MSG_ENTER / MSG_CONFIG 由后续任务接管
     }
 
     static int btnToBit(int btn) {

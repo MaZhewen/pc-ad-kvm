@@ -28,6 +28,13 @@ public class KeyState {
         return false;
     }
 
+    /** 全部抬起：清修饰键与所有按键槽位，各发一条报告。 */
+    public static void releaseAll(UhidDevice dev) throws Exception {
+        modifiers = 0;
+        for (int i = 0; i < 6; i++) slots[i] = 0;
+        dev.sendKeyboard((byte) 0, new byte[6]);
+    }
+
     static int freeSlot() {
         for (int i = 0; i < 6; i++) if (slots[i] == 0) return i;
         return -1;
