@@ -73,6 +73,21 @@ namespace PcKvm
                 edgeX: 3839, edgeTop: 0, edgeBottom: 1080,
                 phoneW: 2136, phoneH: 3200, phoneRight: true);   // 占位初值，真值经 SetPhoneSize 灌入
 
+            // 后台守护集中到 Watchers（Ruling 26 的抽取，见该类头注释的线程纪律）。
+            // ⚠️ 必须声明在 TrayUi 的 Install() 之前（它会调 watchers.Stop()），
+            // 而 C# 局部变量不能前向引用（Task 4/7/8 都栽过这一类）。
+            // 但 Start() 要等最后才调——过早启动重连监督会抢在首次建隧道之前动手。
+            Watchers watchers = new Watchers(transport, tracker, supp, host,
+                delegate(string s) { log.WriteLine(s); });
+            watchers.GeometryQueried += delegate(int w, int h)
+            {
+                // 与原实现等价：只有真的变了才应用。比较集中在此，Watchers 不再持第二份状态
+                if (w == _phoneW && h == _phoneH) return;
+                _phoneW = w; _phoneH = h;
+                _geometryChanged = true;
+                log.WriteLine("# 检测到几何变化 " + w + "x" + h);
+            };
+
             tracker.EnterTakeover += delegate(short px, short py)
             {
                 // 安全不变量 4：未连接时绝不夺取前台/锁光标——断线后 tracker 已回 IDLE，
@@ -249,102 +264,11 @@ namespace PcKvm
                     log.WriteLine("# PONG seq=" + Protocol.GetU32(payload, 0));
             };
 
-            System.Threading.Thread rotPoll = new System.Threading.Thread(delegate()
-            {
-                while (true)
-                {
-                    System.Threading.Thread.Sleep(2000);
-                    if (!transport.IsConnected) continue;
-                    int w, h;
-                    if (!DeviceLauncher.QueryDisplay(out w, out h)) continue;   // 掉线时静默跳过，不刷日志
-                    if (w != _phoneW || h != _phoneH)
-                    {
-                        _phoneW = w; _phoneH = h;
-                        _geometryChanged = true;
-                    }
-                }
-            });
-            rotPoll.IsBackground = true;
-            rotPoll.Start();
+            // 托盘与生命周期集中到 TrayUi（Ruling 33）。必须在 Application.Run 之前 Install。
+            TrayUi trayUi = new TrayUi(host, supp, watchers, transport, log, devProc);
+            trayUi.Install();
 
-            NotifyIcon tray = new NotifyIcon();
-            tray.Icon = SystemIcons.Application;
-            tray.Text = "PC-KVM（阶段二骨架）";
-            tray.Visible = true;
-            MenuItem quit = new MenuItem("退出");
-            quit.Click += delegate { Application.Exit(); };
-            tray.ContextMenu = new ContextMenu(new MenuItem[] { quit });
-
-            // 前台守卫：前台被抢走（UAC 安全桌面、锁屏等）时立即放弃抑制
-            Timer guard = new Timer();
-            guard.Interval = 250;
-            guard.Tick += delegate { supp.CheckForeground(); };
-            guard.Start();
-
-            // ---- Task 8 安全网：心跳失联强制解锁 + Ctrl+Alt+Esc 逃逸键 ----
-            // 必须是 WinForms Timer（UI 线程）：Abort 路径会碰 host/tracker/supp，
-            // 换 System.Threading.Timer 会引入跨线程调用（Task 7 审查遗留的隐患点）。
-            uint pingSeq = 0;
-            long lastPongTicks = DateTime.UtcNow.Ticks;
-            transport.MessageReceived += delegate(byte type, byte[] payload)
-            {
-                if (type == Protocol.MsgPong)
-                    lastPongTicks = DateTime.UtcNow.Ticks;
-            };
-
-            Timer heartbeat = new Timer();
-            heartbeat.Interval = 1000;
-            heartbeat.Tick += delegate
-            {
-                // 先做安全网：处于 TAKEOVER 时，「没连接」与「PONG 超时」都要立刻解除抑制。
-                // 原写法把 `if (!transport.IsConnected) return;` 放在最前，会在掉线后让
-                // 安全网整体短路——用户此时再推到边缘会重新进入 TAKEOVER 并夺取前台，
-                // 而没有任何东西能把他救出来（见 Task 7 安全不变量 4，第二轮跨任务扫描发现）。
-                if (tracker.Current == KvmState.Takeover)
-                {
-                    double age = (DateTime.UtcNow - new DateTime(lastPongTicks)).TotalSeconds;
-                    if (!transport.IsConnected || age > 2.0)
-                    {
-                        log.WriteLine("# 心跳失联（" + age.ToString("F1") + "s, connected="
-                                      + transport.IsConnected + "），强制解除抑制");
-                        // 与逃逸键同理：放弃路径要通知设备侧清 buttonsDown/按键槽位。
-                        // 若连接已断，Send 是安全 no-op（Transport.Send 在 _stream 为 null 时直接返回）。
-                        transport.Send(Protocol.EncodeLeave());
-                        tracker.AbortTakeover();
-                        supp.Release();
-                        host.SetStatus("IDLE");
-                    }
-                }
-
-                if (!transport.IsConnected) return;
-                pingSeq++;
-                transport.Send(Protocol.EncodePing(pingSeq));
-            };
-            heartbeat.Start();
-
-            host.Escape += delegate
-            {
-                log.WriteLine("# 逃逸键触发");
-                // 放弃路径也必须通知设备侧清状态：接管期间若按着鼠标键/修饰键再逃逸，
-                // 不补发 LEAVE 会让手机侧 buttonsDown 与按键槽位永久残留（leave 才会清）。
-                // 设备侧处理 MSG_LEAVE 时会 buttonsDown=0 并 KeyState.releaseAll。
-                transport.Send(Protocol.EncodeLeave());
-                tracker.AbortTakeover();
-                supp.Release();
-                host.SetStatus("IDLE");
-            };
-
-            host.FormClosing += delegate { supp.Release(); };
-            Application.ApplicationExit += delegate
-            {
-                supp.Release();
-                log.WriteLine("# 退出");
-                tray.Visible = false;
-                transport.Stop();
-                DeviceLauncher.Cleanup(devProc);
-                log.Close();
-            };
-
+            watchers.Start();
             Application.Run(host);
         }
 
