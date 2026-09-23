@@ -1053,3 +1053,31 @@ x64 TSO 下 `_geometryChanged = true`（volatile，写在 `cursor = …` 之后�
 **#10（③级在开关关闭时也置 `_level=2`）与 spec §9 的措辞**留待合并后随文档一并改。
 **代价（若判错）**：这一轮里改动最多的其实是注释与文档（真代码只有 #1 的 Join、
 #7 的 try/catch、#3 的改名），风险低；但"一次修 8 项"本身有引入新瑕疵的可能，故仍要一次 scoped 复审。
+
+## 终审修复波（R19 落地）
+
+fix wave implementer **DONE_WITH_CONCERNS** — commit **c3303a9**（8 文件 +42/−15；
+`Program.cs` **未被碰、仍 357/360**）。build 零警告 exit 0；三套 `29/24/58` 全绿；
+`rg` 零全局钩子；`Capture` 彻底消失。
+**它的 concern 抓出我给的一条指令本身编译不过**：第 8 项我写"加一个关键字 `volatile`"，
+但 **`volatile long` 在 C# 里非法（CS0677）**。它改用 `Interlocked.Read`（心跳读）
+/ `Interlocked.Exchange`（transport 线程写），语义**等价或更强**（有栅栏的读；32 位进程下写也无撕裂），
+并把"为什么不能 volatile"写进字段注释。**它没有闷头照抄我的错误指令，这值得记一笔。**
+第 1 项它选了我给的**首选修法**（有界 Join）。第 2 项只改措辞、初值保持 0.50。
+第 3 项 `Capture`→`ReadBack`（两个独立审查者都判改名）。报告落在
+`final-fixwave-report.md`（该目录被 ignore，按仓库约定未入 git；只有 `progress.md` 是跟踪的）。
+Task: **控制方独立核实（未采信自述）**：
+- 重编 → 15 文件、exit 0、146.5 KB；三套 `29/24/58` 全绿
+- **`Transport.Stop()` 实测已 Join**（`:127-128` 的 `Join(2000)`，**放在监听器/客户端关闭之后**，
+  注释写明：不会死锁因为阻塞中的 Accept/Read 立刻抛出；不会自 Join 因为只从 UI 线程（TrayUi）调用）
+- `_lastPongTicks` 实测 `Interlocked.Exchange`（`:70` 写）/ `Interlocked.Read`（`:163` 读），
+  字段上方注释记着"`volatile long` 非法（CS0677）"
+- `Capture` 零命中，只剩 `ReadBack`（`:103` 调用、`:130` 声明）
+- spec §5 那两句假话已改成准确表述（"除 `MouseSensitivity` 外与阶段二一致；它默认是阶段二
+  `1.0` 的一半，刻意如此"）
+Task: **遗留一处我决定晚一步处理**：终审 Minor #11 指出 spec §9 与 `Watchers.TryRebuildLink` 的
+注释都称"jar 只推一次"，而代码**每轮都重推**（终审判"行为其实比 spec 更好"——能自愈被清空的
+`/data/local/tmp`，故**改措辞不改代码**）。这一处是纯注释/文档，但它属于本项目栽过的
+"错误注释让下一个会话建立错误假设"那一类（`ScancodeMap` 那句就是先例），故**不打算不管**：
+等本次 scoped 复审回来后作为一条独立的小改交给实现者，并在 ledger 记明"该条未经复审"及理由
+（注释与 spec 措辞、零代码语义，再开一轮复审的边际收益低于成本）。**这条要如实告知用户。**
