@@ -272,7 +272,7 @@ namespace PcKvm
             if (!DeviceLauncher.EnsureTunnel()) return false;
             // EnsureTunnel 的 adb 调用可能等上数秒，期间 Stop() 可能已置位：见上面的守卫理由
             if (_stop) return false;
-            // jar 只推一次：设备侧通常还在。推失败也不致命（可能只是设备侧被清过）
+            // jar 每轮都重推（刻意：/data/local/tmp 被清或设备重启后能自愈）；推失败不致命，只这一轮可能起不来，下一轮还会再推
             if (!DeviceLauncher.PushJar(jar))
                 LogFromWorker("# 重连：jar 推送失败（继续尝试拉起注入器）");
             // PushJar 同样可能等上数秒——最后再核一次，起进程是留在世上最久的东西

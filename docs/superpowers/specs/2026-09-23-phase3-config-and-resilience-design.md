@@ -215,8 +215,8 @@ KEY scancode=0xE02A DOWN / 0xE049 DOWN/UP / 0xE02A UP
 
 **幂等**：每次重启注入器**前先 Kill 旧的**，否则设备侧会堆积多个 `app_process` 进程。
 
-**jar 只推一次**：把 `DeviceLauncher.Prepare` 拆成 `EnsureTunnel` / `PushJar` 两步；
-重连只走 `EnsureTunnel` + `Start`（jar 还在 `/data/local/tmp` 就不必每次重推）。
+**jar 每轮重推**：把 `DeviceLauncher.Prepare` 拆成 `EnsureTunnel` / `PushJar` 两步；
+重连每轮都重建隧道并重推 jar（比"只推一次"更强：`/data/local/tmp` 被清空或设备重启后也能自愈）。
 
 **可见性**：状态条显示 `等待设备…（已重试 n 次）`；日志**只在状态变化时**打一行
 （不每次重试都打——本项目既有过"2% 采样率导致无法证伪"与"刷日志淹没有效信息"两种教训）。
