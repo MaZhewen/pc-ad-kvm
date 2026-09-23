@@ -615,3 +615,25 @@ Task 7: dispatched implementer (**sonnet**) at BASE **85f763c**（`Program.cs` 3
   - 点名**承重的自查**：不属数字键盘的普通码是否全部原样透传、修饰键那段提前 return 的路径是否
     完全未受影响、以及**日志是否仍打原始 scancode 而上行送翻译后的值**（日志记观测、不记翻译）。
   - 行数硬线：334 + 约 15 应在 360 内；**若超线则报 BLOCKED，不许从别处省**。
+Task 7: implementer **DONE** — commit **b018951**（5 文件 +128/−3）。
+  agent-logic 红（`CS0117`）→ 绿 `pass=24`；**scancode-map 的 13 条跨语言契约钉子当场全过**
+  （`58/58`）—— 说明设备侧 E0 表与 spec 期望一致，那条"若有一条不过就报 BLOCKED、不许改用例迁就"
+  的纪律**没被触发**（这是本轮最想知道的事：设备侧是否真如推断）。edge-tracker `pass=24`。
+  `Program.cs` **334 → 353**，`KeyMap.cs` 72。
+Task 7: **控制方独立核实（未采信自述）**：重编 → 15 文件、exit 0、143.0 KB；三套 `24/24/58` 全绿；
+  `GetKeyState`/`VK_NUMLOCK` 在 `:29/:32`，调用在 `:254`（**在状态门控之后**，符合要求），
+  翻译在 `:256`；`KeyMap.ModifierBit` 仍在 `:10` 未动、新函数在 `:50`；
+  **`git diff` 实测 `ScancodeMap.java` 增删两边全是 `//` 行 —— 零代码行改动** ✅。
+Task 7: implementer 指出计划一处**陈旧计数**（Task 7 Step 6 写 `pass=22`，实际 24，源于 Task 3
+  加 C9/C10 之前）。它按 24 报、并主动说明差异，**判断正确**；计划正文已就地标注更正。
+Task 7: **R13 —— 行数预算比预测紧，预先裁定超线时的动作。**
+  R1/Ruling 33 当时的推演是"末尾约 337、余量 23"，**实测已到 353**（Task 3 的 +13、Task 5 的 +36、
+  Task 7 的 +19 都比估的高）。距 360 **只剩 7 行**给 Task 8。
+  分析：Task 8 的 `Program.cs` 增量其实很小（把 `Process devProc = DeviceLauncher.Start();` 换成
+  `watchers.AttachConfig(cfg)` + `StartDevice()`、并把 `TrayUi` 构造里的 `devProc` 去掉，约 ±3 行），
+  它的**主体在 `Watchers.cs`**（重连线程、`Report`/`LogFromWorker`、`TryRebuildLink`）。
+  故预期落在约 356，仍在线内。
+  **预先裁定（若判错要付什么代价）**：**若 Task 8 发现 `Program.cs` 需要超过那 7 行，它必须
+  抽 `InputRouter.cs`（`MouseMoved` + `KeyChanged` 两个处理器，实测约 81 行）来腾地方，
+  绝不允许上调 360 红线**——这是 Ruling 26 的原话，也是 R1 当时就写好的下一步。
+  代价：Task 8 会多一个前置搬迁步骤。
