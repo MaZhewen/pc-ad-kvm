@@ -18,6 +18,8 @@ namespace PcKvm
         [StructLayout(LayoutKind.Sequential)]
         struct POINT { public int X; public int Y; }
 
+        const int SM_XVIRTUALSCREEN = 76;
+        const int SM_YVIRTUALSCREEN = 77;
         const int SM_CXVIRTUALSCREEN = 78;
         const int SM_CYVIRTUALSCREEN = 79;
 
@@ -79,19 +81,26 @@ namespace PcKvm
             MouseScaler scaler = new MouseScaler(cfg.MouseSensitivity);
             // 入口边**运行时**从真实虚拟桌面推导，不写魔数：写死 3839 时，
             // 换一套显示器布局会让入口条件永远不可达——正是 Task 6 审查栽过的静默 bug。
-            // edgeX 约定 = 触发侧最外侧"有效像素列"：右侧取 W-1（Windows 把光标钳在最后一列内），
-            // 左侧取 0。edgeBottom 是**开区间**（EdgeTracker.cs 判定为 cursorY >= _edgeBottom 时拒绝），
-            // 故直接传桌面高度。
+            // edgeX 约定 = 触发侧最外侧"有效像素列"：右侧取 X+W-1（Windows 把光标钳在最后一列内），
+            // 左侧取 X。edgeBottom 是**开区间**（EdgeTracker.cs 判定为 cursorY >= _edgeBottom 时拒绝），
+            // 故直接传桌面高度对应的 Y+H。
+            int screenX = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            int screenY = GetSystemMetrics(SM_YVIRTUALSCREEN);
             int screenW = GetSystemMetrics(SM_CXVIRTUALSCREEN);
             int screenH = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-            if (screenW <= 0) screenW = 3840;   // 极端回退（API 失败不该让程序起不来）
-            if (screenH <= 0) screenH = 1080;
-            log.WriteLine("# 桌面几何 " + screenW + "x" + screenH
+            // 尺寸是判成败的判据：它必须为正。原点**允许为负**（左/上方挂显示器时就是负的），
+            // 所以原点不能拿 <= 0 当"失败"——只有尺寸坏了才整体回退，且回退时原点必须归零。
+            if (screenW <= 0 || screenH <= 0)
+            {
+                screenX = 0; screenY = 0; screenW = 3840; screenH = 1080;
+            }
+            log.WriteLine("# 桌面几何 x=" + screenX + " y=" + screenY + " "
+                          + screenW + "x" + screenH
                           + "，手机在" + (cfg.PhoneOnLeft ? "左" : "右") + "侧");
 
             EdgeTracker tracker = new EdgeTracker(
-                edgeX: cfg.PhoneOnLeft ? 0 : screenW - 1,
-                edgeTop: 0, edgeBottom: screenH,
+                edgeX: cfg.PhoneOnLeft ? screenX : screenX + screenW - 1,
+                edgeTop: screenY, edgeBottom: screenY + screenH,
                 phoneW: 2136, phoneH: 3200, phoneRight: !cfg.PhoneOnLeft);
 
             // 后台守护集中到 Watchers（Ruling 26 的抽取，见该类头注释的线程纪律）。
@@ -302,9 +311,10 @@ namespace PcKvm
                     supp.Release();
                     host.SetStatus("IDLE");
                 }
-                tracker.SetEdge(c.PhoneOnLeft ? 0 : screenW - 1, 0, screenH, !c.PhoneOnLeft);
+                tracker.SetEdge(c.PhoneOnLeft ? screenX : screenX + screenW - 1,
+                                screenY, screenY + screenH, !c.PhoneOnLeft);
                 log.WriteLine("# 设置已应用：手机在" + (c.PhoneOnLeft ? "左" : "右")
-                              + "侧（edgeX=" + (c.PhoneOnLeft ? 0 : screenW - 1) + "）"
+                              + "侧（edgeX=" + (c.PhoneOnLeft ? screenX : screenX + screenW - 1) + "）"
                               + " 速度=" + c.MouseSensitivity.ToString("F2")
                               + " 强杀adb=" + c.AllowKillAdb);
             };
