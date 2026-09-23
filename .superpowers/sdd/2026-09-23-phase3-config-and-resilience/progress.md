@@ -664,3 +664,19 @@ Task 6: **R14 —— 裁决：进修轮（不"看着还行"就放行）。** 理
   **代价（若判错）**：多一轮重画；换来的是 spec 那两条要求真的成立。
   **保留的不确定**：判读代理没有眼睛，其"读不出第二块屏幕"是**推断**；但支撑它的三个数字
   （alpha=64 端盖、3px 手机宽、头部 4 列覆盖）是客观的，足以支持"16px 不合格"的结论。
+Task 7: **review 回来 —— Spec ✅ 合规 / Task quality Approved**；0 Critical、0 Important、3 Minor。
+  它把五个点名风险**逐个对着代码核**：①**跨语言契约**——直接读 `ScancodeMap.java:21-30` 的真实 E0 表，
+  确认函数可能发出的**全部十个**低字节逐一映到 spec 期望的导航 usage（0x47→0x4A Home … 0x53→0x4C Delete），
+  且 `0x4C` 不在表中故走 `default: return -1`（与"丢弃"哨兵一致）；②**位置**——插入块严格位于
+  `if (tracker.Current != KvmState.Takeover) return;` 之后，修饰键分支提前 return 且其 `Send` 仍用原始码；
+  ③**观测 vs 上行**——`Program.cs:233` 在任何翻译之前打 `e.Scancode`（原始），上行送 `sendSc`，
+  "下一次真机排查不会被日志骗"；④**透传完整性**——`sendSc` 只在 `!e.IsE0 && NumLockOff && nav > 0` 时被改写，
+  主键盘 `/`（非 E0 `0x35`）走 `default → -1` 原样透传，小键盘 `/` 以 E0 0x35 到来被 `!e.IsE0` 排除；
+  ⑤`ScancodeMap.java` **零代码行改动**（它从 diff 独立确认，未采信报告）。
+  **按流程 → Task 7 complete**（提交 `b018951`，review clean，无需修轮）。
+Task 7: minor (deferred): **按住小键盘键的途中切换 NumLock** —— 开状态下按下小键盘 7 发的是普通 `0x47`（KP7 down），
+  中途关掉 NumLock 后**抬起**会被翻成 `0xE047` UP，即设备收到一个它从没收到过 down 的 up。
+  HID 注入器会把报告位清掉，几乎必然无害；属**本次之前就存在的状态失同步类别**，超出本任务范围。
+Task 7: minor (deferred): `N4` 的断言被 `N1` 的精确相等断言包含（简报逐字如此，保留不算错，仅记录可合并）。
+Task 7: minor (deferred): `tests/scancode-map` 控制台对中文用例名显示乱码（代码页问题）。
+  这是**既有**的显示行为（原有 45 条也用中文名），非本次引入或加重。
