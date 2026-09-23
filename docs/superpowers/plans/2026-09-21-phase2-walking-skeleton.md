@@ -1950,7 +1950,7 @@ mRotation=ROTATION_90
 3. **轮询必须无条件运行**（只判 `IsConnected`）：Task 6 才有 IDLE/TAKEOVER 状态机，本任务**不要**自己造状态机。
 4. **轮询在后台线程做 I/O，UI 线程只消费标志位**。绝不要在 `Timer.Tick`（UI 线程）里跑 adb——那会阻塞 Raw Input 消息泵。
 5. 掉线时 `QueryDisplay` 会失败：**静默 `continue`，不要打日志**，否则每 2 秒一条会把日志刷爆。
-6. `Program.cs` 体量红线 **320 行**（Ruling 20 由 250 上调；预算与理由见 Task 7 Step 2）：改完若超线，报 `DONE_WITH_CONCERNS`，不要自行拆分。
+6. `Program.cs` 体量红线 **360 行**（Ruling 26；由 250→320→360，其中 320 那一步基于错误测量口径，理由与实测数据见 Task 7 Step 2）：改完若超线，报 `DONE_WITH_CONCERNS`，不要自行拆分。
 7. **不要动 `RunAdb`**：它已被 3 处调用且有已评审的行为，只新增 `RunAdbCapture`。
 8. 本任务**不涉及输入路径**，所以 GameViewer.exe 开不开都不影响本任务的验证。
 
@@ -2443,9 +2443,22 @@ namespace PcKvm
 
 **(b) 再在 `MessageHost.cs` 里把它改成可见但极小的置顶窗口**（夺取前台需要有真实窗口，且用户要能看见当前状态）：
 
-**体量预算（控制方实算，必读）**：`Program.cs` 在 Task 6 结束时是 **230 行**。Task 7/8/9 还需往里加约 65 行纯接线（Task 7 约 +20、Task 8 约 +36、Task 9 约 +30）。因此：
-- `MessageHost` 搬出后 `Program.cs` 约 215 行 → Task 7 后约 235 → Task 8 后约 271 → Task 9 后约 301。
-- **故 Program.cs 的体量红线由 250 行上调为 320 行**（Ruling 20，理由与代价见 ledger）。本任务结束时若超过 320 行，报 `DONE_WITH_CONCERNS`，不要自行拆分。
+**体量预算（控制方按实测重算，必读）**：**Ruling 20 原先的预算建立在一个错误的测量口径上**——当时用 PowerShell `Measure-Object -Line` 量 `Program.cs`（该文件是 CRLF + BOM），得到 225；而权威口径 `wc -l` 实测是 250。Task 8 的实现者独立发现并报告了这个偏差（它量到 249/315），控制方复核确认 **`wc -l` 为准**。
+
+按权威口径的真实值：
+
+| 时点 | `Program.cs` 行数（`wc -l`） |
+|---|---|
+| Task 6 结束 | 234 |
+| Task 7 结束 | **250** |
+| Task 8 结束 | **315**（+65，比原估的 +36 多出近一倍，主要是心跳与逃逸键的实际写法比计划样例更长） |
+
+因此 Task 9 之后会落在约 **345** 行，**原定的 320 红线必破**。处置（Ruling 26）：
+1. **红线由 320 上调为 360** —— 这是**修正一个基于错误测量的预算**，不是"因为不方便而放宽"。
+2. **Task 9 的 `ModifierBit` 不再放进 `Program.cs`**，改为新建 `src/agent/KeyMap.cs` 存放（纯静态映射，与 `Protocol.cs` 的"纯函数"惯例一致，且可离线测试）。
+3. **此后任何功能若把 `Program.cs` 推过 360，必须做抽取而不是再上调。** 下一步唯一还有独立理由的抽取是三个 watcher（几何轮询线程 + 心跳定时器 + 前台守卫定时器）→ `Watchers.cs`——它隔离"后台存活性检查 + adb 进程 churn"，正是审查者两次点名的风险区。
+
+本任务结束时若 `Program.cs` 超过 360 行，报 `DONE_WITH_CONCERNS`，不要自行拆分。
 
 
 ```csharp
@@ -2720,8 +2733,11 @@ git commit -m "feat: 边界情况 —— 心跳超时、断线解锁、紧急逃
 **产出**：`TAKEOVER` 期间按 PC 键盘，字符出现在**手机上**（而不是 PC 上）。
 
 **Files:**
+- Create: `src/agent/KeyMap.cs`（Ruling 26：`ModifierBit` 放这里，不塞进已 315 行的 `Program.cs`）
 - Modify: `src/agent/Program.cs`
 - Modify: `src/injector/ScancodeMap.java`
+- Modify: `src/injector/KeyState.java`
+- Modify: `src/injector/Injector.java`（Step 3 要补设备侧的 `MSG_LEAVE` 分支——**目前它还是空的**，见下方注意）
 
 **Interfaces:**
 - Consumes: Task 3 的 `Protocol.EncodeKey`、Task 2 的 `UhidDevice.sendKeyboard`
@@ -2791,11 +2807,11 @@ E0 前缀键的写法（示例，按同样方式补齐其余）：
 
 - [ ] **Step 2: PC 侧维护修饰键状态**
 
-在 `src/agent/Program.cs` 加：
+**新建 `src/agent/KeyMap.cs`，把下面的 `ModifierBit` 放进这个新文件的 `public static class KeyMap` 里**（Ruling 26：`Program.cs` 已 315 行、红线 360，纯映射不该再往里堆；放独立文件也便于离线测试）。调用点相应写成 `KeyMap.ModifierBit(e.Scancode, e.IsE0)`。新文件需自带 `using`（本方法只用内建类型，`namespace PcKvm` 即可）。
 
 ```csharp
         /// <summary>把 Windows scancode 映射为 HID 修饰位（不是普通键）。返回 0 表示不是修饰键。</summary>
-        static byte ModifierBit(int scancode, bool isE0)
+        public static byte ModifierBit(int scancode, bool isE0)
         {
             int mk = scancode & 0xFF;
             if (!isE0)
@@ -2847,6 +2863,12 @@ E0 前缀键的写法（示例，按同样方式补齐其余）：
 **注意**：`modifiers` 被 lambda 捕获并修改，C# 5 下需要它是**局部变量而非字段**（lambda 捕获局部变量是 C# 3 特性，可以）。若编译器报错，改为用一个 `byte[] modifiersBox = new byte[1];` 包装。
 
 - [ ] **Step 3: 设备侧在退出接管时清空按键**
+
+**注意（Task 8 实现者发现，控制方确认）**：这个 `MSG_LEAVE` 分支**目前还不存在**——`Injector.java` 的 `handle()` 结尾仍是注释"`MSG_ENTER` / `MSG_LEAVE` / `MSG_CONFIG` 由后续任务接管"。因此：
+
+- Task 8 在两处**放弃**路径（逃逸键、心跳超时）里补发的 `Protocol.EncodeLeave()` 目前是**空操作**，Ruling 25 的"防手机侧按键残留"意图要**等你这一步落地才真正生效**；
+- 更重要的是：**在那之前，手机侧的 `buttonsDown` 从来没有被清零过**——用户按着鼠标键时无论走哪条路径退出，手机上都会留下一个"按住的键"。所以本步骤不是可选的锦上添花，而是补上一个既有的功能缺口。
+- 协议侧无风险：`payloadLength(MSG_LEAVE)` 早已是 0，PC 发送的 LEAVE 帧能被正确解析、只是被忽略。
 
 在 `Injector.java` 的 `handle` 里给 `MSG_LEAVE` 加分支——**防止修饰键卡在按下态**（这是遥控类软件的经典 bug：接管期间按下 Ctrl，退出时没抬起，之后手机上一直是 Ctrl 生效）：
 
