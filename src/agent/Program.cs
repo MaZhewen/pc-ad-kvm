@@ -268,7 +268,11 @@ namespace PcKvm
                     "PC-KVM", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
-            System.Diagnostics.Process devProc = DeviceLauncher.Start();
+            // 设备侧进程的所有权交给 Watchers：重连会换进程，退出时要 Kill 它。
+            // 这里只负责"第一次拉起来"。
+            watchers.AttachConfig(cfg);
+            if (!watchers.StartDevice())
+                log.WriteLine("# 首次拉起注入器失败（重连监督会继续尝试）");
 
             transport.Connected += delegate
             {
@@ -314,7 +318,7 @@ namespace PcKvm
             };
 
             // 托盘与生命周期集中到 TrayUi（Ruling 33）。必须在 Application.Run 之前 Install。
-            TrayUi trayUi = new TrayUi(host, supp, watchers, transport, log, devProc, cfg);
+            TrayUi trayUi = new TrayUi(host, supp, watchers, transport, log, cfg);
             trayUi.Install();
 
             // 应用设置由组合根订阅处理（TrayUi 只弹对话框+写盘，见其 SettingsApplied 注释）。

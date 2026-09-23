@@ -212,6 +212,34 @@ static class AgentLogicTest
             "ModifierBit(0x2A, isE0=false) = 0x" + KeyMap.ModifierBit(0x2A, false).ToString("X2")
             + "（期望 0x02）");
 
+        // ---- D1（判别性用例）: `adb devices` 只有表头 → 绝不能误判成"有设备" ----
+        // 表头行 "List of devices attached" 含有 "devices" 字样，任何 naive 的
+        // Contains("device") 粗判都会把空列表判成"有设备"——而断联自愈的整条
+        // 分级升级（②③要不要上、等待提示说什么）都建立在这个判据上。
+        Check("D1 只有表头=不可见",
+            !DeviceLauncher.ParseDeviceVisible("List of devices attached\n\n"),
+            "header-only 必须判 false（naive Contains 在此必挂）");
+
+        // ---- D2: 正常在线（adb 用 \t 分隔序列号与状态）----
+        Check("D2 设备在线",
+            DeviceLauncher.ParseDeviceVisible("List of devices attached\n04053891899C1540\tdevice\n"),
+            "04053891899C1540\\tdevice → true");
+
+        // ---- D3: unauthorized 不算可用 ----
+        Check("D3 unauthorized=不可见",
+            !DeviceLauncher.ParseDeviceVisible("List of devices attached\n04053891899C1540\tunauthorized\n"),
+            "unauthorized 必须判 false（否则会往没授权的手机上盲发命令）");
+
+        // ---- D4: offline 不算可用 ----
+        Check("D4 offline=不可见",
+            !DeviceLauncher.ParseDeviceVisible("List of devices attached\n04053891899C1540\toffline\n"),
+            "offline 必须判 false");
+
+        // ---- D5: null 与空串不崩、返回 false ----
+        Check("D5 null/空串=不可见",
+            !DeviceLauncher.ParseDeviceVisible(null) && !DeviceLauncher.ParseDeviceVisible(""),
+            "null 与 \"\" 都应 false 且不抛");
+
         Console.WriteLine("TOTAL: pass=" + _pass + " fail=" + _fail);
         if (_fail > 0) Environment.Exit(1);
     }

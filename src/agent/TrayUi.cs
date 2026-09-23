@@ -1,5 +1,4 @@
 ﻿using System;
-using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Windows.Forms;
@@ -21,7 +20,6 @@ namespace PcKvm
         readonly Watchers _watchers;
         readonly Transport _transport;
         readonly StreamWriter _log;
-        readonly Process _devProc;
         readonly Config _cfg;
 
         public NotifyIcon Tray { get; private set; }
@@ -32,14 +30,13 @@ namespace PcKvm
         public event Action<Config> SettingsApplied;
 
         public TrayUi(MessageHost host, Suppressor supp, Watchers watchers,
-                      Transport transport, StreamWriter log, Process devProc, Config cfg)
+                      Transport transport, StreamWriter log, Config cfg)
         {
             _host = host;
             _supp = supp;
             _watchers = watchers;
             _transport = transport;
             _log = log;
-            _devProc = devProc;
             _cfg = cfg;
         }
 
@@ -89,7 +86,8 @@ namespace PcKvm
                 _log.WriteLine("# 退出");
                 Tray.Visible = false;
                 _transport.Stop();
-                DeviceLauncher.Cleanup(_devProc);
+                // 设备侧进程的所有权在 Watchers（任务 8 起重连会换进程），这里取它当前持有的那个
+                DeviceLauncher.Cleanup(_watchers.DeviceProcess);   // Kill + rm jar + 拆 reverse
                 _log.Close();
             };
         }

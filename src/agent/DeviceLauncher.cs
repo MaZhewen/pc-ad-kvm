@@ -9,12 +9,24 @@ namespace PcKvm
         public const int Port = 27183;
         const string RemoteJar = "/data/local/tmp/pckvm.jar";
 
-        public static bool Prepare(string localJarPath)
+        /// <summary>只建反向隧道。重连时用这个——不重推 jar（设备侧那份还在）。</summary>
+        public static bool EnsureTunnel()
+        {
+            return RunAdb("reverse tcp:" + Port + " tcp:" + Port) == 0;
+        }
+
+        /// <summary>推 jar。首次启动、或设备侧被清过之后才需要。</summary>
+        public static bool PushJar(string localJarPath)
         {
             if (!File.Exists(localJarPath)) return false;
-            if (RunAdb("reverse tcp:" + Port + " tcp:" + Port) != 0) return false;
-            if (RunAdb("push \"" + localJarPath + "\" " + RemoteJar) != 0) return false;
-            return true;
+            return RunAdb("push \"" + localJarPath + "\" " + RemoteJar) == 0;
+        }
+
+        /// <summary>首次启动：建隧道 + 推 jar。行为与拆分前完全一致。</summary>
+        public static bool Prepare(string localJarPath)
+        {
+            if (!EnsureTunnel()) return false;
+            return PushJar(localJarPath);
         }
 
         /// <summary>拉起设备侧进程。返回的 Process 由调用方负责 Kill——它是 PC 端唯一能关掉它的手段。</summary>
@@ -41,6 +53,69 @@ namespace PcKvm
             }
             RunAdb("shell rm -f " + RemoteJar);
             RunAdb("reverse --remove tcp:" + Port);
+        }
+
+        /// <summary>纯函数：`adb devices` 的输出里是否真有可用设备。
+        /// **关键：必须跳过 "List of devices attached" 那行表头** —— 它含有 "devices" 字样，
+        /// 任何 `Contains("device")` 之类的粗判都会把空列表误判成"有设备"，而本任务整条分级升级
+        /// 都建立在这个判据上。（此风险由离线用例钉住。）</summary>
+        public static bool ParseDeviceVisible(string adbOutput)
+        {
+            if (adbOutput == null) return false;
+            string[] lines = adbOutput.Replace("\r", "").Split('\n');
+            for (int i = 0; i < lines.Length; i++)
+            {
+                string s = lines[i].Trim();
+                if (s.Length == 0) continue;
+                // 形如 "04053891899C1540\tdevice"；"unauthorized"/"offline" 也必须算【不可用】
+                if (s.EndsWith("\tdevice") || s.EndsWith(" device")) return true;
+            }
+            return false;
+        }
+
+        /// <summary>adb 现在看得见设备吗？判据是 `adb devices` 里出现一行以 "device" 结尾的条目。
+        /// 解析已拆成纯函数 ParseDeviceVisible（可离线测试，D1–D5），这里只剩薄薄一层 adb 调用。</summary>
+        public static bool DeviceVisible()
+        {
+            string outp;
+            if (RunAdbCapture("devices", out outp) != 0) return false;
+            return ParseDeviceVisible(outp);
+        }
+
+        /// <summary>温和恢复：重启 adb server。不碰别的进程，代价最小。</summary>
+        public static bool RestartAdbServer()
+        {
+            RunAdb("kill-server");
+            return RunAdb("start-server") == 0;
+        }
+
+        /// <summary>
+        /// 激进恢复：强杀**所有** adb 进程再拉起 server。
+        /// ⚠️ 本机同时跑着 3 个 adb（两个 platform-tools + InputShare 自带的），
+        /// 强杀会打断其它正在用 adb 的工具。故由 Config.AllowKillAdb 把关、默认关闭。
+        /// 实测依据：ledger 记过"kill-server 单独不够，出现过第二个 adb 进程仍占着设备"。
+        /// </summary>
+        public static bool KillAllAdb()
+        {
+            try
+            {
+                ProcessStartInfo psi = new ProcessStartInfo();
+                psi.FileName = "taskkill";
+                psi.Arguments = "/F /IM adb.exe";
+                psi.UseShellExecute = false;
+                psi.RedirectStandardOutput = true;
+                psi.RedirectStandardError = true;
+                psi.CreateNoWindow = true;
+                Process p = Process.Start(psi);
+                p.StandardOutput.ReadToEnd();
+                p.StandardError.ReadToEnd();
+                p.WaitForExit(5000);
+            }
+            catch (System.Exception)
+            {
+                return false;
+            }
+            return RunAdb("start-server") == 0;
         }
 
         static int RunAdb(string args)

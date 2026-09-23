@@ -759,3 +759,19 @@ Task 8: brief 预生成者请注意 —— Task 9 的 brief 已按 Ruling 26/27 
 
 
 
+
+## 2026-09-23 · 阶段三 Task 8（#4 断联自愈）落地 —— 按任务要求补进这份恢复地图
+
+本节由阶段三（`.superpowers/sdd/2026-09-23-phase3-config-and-resilience/`）Task 8 的实现者按任务指令**追加**。它落在阶段二的 ledger 里，因为它关闭的正是下面「终审输入」挂账的 **A2**（「链路断开后 app 不会自愈」：注入器随 `adb shell` 会话一起死、`adb reverse` 隧道一并消失，而 `Transport` 只会等重连——隧道没了就永远等不到，于是"线一抖就得重启 app"），而它的**覆盖边界**直接关系本 ledger 的 adb 故障恢复手册（§Task 5 环境隐患记录、§2026-09-23 环境记录两处）。
+
+**落地了什么**（commit 见阶段三 progress）：
+
+- `Watchers` 新增后台重连监督线程（线程纪律：绝不直接写日志/碰控件，一律经 `Report()`/`LogFromWorker()` 的 `_host.BeginInvoke` 回 UI 线程——R9）。每 `ReconnectSeconds`（默认 5，可在设置里调 2–60）检查一次，判据统一为"该周期结束时 `transport.IsConnected` 仍为 false"。分级升级：**①** 重建 `adb reverse` 隧道 + 重启注入器（每次未连接都做；重启前先 Kill 旧的，幂等，否则设备侧堆多个 `app_process`）；**②** 连续 3 个周期仍不通 → `adb kill-server`+`start-server`（温和，每档只做一次）；**③** 再 3 个周期仍不通 且 `Config.AllowKillAdb=true` → `taskkill /F /IM adb.exe`+`start-server`（激进，默认关，因本机同时跑着 3 个 adb，强杀会打断其它正在用 adb 的工具）。
+- `DeviceLauncher.Prepare` 拆成 `EnsureTunnel`/`PushJar`（重连只建隧道，不重推 jar——设备侧那份通常还在）；设备侧进程所有权从 `Program` 移到 `Watchers`（重连会换进程），`TrayUi` 退出清理改用 `Watchers.DeviceProcess`。
+- 断开期间状态条显示"等待设备…（已重试 n 次，…）"，日志**只在状态变化时**打一行（不刷屏）。adb 可见性判据拆成纯函数 `DeviceLauncher.ParseDeviceVisible`（必须跳过 "List of devices attached" 表头——naive `Contains("device")` 会把空列表误判成"有设备"），由离线用例 D1–D5 钉住（agent-logic 24→29）。
+
+**⚠️ 覆盖边界（实测形态，写给下一个会话）**：2026-09-23 现场实测到一次**设备级**掉线，其形态是——`adb devices` 全空；Windows 侧 `Android ADB Interface`（`VID_18D1&PID_4E11\04053891899C1540`）状态显示 OK，adb 却打不开它；`adb kill-server`+`start-server` **已实测无效**；且当时机器上**只有 1 个 adb 进程**（故**不是**本 ledger §Task 5 记的"3 个 adb server 抢同一 USB 设备"，也不是 §2026-09-23 晚间记的"第二个 adb 进程仍占着设备"那条恢复路径）。
+
+**明确结论：本自愈级联不覆盖该形态。** 它覆盖的是"隧道断 / 注入器死"（A2 的日常形态）；对"adb 整个看不见设备"，①②③ 全走完也无济于事（②③ 动的是 adb server 层，而那时 server 是好的、坏的是设备在 Windows 侧的呈现）。这种掉线仍需人看一眼手机（重插线/解锁/确认 USB 调试），**不要以为 #4 已经修好一切**。
+
+**真机三档演练**（杀注入器 / `adb kill-server` / 拔线，任务 8 Step 6 的 8 项清单）按 R11 推迟：编写本代码时手机离线，无法当日实跑，待用户批量的硬件会话一并执行。
