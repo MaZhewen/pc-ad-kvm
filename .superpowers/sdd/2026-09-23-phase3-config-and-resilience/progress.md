@@ -746,3 +746,32 @@ Task 6: minor (deferred，**复测者发现、实现者未报**): **24px 的内�
   若将来换高分屏可顺手加 1px 边距。
 Task 6: **complete**（初版 `c92859c` + 修轮 `e75563d`，代码审查 Approved + 外观经独立逐像素复测确认）。
   真机观感（资源管理器/托盘/深浅主题）仍按 R11 并入用户的汇总真机会话。
+
+## 执行记录 · Task 8（最后一块）
+
+Task 8: dispatched implementer (**sonnet**) at BASE **c2a912f**（`Program.cs` 353）。随附的承重信息：
+  ①**`Watchers.cs` 已存在**（Task 1 建的），本任务是**往里叠加**而不是新建——明确列出它现在已有什么
+  （几何轮询线程 / 前台守卫 Timer / 心跳 Timer / `_stop` / `Stop()` / `GeometryQueried` / PONG 订阅 /
+  逃逸键处理器），并要求先读类头注释里的线程纪律；
+  ②**`TrayUi` 现在收 `Process devProc`**，本任务要把设备侧进程所有权移到 `Watchers`（故要删那个参数、
+  改用 `_watchers.DeviceProcess`），并提醒 **Task 6 刚改过那个文件的 `Tray.Icon`，别碰**；
+  ③**R9**（后台线程绝不直接写日志）连同"为什么"一起下达——写已关闭的 writer 就是后台线程未捕获异常
+  = 进程被终结，这个形状在 Task 1 已经被抓到过一次；
+  ④**R13 的行数预案**（只剩 7 行；超了就先抽 `InputRouter.cs`，不许上调红线）；
+  ⑤**禁止跑任何 adb 变更命令**（手机离线；`adb kill-server`/`taskkill adb.exe` 会打断本机其它工具）——
+  本任务是写代码而不是执行它；
+  ⑥Step 7 要往**上一阶段 ledger** 追加一节（按 R4：**只追加、不改写**），内容必须含 2026-09-23 那次
+  设备级掉线的实测形态与"**本自愈不覆盖该形态**"的结论；
+  ⑦静态核对里要求它**把每一处 `_log(`/`_host.SetStatus` 按线程分类**（UI 线程经 BeginInvoke vs 后台线程），
+  并明说"后台线程上直接写 `_log` 就是 Critical"。
+Task 8: **控制方加了一项计划外的要求（有明确理由）**：Task 8 原本**没有任何可离线测的逻辑**——
+  它的验证只剩"能编译" + 一场今天做不了的真机演练，对一个最大且最不可验证的任务来说太薄。
+  而本项目有现成先例（`DeviceLauncher.ParseDisplaySize`/`ParseWxH`/`ParseRotation` 都是**纯解析函数 + 用例**）。
+  故要求把 `DeviceVisible()` 拆成 `public static bool ParseDeviceVisible(string adbOutput)` + 一个薄 adb 调用，
+  并补 5 条用例（`agent-logic` 24 → **29**）：
+  **D1 是最关键的一条**——只给 `"List of devices attached\n\n"` 表头时必须返回 **false**，
+  因为表头含有 "devices" 字样，**任何 `Contains("device")` 式的粗判都会把空列表误判成"有设备"**，
+  而本任务整条分级升级都建立在这个判据上（误判 ⇒ 永远不会升级 ⇒ 自愈形同虚设）。
+  D3/D4 钉住 `unauthorized`/`offline` **必须算不可用**（它们含 "device" 的子串风险低但仍需钉），
+  D5 钉 null/空串不崩。
+  **代价（若判错）**：多约 10 行重构 + 5 条用例；换来的是这个最大任务至少有一处真正的机器验证。
