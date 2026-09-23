@@ -418,3 +418,40 @@ Task 4: minor (deferred): 对二进制不可精确表示的因素（0.2、0.7）
   （double 舍入），且没有用例钉住非二进制可表示的因素。余量从不丢弃故误差有界在 1 像素内并自闭合，
   纯装饰性观察。
 Task 4: **complete**（提交 `d7099a0` + `c0adf03`，review clean）。
+
+## 执行记录 · Task 5
+
+Task 5: dispatched implementer (**sonnet**) at BASE **1cf954f**。除 Task 1–4 的接口事实外，派发里
+  特意**把计划文字换成了我亲自核过的源码语义**（因为这一步的边界算术错一位就是"入口永远不可达"
+  或"回程方向反了"这类静默失效）：
+  - `OnIdleMove` 的 `cursorY >= _edgeBottom` 判定 ⇒ **`edgeBottom` 是开区间**，传 `SM_CYVIRTUALSCREEN` 正确；
+  - 右侧入口是 `cursorX >= _edgeX` 且桌面 3840 时光标最远到 3839 ⇒ **`edgeX = screenW - 1`**；
+  - 左侧入口是 `cursorX <= _edgeX` ⇒ **`edgeX = 0`**；安全带左右对称（左用 `cursorX > _edgeX + 12`）。
+  另明确：`EdgeTracker` 里 `_phoneW/_phoneH` **本来就是非 readonly**（`SetPhoneSize` 会改它们），
+  **只有四个** edge 字段需要去掉 `readonly` —— 免得实现者按"四个字段"的字面去找错对象。
+Task 5: 派发里点名那条**为什么不许重建 tracker**：`EnterTakeover`/`LeaveTakeover` 的订阅挂在对象上，
+  重建会**静默丢订阅**。要求实现者不得"简化"成重建。
+Task 5: 要求实现者**用读代码而不是假设**的方式自查左右镜像：`SetEdge` 之后，左侧的入口点、
+  安全带、比例映射（`phoneX = _phoneW - 1`）与回程累积是否都是右侧的严格镜像；
+  若哪条 L 用例只是"碰巧通过"，要说出来。
+Task 5: R11 继续生效（不许启动 exe）；**A3（接管中旋转时邻接边是否翻转）的真机横竖屏判据
+  随本任务的 Step 8 一并移交用户**，并入那一次汇总的真机会话。
+
+Task 5: implementer **DONE_WITH_CONCERNS** — commit **821fa8f**（3 文件 +154/−14）。
+  edge-tracker `TOTAL: pass=24 fail=0`（15 + 9 条 L）、scancode-map `45/45`、agent-logic `pass=18`；
+  build 零警告；`Program.cs` **298 → 324**（≤360）；`EdgeTracker.cs` 175。
+Task 5: **concern 1 又是计划里的真 bug（值得记）**：我给 L4/L5 写的 harness 代码**漏了
+  `c.SetPosition(3199, 1068)`** —— 入屏后 `CursorModel` 仍停在初值 (0,0)，而左挂入屏点是 x=3199，
+  于是 4 条用例失败（`pass=20 fail=4`）。实现者补上这句后转绿。
+  **它另指出一件更值得记的事**：右侧 T 用例之所以不需要这句，**只是碰巧**——入屏点 x=0 恰好等于
+  `CursorModel` 的初值；而 `Program.cs` 在 `EnterTakeover` 里是**真的**做了 `Reset()` + `SetPosition(px,py)`。
+  计划正文已就地修正（L4/L5 各补一句 `c.SetPosition(3199, 1068)` 并注明原因）。
+  **教训**：harness 必须复刻接线顺序，不能依赖"初值刚好对"——这与阶段二 T1 用 `cursorX=3840`
+  那个不可达坐标是同一类错（"用实现者的心智模型当测试输入"）。
+Task 5: minor (deferred): 既有右侧 T 用例同样依赖"初值刚好等于入屏点"这一巧合。
+  它们目前是正确的，但脆弱：若哪天 `CursorModel` 的初值变了（或入屏点变了），T 用例会静默变成
+  在测别的东西。可考虑给 T 用例也补显式 `SetPosition`。交终审 triage。
+Task 5: concern 2（`SetEdge` 无边界守卫）：调用方都传推导/守卫过的值，`OnIdleMove` 对垃圾边界
+  也能安全退化（不会崩、只会判不出边缘）。实现者未采取行动，交审查者判定。
+Task 5: concern 3（agent-logic 是 18 不是简报写的 16）：属 Task 3 加 C9/C10 后的账目漂移，与本事无关。
+Task 5: review package → `review-1cf954f..821fa8f.diff`（1 commit —— 实现者只有一个提交，无簿记修正需求）。

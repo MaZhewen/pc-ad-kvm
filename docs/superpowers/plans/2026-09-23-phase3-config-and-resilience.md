@@ -1481,6 +1481,10 @@ EOF
             int lv = 0;
             t.LeaveTakeover += delegate { lv++; };
             t.OnIdleMove(-5, 0, 0, 540);            // 进接管，_lastVx = 3199
+            c.SetPosition(3199, 1068);              // ⚠️ 必须显式定位：Program.cs 在 EnterTakeover 里
+                                                    // 做的是 Reset() + SetPosition(px,py)，
+                                                    // 而 CursorModel 的初值是 (0,0)。
+                                                    // 初稿漏了这一句 → 4 条 L 用例失败。
             Feed(t, c, 1, 0);                       // 入口处向右抖 1 mickey
             Check("L4", t.Current == KvmState.Takeover && lv == 0 && t.BackPush == 1,
                 "state=" + t.Current + " leave=" + lv + " backPush=" + t.BackPush
@@ -1495,6 +1499,7 @@ EOF
             int lv = 0;
             t.LeaveTakeover += delegate { lv++; };
             t.OnIdleMove(-5, 0, 0, 540);            // 进接管，vx=3199
+            c.SetPosition(3199, 1068);              // 同上：必须显式定位（初稿漏了，L5 会失败）
             Feed(t, c, -120, 0);                    // 往屏内走
             Check("L5a", t.Current == KvmState.Takeover && c.X == 3079,
                 "state=" + t.Current + " vx=" + c.X + " (expect Takeover,3079)");
