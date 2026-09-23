@@ -1,0 +1,152 @@
+# Review package: 4ea5d21..c2e0dbf
+
+## Commits
+c2e0dbf fix(agent): 修审查 Important x2 —— edgeX 改为可达末列 3839、回程方向判定改用原始增量
+
+## Files changed
+ src/agent/EdgeTracker.cs | 19 +++++++++++++------
+ src/agent/Program.cs     | 10 +++++++---
+ 2 files changed, 20 insertions(+), 9 deletions(-)
+
+## Diff
+diff --git a/src/agent/EdgeTracker.cs b/src/agent/EdgeTracker.cs
+index a1f9eaf..dd0aa17 100644
+--- a/src/agent/EdgeTracker.cs
++++ b/src/agent/EdgeTracker.cs
+@@ -4,35 +4,39 @@ namespace PcKvm
+ {
+     public enum KvmState { Idle, Takeover }
+ 
+     /// <summary>
+     /// 边缘跨越状态机与坐标映射。
+     /// 只在 IDLE 态读真实光标位置（此时未被 ClipCursor 冻结）；进入 TAKEOVER 后 PC 光标不再可用，
+     /// 一切位置都由 CursorModel 承担。
+     /// </summary>
+     public class EdgeTracker
+     {
+-        readonly int _edgeX;            // 触发边界的 x（屏幕像素）
++        readonly int _edgeX;            // 触发侧最外侧有效像素列的 x（右挂 = 3839，左挂 = 0）。
++                                        // 约定：不是"边界外那条虚线"，而是光标真实可达的最后一列——
++                                        // Windows 把光标钳在最后一列内，GetCursorPos 永远到不了 3840。
++                                        // 左右两侧在此约定下天然对称（atEdge/安全带判定无需分侧特判）。
+         readonly int _edgeTop;
+         readonly int _edgeBottom;
+         int _phoneW;                    // 可变：旋转/尺寸变化时由 SetPhoneSize 更新
+         int _phoneH;
+         readonly bool _phoneRight;      // true = 手机在 PC 右侧（此时从手机左边缘入屏）
+ 
+         public KvmState Current { get; private set; }
+         public bool Armed { get; private set; }   // 回程冷却：离开边缘安全带后才重新武装
+ 
+         public event Action<short, short> EnterTakeover;
+         public event Action LeaveTakeover;
+ 
+         /// <summary>phoneW/phoneH 为占位初值（竖屏 2136x3200），非权威常量；
+-        /// 真值在连接后首次鼠标移动、及每次旋转变化时经 SetPhoneSize 灌入（Task 5B 几何轮询）。</summary>
++        /// 真值在连接后首次鼠标移动、及每次旋转变化时经 SetPhoneSize 灌入（Task 5B 几何轮询）。
++        /// edgeX 约定：触发侧最外侧有效像素列的 x（右挂传 3839，左挂传 0），见字段注释。</summary>
+         public EdgeTracker(int edgeX, int edgeTop, int edgeBottom,
+                            int phoneW, int phoneH, bool phoneRight)
+         {
+             _edgeX = edgeX;
+             _edgeTop = edgeTop;
+             _edgeBottom = edgeBottom;
+             _phoneW = phoneW;
+             _phoneH = phoneH;
+             _phoneRight = phoneRight;
+             Current = KvmState.Idle;
+@@ -83,30 +87,33 @@ namespace PcKvm
+             if (phoneY < 0) phoneY = 0;
+             if (phoneY > _phoneH - 1) phoneY = _phoneH - 1;
+             int phoneX = _phoneRight ? 0 : _phoneW - 1;
+ 
+             Current = KvmState.Takeover;
+             Armed = false;
+             Action<short, short> h = EnterTakeover;
+             if (h != null) h((short)phoneX, (short)phoneY);
+         }
+ 
+-        /// <summary>TAKEOVER 态下、每次鼠标事件调用，传入游标模型算出的实际增量。</summary>
+-        public void OnTakeoverMove(int actualDx, int actualDy, int vx, int vy)
++        /// <summary>TAKEOVER 态下、每次鼠标事件调用。rawDx/rawDy 为原始（未钳制）增量，
++        /// 表达用户意图；CursorModel 钳制后的增量表达实际位移，回程判定要的是前者——
++        /// 入口处虚拟光标在 x=0，NextDx 对负增量恒钳成 0，用钳后值判定会让"刚进去就推回"
++        /// 永远无法离开。vx/vy 为虚拟光标当前坐标。</summary>
++        public void OnTakeoverMove(int rawDx, int rawDy, int vx, int vy)
+         {
+             if (Current != KvmState.Takeover) return;
+ 
+             // 回程判定：虚拟光标撞到与 PC 相邻的那条边
+             bool backAtEdge = _phoneRight ? vx <= 0 : vx >= _phoneW - 1;
+             if (!backAtEdge) return;
+ 
+-            // 必须仍在继续往外推，否则光标停在边上就会立刻回程
+-            bool pushingBack = _phoneRight ? actualDx < 0 : actualDx > 0;
++            // 必须仍在继续往外推（用原始增量=用户意图），否则光标停在边上就会立刻回程
++            bool pushingBack = _phoneRight ? rawDx < 0 : rawDx > 0;
+             if (!pushingBack) return;
+ 
+             Current = KvmState.Idle;
+             Armed = false;          // 回到 IDLE 后先解除武装，等光标离开安全带
+             Action h = LeaveTakeover;
+             if (h != null) h();
+         }
+     }
+ }
+diff --git a/src/agent/Program.cs b/src/agent/Program.cs
+index 07f63f4..568fa9f 100644
+--- a/src/agent/Program.cs
++++ b/src/agent/Program.cs
+@@ -66,23 +66,25 @@ namespace PcKvm
+                     "PC-KVM", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                 return;
+             }
+ 
+             // 阶段骨架：只把事件落到日志，后续任务接管这两个事件
+             int mc = 0, kc = 0;
+             CursorModel cursor = null;
+ 
+             // 声明必须早于 ri.MouseMoved 订阅（C# 局部变量不能前向引用——Task 4 踩过）
+             double sensitivity = 1.0;
+-            // 目标机几何：手机挂在 DISPLAY1（1920,0,1920x1080）的右侧，故边界 x = 3840
++            // 目标机几何：手机挂在 DISPLAY1（1920,0,1920x1080）的右侧。
++            // edgeX 约定 = 触发侧最外侧有效像素列：3840x1080 桌面上光标最远只能到 3839
++            //（Windows 钳制），传 3840 会让入口条件永远不可达。
+             EdgeTracker tracker = new EdgeTracker(
+-                edgeX: 3840, edgeTop: 0, edgeBottom: 1080,
++                edgeX: 3839, edgeTop: 0, edgeBottom: 1080,
+                 phoneW: 2136, phoneH: 3200, phoneRight: true);   // 占位初值，真值经 SetPhoneSize 灌入
+ 
+             tracker.EnterTakeover += delegate(short px, short py)
+             {
+                 log.WriteLine("# ENTER takeover at phone(" + px + "," + py + ")");
+                 transport.Send(Protocol.EncodeHome());
+                 cursor.Reset();
+                 cursor.SetPosition(px, py);
+                 transport.Send(Protocol.EncodeEnter(px, py));
+             };
+@@ -119,21 +121,23 @@ namespace PcKvm
+                         POINT p;
+                         GetCursorPos(out p);
+                         tracker.OnIdleMove(e.Dx, e.Dy, p.X, p.Y);
+                     }
+                     else
+                     {
+                         short sdx = cursor.NextDx((int)(e.Dx * sensitivity));
+                         short sdy = cursor.NextDy((int)(e.Dy * sensitivity));
+                         if (sdx != 0 || sdy != 0)
+                             transport.Send(Protocol.EncodeMove(sdx, sdy));
+-                        tracker.OnTakeoverMove(sdx, sdy, cursor.X, cursor.Y);
++                        // 用原始增量判定回程方向（用户意图）；钳制后的 sdx 在 x=0 处
++                        // 对负增量恒为 0，会让"刚入屏就推回"永远无法离开
++                        tracker.OnTakeoverMove(e.Dx, e.Dy, cursor.X, cursor.Y);
+                     }
+                 }
+ 
+                 short wheel = (short)(e.WheelDelta / 120);   // Windows 一格 = 120，HID 一格 = 1
+                 if (wheel != 0) transport.Send(Protocol.EncodeScroll((short)0, wheel));
+ 
+                 if (e.ButtonFlags != 0)
+                 {
+                     EmitButton(transport, e.ButtonFlags, 0x0001, 1);   // 左
+                     EmitButton(transport, e.ButtonFlags, 0x0004, 2);   // 右

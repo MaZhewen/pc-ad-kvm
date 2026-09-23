@@ -1,0 +1,252 @@
+diff --git a/src/agent/EdgeTracker.cs b/src/agent/EdgeTracker.cs
+index 792cfe4..37b0657 100644
+--- a/src/agent/EdgeTracker.cs
++++ b/src/agent/EdgeTracker.cs
+@@ -21,6 +21,19 @@ namespace PcKvm
+         int _phoneH;
+         readonly bool _phoneRight;      // true = 手机在 PC 右侧（此时从手机左边缘入屏）
+ 
++        // 回程外推的累积量（mickeys）。**必须累积越过阈值**才算"用户想回 PC"，
++        // 不能看单次增量符号：真机实测入屏瞬间虚拟光标就在 x=0（= 与 PC 相邻的那条边），
++        // 此时任何一次 rawDx=-1 的抖动都会满足"在边缘且向外推"，接管寿命 0–6 秒。
++        int _backPush;
++        // 上一次事件后的虚拟光标 x。用来区分「从屏内滑到边界」与「在边界上继续外推」：
++        // 前者是到达边界，不应计入外推；后者才是"越过边界"的回程意图。
++        int _lastVx;
++
++        /// <summary>回程外推阈值（mickeys）。一格的物理位移约 1 像素，
++        /// 40 相当于鼠标移动约 1 厘米——远大于抖动（实测抖动｜增量｜≤ 8），
++        /// 又小到用户在边界上"再推一下"即可触发。</summary>
++        const int BackPushThreshold = 40;
++
+         public KvmState Current { get; private set; }
+         public bool Armed { get; private set; }   // 回程冷却：离开边缘安全带后才重新武装
+ 
+@@ -56,8 +69,12 @@ namespace PcKvm
+         {
+             Current = KvmState.Idle;
+             Armed = false;
++            _backPush = 0;
+         }
+ 
++        /// <summary>上一次回程判定所累积的外推量（mickeys），供日志记录。</summary>
++        public int BackPush { get { return _backPush; } }
++
+         /// <summary>IDLE 态下、每次鼠标事件调用。cursorX/Y 为真实光标位置。</summary>
+         public void OnIdleMove(int dx, int dy, int cursorX, int cursorY)
+         {
+@@ -97,6 +114,8 @@ namespace PcKvm
+ 
+             Current = KvmState.Takeover;
+             Armed = false;
++            _backPush = 0;
++            _lastVx = phoneX;   // 入屏瞬间虚拟光标就落在这条"与 PC 相邻"的边上
+             Action<short, short> h = EnterTakeover;
+             if (h != null) h((short)phoneX, (short)phoneY);
+         }
+@@ -104,18 +123,33 @@ namespace PcKvm
+         /// <summary>TAKEOVER 态下、每次鼠标事件调用。rawDx/rawDy 为原始（未钳制）增量，
+         /// 表达用户意图；CursorModel 钳制后的增量表达实际位移，回程判定要的是前者——
+         /// 入口处虚拟光标在 x=0，NextDx 对负增量恒钳成 0，用钳后值判定会让"刚进去就推回"
+-        /// 永远无法离开。vx/vy 为虚拟光标当前坐标。</summary>
++        /// 永远无法离开。vx/vy 为虚拟光标当前坐标（已由调用方按本次增量更新）。
++        ///
++        /// 回程需要**累积越过阈值**，见 BackPush 与 BackPushThreshold 的注释：
++        /// 单次增量的符号不足以判定意图，否则入屏瞬间的 -1 抖动就会把用户踢回 PC。</summary>
+         public void OnTakeoverMove(int rawDx, int rawDy, int vx, int vy)
+         {
+             if (Current != KvmState.Takeover) return;
+ 
+-            // 回程判定：虚拟光标撞到与 PC 相邻的那条边
+-            bool backAtEdge = _phoneRight ? vx <= 0 : vx >= _phoneW - 1;
+-            if (!backAtEdge) return;
+-
+-            // 必须仍在继续往外推（用原始增量=用户意图），否则光标停在边上就会立刻回程
+-            bool pushingBack = _phoneRight ? rawDx < 0 : rawDx > 0;
+-            if (!pushingBack) return;
++            bool atEdge = _phoneRight ? vx <= 0 : vx >= _phoneW - 1;
++            bool wasAtEdge = _phoneRight ? _lastVx <= 0 : _lastVx >= _phoneW - 1;
++            _lastVx = vx;
++
++            // 两种情况都不算外推：光标还在屏内（含"本次事件刚刚扫到边界"——
++            // 那是走到边界，不是越过边界）；或方向朝屏内（抖动/反向）。
++            if (!atEdge || !wasAtEdge) { _backPush = 0; return; }
++
++            int outward = _phoneRight ? -rawDx : rawDx;   // >0 = 朝 PC 方向推
++            // 纯纵向/静止事件（outward == 0）**既不累积也不清零**：这类事件很常见
++            //（日志里 `dx=0 dy=N` 的采样行大量存在——斜推、高回报率鼠标、手腕横移时分包），
++            // 若拿它清零，用户斜着往 PC 方向推时累积量会被反复打散，表现为"回不去"，
++            // 那比"退得太容易"更糟。反向增量才清零（正常接线下反向会先把光标带离边界，
++            // 这里是防御性兜底）。
++            if (outward < 0) { _backPush = 0; return; }
++            if (outward == 0) return;
++
++            _backPush += outward;
++            if (_backPush < BackPushThreshold) return;
+ 
+             Current = KvmState.Idle;
+             Armed = false;          // 回到 IDLE 后先解除武装，等光标离开安全带
+diff --git a/src/agent/Program.cs b/src/agent/Program.cs
+index 8a7bc1f..5056e0f 100644
+--- a/src/agent/Program.cs
++++ b/src/agent/Program.cs
+@@ -100,7 +100,9 @@ namespace PcKvm
+             {
+                 supp.Release();
+                 host.SetStatus("IDLE");
+-                log.WriteLine("# LEAVE takeover");
++                // 回程外推累积量：正常回程应 >= 阈值(40)；若日志里出现很小的值，
++                // 说明仍有未被阈值挡住的回程路径
++                log.WriteLine("# LEAVE takeover（回程外推累积 " + tracker.BackPush + "）");
+                 transport.Send(Protocol.EncodeLeave());
+             };
+             supp.ForegroundLost += delegate
+@@ -156,6 +158,13 @@ namespace PcKvm
+                 // 此时转发会在手机光标停留处产生误点击/误滚动（既有缺陷，Ruling 27）
+                 if (cursor != null && tracker.Current == KvmState.Takeover)
+                 {
++                    // 接管期的按钮事件**不抽样**记录：MOUSE 行是每 50 事件一条（2% 采样），
++                    // 而一次点击只有 2 个事件，几乎必然被漏掉——本项目正因此无法证伪
++                    // "点击导致前台被抢"这个假设。按钮事件本身很稀疏，全记不构成负担。
++                    if ((e.ButtonFlags & ~RawInput.RI_MOUSE_WHEEL) != 0)
++                        log.WriteLine("# 接管中按钮 flags=0x" + e.ButtonFlags.ToString("X4")
++                            + " phone(" + cursor.X + "," + cursor.Y + ")");
++
+                     short wheel = (short)(e.WheelDelta / 120);   // Windows 一格 = 120，HID 一格 = 1
+                     if (wheel != 0) transport.Send(Protocol.EncodeScroll((short)0, wheel));
+ 
+diff --git a/src/agent/Suppressor.cs b/src/agent/Suppressor.cs
+index 519e517..0adab7d 100644
+--- a/src/agent/Suppressor.cs
++++ b/src/agent/Suppressor.cs
+@@ -17,9 +17,14 @@ namespace PcKvm
+         [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+         [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+         [DllImport("user32.dll")] static extern bool AttachThreadInput(uint attach, uint attachTo, bool fAttach);
+-        [DllImport("user32.dll")] static extern bool ClipCursor(ref RECT r);
++        // SetLastError = true 是必须的：没有它，Marshal.GetLastWin32Error() 读到的是
++        // 上一次"声明了 SetLastError 的"调用留下的值，下面那些 `err=` 日志会打出垃圾数字——
++        // 本项目已多次栽在"诊断仪器说谎"上（Measure-Object -Line、2% 采样、ps -A）。
++        [DllImport("user32.dll", SetLastError = true)] static extern bool ClipCursor(ref RECT r);
+         [DllImport("user32.dll")] static extern bool ClipCursor(IntPtr none);
+         [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
++        [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
++        [DllImport("user32.dll", SetLastError = true)] static extern bool GetWindowRect(IntPtr h, out RECT r);
+         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+         static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+ 
+@@ -32,6 +37,11 @@ namespace PcKvm
+         readonly Action<string> _log;
+         IntPtr _prevForeground = IntPtr.Zero;
+ 
++        // 抑制期间光标的真实位置被搬到了状态条上，退出时必须搬回去，
++        // 否则每次退出接管 PC 光标都会留在左上角（相对旧行为的 UX 回归）
++        int _savedX, _savedY;
++        bool _hasSavedCursor;
++
+         public bool IsEngaged { get; private set; }
+         public event Action ForegroundLost;
+ 
+@@ -76,12 +86,44 @@ namespace PcKvm
+ 
+             POINT c;
+             GetCursorPos(out c);
++
++            // 钳制区必须是**我们自己的窗口**，不能是"进接管前光标所在的那个像素"。
++            // 旧写法把光标钳在 (3839,y)——屏幕最右侧那一列，而本窗口在 (0,0) 220x28。
++            // 鼠标点击会送给**光标下**的窗口并把它激活，于是接管期每一次点击都会
++            // 激活该像素下的窗口 → 我们丢前台 → 250ms 守卫立刻解除抑制。
++            // 真机实测：8 次「前台被抢走」、接管寿命 0–6 秒，用户报"点一下就回 PC"、
++            // 且 20 次接管里 0 次成功转发按键（都被踢出后才打字）。
++            // 钳进自家置顶状态条后，点击落在我们自己窗口上，前台保持不变。
+             RECT r;
+-            r.Left = c.X; r.Top = c.Y; r.Right = c.X + 1; r.Bottom = c.Y + 1;
++            if (!GetWindowRect(_own, out r))
++            {
++                // err 必须在任何其它 Win32 调用之前取——SetForegroundWindow 会覆盖 last-error
++                int err = Marshal.GetLastWin32Error();
++                GiveBackForeground();
++                _log("# 取本窗口矩形失败 err=" + err + "，不锁光标");
++                return false;
++            }
++            r.Left += 1; r.Top += 1; r.Right -= 1; r.Bottom -= 1;   // 内缩 1px，避免压着边框
++            if (r.Right - r.Left < 2 || r.Bottom - r.Top < 2)
++            {
++                int rw = r.Right - r.Left, rh = r.Bottom - r.Top;
++                GiveBackForeground();
++                _log("# 本窗口矩形过小(" + rw + "x" + rh + ")，不锁光标");
++                return false;
++            }
++
++            _savedX = c.X; _savedY = c.Y;
++            _hasSavedCursor = true;
++            // 显式把光标搬进钳制区中心，不依赖 ClipCursor 的隐式搬移行为
++            SetCursorPos((r.Left + r.Right) / 2, (r.Top + r.Bottom) / 2);
++
+             bool clipped = ClipCursor(ref r);
++            // IsEngaged 必须在 _log 之前置位：日志写入若抛异常，光标已被钳住而
++            // IsEngaged 仍为 false，守卫定时器（!IsEngaged 时提前返回）就被废掉了
++            //（Task 7 审查 Minor A1，合并前必修）。
++            IsEngaged = true;
+             _log(clipped ? "# 抑制已生效" : "# ClipCursor 失败 err=" + Marshal.GetLastWin32Error());
+ 
+-            IsEngaged = true;
+             return true;
+         }
+ 
+@@ -90,6 +132,13 @@ namespace PcKvm
+         {
+             ClipCursor(IntPtr.Zero);
+ 
++            if (_hasSavedCursor)
++            {
++                // 把光标从状态条搬回进接管前的真实位置
++                SetCursorPos(_savedX, _savedY);
++                _hasSavedCursor = false;
++            }
++
+             if (!IsEngaged) return;
+             IsEngaged = false;
+ 
+@@ -98,16 +147,38 @@ namespace PcKvm
+             _prevForeground = IntPtr.Zero;
+         }
+ 
+-        /// <summary>由心跳线程定时调用：前台被抢走（UAC 安全桌面、锁屏等）时立即放弃抑制。</summary>
++        /// <summary>由 UI 线程的 guard 定时器（250ms）调用：前台被抢走（UAC 安全桌面、锁屏、
++        /// 点击激活了别的窗口等）时立即放弃抑制。**必须是 UI 线程**——ForegroundLost 处理器
++        /// 会碰状态条控件，跨线程调用会抛异常（Task 7 审查 Minor 2）。</summary>
+         public void CheckForeground()
+         {
+             if (!IsEngaged) return;
+-            if (GetForegroundWindow() == _own) return;
++            IntPtr now = GetForegroundWindow();
++            if (now == _own) return;
+ 
+-            _log("# 前台被抢走，强制解除抑制");
++            // 顺序要紧：**先解锁、再让状态机放弃、最后才取证写日志。**
++            // 理由：_log 是 AutoFlush 的 StreamWriter（磁盘满/被占用会抛 IOException），
++            // TitleOf 的 GetWindowText 是**同步跨进程 SendMessage**（目标窗口挂死则阻塞 UI 线程）。
++            // 这两者若排在 Release() 之前，一旦出事就会让光标留在钳住状态、守卫定时器随后也失效
++            // ——正是本项目定义为最高风险的那类失效（Task 7 审查 C1/A1 同一类）。
+             Release();
+             Action h = ForegroundLost;
+             if (h != null) h();
++
++            // 抢走者的标题：真机上无法分辨是点击激活了别的窗口、还是第三方程序夺前台，
++            // 打出标题即可一次定位（本项目曾有 2% 采样率日志导致无法证伪假设的教训）。
++            // now 是 Release 之前抓的句柄，仍然有效。
++            _log("# 前台被抢走，强制解除抑制（抢走者：" + TitleOf(now) + "）");
++        }
++
++        /// <summary>已夺取前台、但后续步骤失败时回滚：把前台还给用户原来的窗口。
++        /// 不回滚会把键盘扣在本程序的状态条上（EnterTakeover 的调用方在 Engage 返回 false 时
++        /// 只 AbortTakeover、不 Release），用户得自己点别处才能恢复。</summary>
++        void GiveBackForeground()
++        {
++            if (_prevForeground != IntPtr.Zero)
++                SetForegroundWindow(_prevForeground);
++            _prevForeground = IntPtr.Zero;
+         }
+ 
+         static string TitleOf(IntPtr h)

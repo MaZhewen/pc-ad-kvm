@@ -1,0 +1,304 @@
+# Review package: a57081b..37e4542
+
+## Commits
+37e4542 feat: 推角落归零 —— 修复 UHID 光标位置跨设备重建持续存在导致的模型错位
+
+## Files changed
+ src/agent/CursorModel.cs   | 63 ++++++++++++++++++++++++++++++++++++++++++++++
+ src/agent/Program.cs       | 18 ++++++++++++-
+ src/agent/Protocol.cs      |  7 ++++++
+ src/injector/Injector.java | 10 +++++++-
+ 4 files changed, 96 insertions(+), 2 deletions(-)
+
+## Diff
+diff --git a/src/agent/CursorModel.cs b/src/agent/CursorModel.cs
+new file mode 100644
+index 0000000..61aabeb
+--- /dev/null
++++ b/src/agent/CursorModel.cs
+@@ -0,0 +1,63 @@
++namespace PcKvm
++{
++    /// <summary>
++    /// PC 端持有的虚拟光标（坐标系 = 手机屏幕像素）。
++    /// 职责：把任意目标增量钳制成"不会越界"的实际发送量，并同步更新自身位置。
++    /// 之所以要钳制：设备侧的系统光标会停在屏幕边缘，若我们照发全额增量，两边就会越走越远。
++    /// </summary>
++    public class CursorModel
++    {
++        readonly int _w;
++        readonly int _h;
++
++        public int X { get; private set; }
++        public int Y { get; private set; }
++
++        public CursorModel(int phoneW, int phoneH)
++        {
++            _w = phoneW;
++            _h = phoneH;
++            X = 0;
++            Y = 0;
++        }
++
++        /// <summary>归零。必须在每次进入接管、且设备侧已执行 HOME 之后调用。</summary>
++        public void Reset()
++        {
++            X = 0;
++            Y = 0;
++        }
++
++        /// <summary>直接定位（用于跨越入屏）。不发送任何东西，只改模型。</summary>
++        public void SetPosition(int x, int y)
++        {
++            X = Clamp(x, 0, _w - 1);
++            Y = Clamp(y, 0, _h - 1);
++        }
++
++        /// <summary>返回实际应发送的 dx（已钳制到不越界），并按它更新模型。</summary>
++        public short NextDx(int want)
++        {
++            int nx = Clamp(X + want, 0, _w - 1);
++            int actual = nx - X;
++            X = nx;
++            return (short)actual;
++        }
++
++        /// <summary>返回实际应发送的 dy（已钳制到不越界），并按它更新模型。</summary>
++        public short NextDy(int want)
++        {
++            int ny = Clamp(Y + want, 0, _h - 1);
++            int actual = ny - Y;
++            Y = ny;
++            return (short)actual;
++        }
++
++        static int Clamp(int v, int lo, int hi)
++        {
++            if (v < lo) return lo;
++            if (v > hi) return hi;
++            return v;
++        }
++    }
++}
+diff --git a/src/agent/Program.cs b/src/agent/Program.cs
+index e496294..5c9ca6e 100644
+--- a/src/agent/Program.cs
++++ b/src/agent/Program.cs
+@@ -51,28 +51,42 @@ namespace PcKvm
+             Transport transport = new Transport(DeviceLauncher.Port);
+             if (!transport.Start())
+             {
+                 MessageBox.Show("TCP 端口 " + DeviceLauncher.Port + " 监听失败，程序退出。",
+                     "PC-KVM", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                 return;
+             }
+ 
+             // 阶段骨架：只把事件落到日志，后续任务接管这两个事件
+             int mc = 0, kc = 0;
++            CursorModel cursor = null;
++            bool cursorResetPending = false;
+             ri.MouseMoved += delegate(RawMouseEvent e)
+             {
+                 mc++;
+                 if (mc % 50 == 0)   // 降频，避免日志爆炸
+                     log.WriteLine("MOUSE dx=" + e.Dx + " dy=" + e.Dy
+                         + " btn=0x" + e.ButtonFlags.ToString("X4") + " wheel=" + e.WheelDelta);
+ 
+-                transport.Send(Protocol.EncodeMove((short)e.Dx, (short)e.Dy));
++                if (cursor != null)
++                {
++                    if (cursorResetPending)
++                    {
++                        transport.Send(Protocol.EncodeHome());
++                        cursor.Reset();
++                        cursorResetPending = false;
++                    }
++                    short sdx = cursor.NextDx(e.Dx);
++                    short sdy = cursor.NextDy(e.Dy);
++                    if (sdx != 0 || sdy != 0)
++                        transport.Send(Protocol.EncodeMove(sdx, sdy));
++                }
+ 
+                 short wheel = (short)(e.WheelDelta / 120);   // Windows 一格 = 120，HID 一格 = 1
+                 if (wheel != 0) transport.Send(Protocol.EncodeScroll((short)0, wheel));
+ 
+                 if (e.ButtonFlags != 0)
+                 {
+                     EmitButton(transport, e.ButtonFlags, 0x0001, 1);   // 左
+                     EmitButton(transport, e.ButtonFlags, 0x0004, 2);   // 右
+                     EmitButton(transport, e.ButtonFlags, 0x0010, 3);   // 中
+                 }
+@@ -89,20 +103,22 @@ namespace PcKvm
+             {
+                 MessageBox.Show("adb 隧道/推送失败。确认手机已连接且 USB 调试已开。",
+                     "PC-KVM", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                 return;
+             }
+             System.Diagnostics.Process devProc = DeviceLauncher.Start();
+ 
+             transport.Connected += delegate
+             {
+                 log.WriteLine("# 设备已连接");
++                cursor = new CursorModel(2136, 3200);   // 目标机手机分辨率，后续任务改成从 CONFIG 协商
++                cursorResetPending = true;
+                 transport.Send(Protocol.EncodePing(1));
+             };
+             transport.Disconnected += delegate { log.WriteLine("# 设备已断开"); };
+             transport.MessageReceived += delegate(byte type, byte[] payload)
+             {
+                 if (type == Protocol.MsgPong)
+                     log.WriteLine("# PONG seq=" + Protocol.GetU32(payload, 0));
+             };
+ 
+             NotifyIcon tray = new NotifyIcon();
+diff --git a/src/agent/Protocol.cs b/src/agent/Protocol.cs
+index 7af84f2..e1b05e4 100644
+--- a/src/agent/Protocol.cs
++++ b/src/agent/Protocol.cs
+@@ -7,20 +7,21 @@ namespace PcKvm
+     {
+         public const byte MsgEnter  = 0x01;   // int16 x, int16 y
+         public const byte MsgMove   = 0x02;   // int16 dx, int16 dy
+         public const byte MsgButton = 0x03;   // uint8 btn, uint8 down
+         public const byte MsgScroll = 0x04;   // int16 dx, int16 dy
+         public const byte MsgKey    = 0x05;   // uint16 scancode, uint8 down, uint8 mods
+         public const byte MsgLeave  = 0x06;   // 无负载
+         public const byte MsgConfig = 0x07;   // uint8 edge, uint16 pcEdgeLen, uint16 phoneW, uint16 phoneH
+         public const byte MsgPing   = 0x08;   // uint32 seq
+         public const byte MsgPong   = 0x09;   // uint32 seq
++        public const byte MsgHome   = 0x0A;   // 无负载：让设备把光标硬顶到 (0,0)
+ 
+         public static byte[] EncodeEnter(short x, short y)
+         {
+             byte[] b = new byte[5];
+             b[0] = MsgEnter;
+             PutI16(b, 1, x); PutI16(b, 3, y);
+             return b;
+         }
+ 
+         public static byte[] EncodeMove(short dx, short dy)
+@@ -60,20 +61,25 @@ namespace PcKvm
+         }
+ 
+         public static byte[] EncodeConfig(byte edge, ushort pcEdgeLen, ushort phoneW, ushort phoneH)
+         {
+             byte[] b = new byte[8];
+             b[0] = MsgConfig; b[1] = edge;
+             PutU16(b, 2, pcEdgeLen); PutU16(b, 4, phoneW); PutU16(b, 6, phoneH);
+             return b;
+         }
+ 
++        public static byte[] EncodeHome()
++        {
++            return new byte[] { MsgHome };
++        }
++
+         public static byte[] EncodePing(uint seq) { return EncodeU32(MsgPing, seq); }
+         public static byte[] EncodePong(uint seq) { return EncodeU32(MsgPong, seq); }
+ 
+         static byte[] EncodeU32(byte type, uint v)
+         {
+             byte[] b = new byte[5];
+             b[0] = type;
+             PutU32(b, 1, v);
+             return b;
+         }
+@@ -85,20 +91,21 @@ namespace PcKvm
+             {
+                 case MsgEnter: return 4;
+                 case MsgMove: return 4;
+                 case MsgButton: return 2;
+                 case MsgScroll: return 4;
+                 case MsgKey: return 4;
+                 case MsgLeave: return 0;
+                 case MsgConfig: return 7;
+                 case MsgPing: return 4;
+                 case MsgPong: return 4;
++                case MsgHome: return 0;
+                 default: return -1;
+             }
+         }
+ 
+         public static short GetI16(byte[] b, int off)
+         {
+             return (short)(b[off] | (b[off + 1] << 8));
+         }
+ 
+         public static ushort GetU16(byte[] b, int off)
+diff --git a/src/injector/Injector.java b/src/injector/Injector.java
+index 0613752..b7bdc8a 100644
+--- a/src/injector/Injector.java
++++ b/src/injector/Injector.java
+@@ -3,21 +3,22 @@ import java.io.InputStream;
+ import java.io.InputStreamReader;
+ import java.io.OutputStream;
+ import java.net.InetSocketAddress;
+ import java.net.Socket;
+ 
+ public class Injector {
+ 
+     static final int PORT = 27183;
+     static final byte MSG_ENTER = 0x01, MSG_MOVE = 0x02, MSG_BUTTON = 0x03,
+                       MSG_SCROLL = 0x04, MSG_KEY = 0x05, MSG_LEAVE = 0x06,
+-                      MSG_CONFIG = 0x07, MSG_PING = 0x08, MSG_PONG = 0x09;
++                      MSG_CONFIG = 0x07, MSG_PING = 0x08, MSG_PONG = 0x09,
++                      MSG_HOME = 0x0A;
+ 
+     /** 当前按下的鼠标按钮位图（bit0 左, bit1 右, bit2 中）。 */
+     static int buttonsDown = 0;
+ 
+     public static void main(String[] args) throws Exception {
+         if (args.length > 0 && args[0].equals("--stdin")) {
+             StdinMode.run();
+             return;
+         }
+ 
+@@ -94,20 +95,26 @@ public class Injector {
+         } else if (type == MSG_PING) {
+             int seq = i32(p, 0);
+             byte[] r = new byte[5];
+             r[0] = MSG_PONG;
+             r[1] = (byte) (seq & 0xFF);
+             r[2] = (byte) ((seq >>> 8) & 0xFF);
+             r[3] = (byte) ((seq >>> 16) & 0xFF);
+             r[4] = (byte) ((seq >>> 24) & 0xFF);
+             out.write(r);
+             out.flush();
++        } else if (type == MSG_HOME) {
++            // 8 位相对轴每报告最多走 127，按屏幕尺寸算够用的次数硬顶到左上角。
++            // 3200 像素需要 ceil(3200/127)=26 次；取 40 次留余量，代价是几十毫秒。
++            for (int i = 0; i < 40; i++) {
++                dev.sendMouse((byte) buttonsDown, (byte) -127, (byte) -127, (byte) 0);
++            }
+         }
+         // MSG_ENTER / MSG_LEAVE / MSG_CONFIG 由后续任务接管
+     }
+ 
+     static int btnToBit(int btn) {
+         if (btn == 1) return 1;   // 左
+         if (btn == 2) return 2;   // 右
+         if (btn == 3) return 4;   // 中
+         return 0;
+     }
+@@ -116,20 +123,21 @@ public class Injector {
+         switch (type) {
+             case MSG_ENTER:  return 4;
+             case MSG_MOVE:   return 4;
+             case MSG_BUTTON: return 2;
+             case MSG_SCROLL: return 4;
+             case MSG_KEY:    return 4;
+             case MSG_LEAVE:  return 0;
+             case MSG_CONFIG: return 7;
+             case MSG_PING:   return 4;
+             case MSG_PONG:   return 4;
++            case MSG_HOME:   return 0;
+             default:         return -1;
+         }
+     }
+ 
+     static boolean readExact(InputStream in, byte[] buf, int n) throws Exception {
+         int got = 0;
+         while (got < n) {
+             int r = in.read(buf, got, n - got);
+             if (r <= 0) return false;
+             got += r;

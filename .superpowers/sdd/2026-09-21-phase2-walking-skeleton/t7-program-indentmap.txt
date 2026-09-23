@@ -1,0 +1,198 @@
+   1| 0|using System;
+   2| 0|using System.Drawing;
+   3| 0|using System.IO;
+   4| 0|using System.Runtime.InteropServices;
+   5| 0|using System.Windows.Forms;
+   6| 0|
+   7| 0|namespace PcKvm
+   8| 0|{
+   9| 4|/// <summary>隐藏主窗体：只作为 Raw Input 的消息宿主与托盘载体，不显示任何 UI。</summary>
+  10| 4|class MessageHost : Form
+  11| 4|{
+  12| 8|public MessageHost()
+  13| 8|{
+  14|12|FormBorderStyle = FormBorderStyle.None;
+  15|20|+ "\n程序将退出。", "PC-KVM", MessageBoxButtons.OK, MessageBoxIcon.Error);
+  16|16|return;
+  17|12|}
+  18| 0|
+  19|12|StreamWriter log = new StreamWriter(
+  20|16|Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "pc-kvm.log"),
+  21|16|true, System.Text.Encoding.UTF8);
+  22|12|log.AutoFlush = true;
+  23|12|log.WriteLine("# 启动 " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+  24| 0|
+  25|12|// transport 需在 MouseMoved 处理器之前就绪（C# 局部变量在声明点之后才可见）
+  26|12|Transport transport = new Transport(DeviceLauncher.Port);
+  27|12|if (!transport.Start())
+  28|12|{
+  29|16|MessageBox.Show("TCP 端口 " + DeviceLauncher.Port + " 监听失败，程序退出。",
+  30|20|"PC-KVM", MessageBoxButtons.OK, MessageBoxIcon.Error);
+  31|16|return;
+  32|12|}
+  33| 0|
+  34|12|// 阶段骨架：只把事件落到日志，后续任务接管这两个事件
+  35|12|int mc = 0, kc = 0;
+  36|12|CursorModel cursor = null;
+  37| 0|
+  38|12|// 声明必须早于 ri.MouseMoved 订阅（C# 局部变量不能前向引用——Task 4 踩过）
+  39|12|double sensitivity = 1.0;
+  40|12|// 目标机几何：手机挂在 DISPLAY1（1920,0,1920x1080）的右侧。
+  41|12|// edgeX 约定 = 触发侧最外侧有效像素列：3840x1080 桌面上光标最远只能到 3839
+  42|12|//（Windows 钳制），传 3840 会让入口条件永远不可达。
+  43|12|EdgeTracker tracker = new EdgeTracker(
+  44|16|edgeX: 3839, edgeTop: 0, edgeBottom: 1080,
+  45|16|phoneW: 2136, phoneH: 3200, phoneRight: true);   // 占位初值，真值经 SetPhoneSize 灌入
+  46| 0|
+  47|12|tracker.EnterTakeover += delegate(short px, short py)
+  48|12|{
+  49|16|log.WriteLine("# ENTER takeover at phone(" + px + "," + py + ")");
+  50|16|transport.Send(Protocol.EncodeHome());
+  51|16|cursor.Reset();
+  52|16|cursor.SetPosition(px, py);
+  53|16|transport.Send(Protocol.EncodeEnter(px, py));
+  54|12|};
+  55|12|tracker.LeaveTakeover += delegate
+  56|12|{
+  57|16|log.WriteLine("# LEAVE takeover");
+  58|16|transport.Send(Protocol.EncodeLeave());
+  59|12|};
+  60| 0|
+  61|12|ri.MouseMoved += delegate(RawMouseEvent e)
+  62|12|{
+  63|16|mc++;
+  64|16|if (mc % 50 == 0)
+  65|20|log.WriteLine("MOUSE dx=" + e.Dx + " dy=" + e.Dy
+  66|24|+ " btn=0x" + e.ButtonFlags.ToString("X4") + " wheel=" + e.WheelDelta);
+  67| 0|
+  68|16|// 未连接时 cursor 为 null：此时绝不能让状态机跑起来，
+  69|16|// 否则推到边缘会触发 EnterTakeover → cursor.Reset() 空引用（异常被
+  70|16|// RawInput 的 catch{} 吞掉，表现为状态机卡死在 TAKEOVER 且无任何报错）
+  71|16|if (cursor != null)
+  72|16|{
+  73|20|if (_geometryChanged)
+  74|20|{
+  75|24|_geometryChanged = false;
+  76|24|cursor.SetBounds(_phoneW, _phoneH);
+  77|24|tracker.SetPhoneSize(_phoneW, _phoneH);
+  78|24|log.WriteLine("# 几何已应用 " + _phoneW + "x" + _phoneH);
+  79|24|transport.Send(Protocol.EncodeHome());
+  80|24|cursor.Reset();
+  81|20|}
+  82| 0|
+  83|20|if (tracker.Current == KvmState.Idle)
+  84|20|{
+  85|24|POINT p;
+  86|24|GetCursorPos(out p);
+  87|24|tracker.OnIdleMove(e.Dx, e.Dy, p.X, p.Y);
+  88|20|}
+  89|20|else
+  90|20|{
+  91|24|short sdx = cursor.NextDx((int)(e.Dx * sensitivity));
+  92|24|short sdy = cursor.NextDy((int)(e.Dy * sensitivity));
+  93|24|if (sdx != 0 || sdy != 0)
+  94|28|transport.Send(Protocol.EncodeMove(sdx, sdy));
+  95|24|// 用原始增量判定回程方向（用户意图）；钳制后的 sdx 在 x=0 处
+  96|24|// 对负增量恒为 0，会让"刚入屏就推回"永远无法离开
+  97|24|tracker.OnTakeoverMove(e.Dx, e.Dy, cursor.X, cursor.Y);
+  98|20|}
+  99|16|}
+ 100| 0|
+ 101|16|short wheel = (short)(e.WheelDelta / 120);   // Windows 一格 = 120，HID 一格 = 1
+ 102|16|if (wheel != 0) transport.Send(Protocol.EncodeScroll((short)0, wheel));
+ 103| 0|
+ 104|16|if (e.ButtonFlags != 0)
+ 105|16|{
+ 106|20|EmitButton(transport, e.ButtonFlags, 0x0001, 1);   // 左
+ 107|20|EmitButton(transport, e.ButtonFlags, 0x0004, 2);   // 右
+ 108|20|EmitButton(transport, e.ButtonFlags, 0x0010, 3);   // 中
+ 109|16|}
+ 110|12|};
+ 111|12|ri.KeyChanged += delegate(RawKeyEvent e)
+ 112|12|{
+ 113|16|kc++;
+ 114|16|log.WriteLine("KEY scancode=0x" + e.Scancode.ToString("X")
+ 115|20|+ (e.IsUp ? " UP" : " DOWN"));
+ 116|12|};
+ 117| 0|
+ 118|12|string jar = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "pckvm.jar");
+ 119|12|if (!DeviceLauncher.Prepare(jar))
+ 120|12|{
+ 121|16|MessageBox.Show("adb 隧道/推送失败。确认手机已连接且 USB 调试已开。",
+ 122|20|"PC-KVM", MessageBoxButtons.OK, MessageBoxIcon.Error);
+ 123|16|return;
+ 124|12|}
+ 125|12|System.Diagnostics.Process devProc = DeviceLauncher.Start();
+ 126| 0|
+ 127|12|transport.Connected += delegate
+ 128|12|{
+ 129|16|log.WriteLine("# 设备已连接");
+ 130|16|int dw, dh;
+ 131|16|if (DeviceLauncher.QueryDisplay(out dw, out dh))
+ 132|16|{
+ 133|20|_phoneW = dw; _phoneH = dh;
+ 134|20|log.WriteLine("# 屏幕几何 " + dw + "x" + dh);
+ 135|16|}
+ 136|16|else
+ 137|16|{
+ 138|20|_phoneW = 2136; _phoneH = 3200;   // 查询失败时的保守回退
+ 139|20|log.WriteLine("# 屏幕几何查询失败，回退 " + _phoneW + "x" + _phoneH);
+ 140|16|}
+ 141|16|cursor = new CursorModel(_phoneW, _phoneH);
+ 142|16|_geometryChanged = true;   // 首次鼠标移动时消费：SetBounds + HOME 归零
+ 143|16|transport.Send(Protocol.EncodePing(1));
+ 144|12|};
+ 145|12|transport.Disconnected += delegate { log.WriteLine("# 设备已断开"); };
+ 146|12|transport.MessageReceived += delegate(byte type, byte[] payload)
+ 147|12|{
+ 148|16|if (type == Protocol.MsgPong)
+ 149|20|log.WriteLine("# PONG seq=" + Protocol.GetU32(payload, 0));
+ 150|12|};
+ 151| 0|
+ 152|12|System.Threading.Thread rotPoll = new System.Threading.Thread(delegate()
+ 153|12|{
+ 154|16|while (true)
+ 155|16|{
+ 156|20|System.Threading.Thread.Sleep(2000);
+ 157|20|if (!transport.IsConnected) continue;
+ 158|20|int w, h;
+ 159|20|if (!DeviceLauncher.QueryDisplay(out w, out h)) continue;   // 掉线时静默跳过，不刷日志
+ 160|20|if (w != _phoneW || h != _phoneH)
+ 161|20|{
+ 162|24|_phoneW = w; _phoneH = h;
+ 163|24|_geometryChanged = true;
+ 164|20|}
+ 165|16|}
+ 166|12|});
+ 167|12|rotPoll.IsBackground = true;
+ 168|12|rotPoll.Start();
+ 169| 0|
+ 170|12|NotifyIcon tray = new NotifyIcon();
+ 171|12|tray.Icon = SystemIcons.Application;
+ 172|12|tray.Text = "PC-KVM（阶段二骨架）";
+ 173|12|tray.Visible = true;
+ 174|12|MenuItem quit = new MenuItem("退出");
+ 175|12|quit.Click += delegate { Application.Exit(); };
+ 176|12|tray.ContextMenu = new ContextMenu(new MenuItem[] { quit });
+ 177| 0|
+ 178|12|Application.ApplicationExit += delegate
+ 179|12|{
+ 180|16|log.WriteLine("# 退出");
+ 181|16|tray.Visible = false;
+ 182|16|transport.Stop();
+ 183|16|DeviceLauncher.Cleanup(devProc);
+ 184|16|log.Close();
+ 185|12|};
+ 186| 0|
+ 187|12|Application.Run(host);
+ 188| 8|}
+ 189| 0|
+ 190| 8|/// <summary>把 Windows 的 down/up 位对翻译成协议的单次按钮事件。</summary>
+ 191| 8|static void EmitButton(Transport t, ushort flags, ushort downBit, byte btn)
+ 192| 8|{
+ 193|12|ushort upBit = (ushort)(downBit << 1);
+ 194|12|if ((flags & downBit) != 0) t.Send(Protocol.EncodeButton(btn, 1));
+ 195|12|else if ((flags & upBit) != 0) t.Send(Protocol.EncodeButton(btn, 0));
+ 196| 8|}
+ 197| 4|}
+ 198| 0|}

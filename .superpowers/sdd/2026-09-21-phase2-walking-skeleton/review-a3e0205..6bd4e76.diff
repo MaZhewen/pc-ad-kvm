@@ -1,0 +1,318 @@
+# Review package: a3e0205..6bd4e76
+
+## Commits
+6bd4e76 feat: 键盘支持 —— scancode 映射、修饰键状态、退出时清空按键
+
+## Files changed
+ src/agent/KeyMap.cs           | 30 +++++++++++++++++++++++++++++
+ src/agent/Program.cs          | 44 +++++++++++++++++++++++++++++++++++--------
+ src/injector/Injector.java    |  8 +++++++-
+ src/injector/KeyState.java    |  7 +++++++
+ src/injector/ScancodeMap.java | 41 +++++++++++++++++++++++++++++++++++++++-
+ 5 files changed, 120 insertions(+), 10 deletions(-)
+
+## Diff
+diff --git a/src/agent/KeyMap.cs b/src/agent/KeyMap.cs
+new file mode 100644
+index 0000000..a5092d7
+--- /dev/null
++++ b/src/agent/KeyMap.cs
+@@ -0,0 +1,30 @@
++﻿namespace PcKvm
++{
++    /// <summary>
++    /// 纯 scancode → HID 修饰位映射表。Ruling 26：Program.cs 已 315 行、红线 360，
++    /// 纯映射不进 Program.cs；独立文件也便于离线测试（本类只用内建类型，无 I/O）。
++    /// </summary>
++    public static class KeyMap
++    {
++        /// <summary>把 Windows scancode 映射为 HID 修饰位（不是普通键）。返回 0 表示不是修饰键。</summary>
++        public static byte ModifierBit(int scancode, bool isE0)
++        {
++            int mk = scancode & 0xFF;
++            if (!isE0)
++            {
++                if (mk == 0x2A) return 0x02;   // 左 Shift
++                if (mk == 0x36) return 0x20;   // 右 Shift
++                if (mk == 0x1D) return 0x01;   // 左 Ctrl
++                if (mk == 0x38) return 0x04;   // 左 Alt
++                if (mk == 0x5B) return 0x08;   // 左 Win
++            }
++            else
++            {
++                if (mk == 0x1D) return 0x10;   // 右 Ctrl
++                if (mk == 0x38) return 0x40;   // 右 Alt
++                if (mk == 0x5C) return 0x80;   // 右 Win
++            }
++            return 0;
++        }
++    }
++}
+diff --git a/src/agent/Program.cs b/src/agent/Program.cs
+index 78b869d..8a7bc1f 100644
+--- a/src/agent/Program.cs
++++ b/src/agent/Program.cs
+@@ -51,20 +51,23 @@ namespace PcKvm
+             Transport transport = new Transport(DeviceLauncher.Port);
+             if (!transport.Start())
+             {
+                 MessageBox.Show("TCP 端口 " + DeviceLauncher.Port + " 监听失败，程序退出。",
+                     "PC-KVM", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                 return;
+             }
+ 
+             // 阶段骨架：只把事件落到日志，后续任务接管这两个事件
+             int mc = 0, kc = 0;
++            // 修饰键位图（HID 键盘报告的 modifier 字节）。必须声明在 KeyChanged 订阅之前：
++            // 处理器会捕获并修改它，而 C# 局部变量不支持前向引用（Task 4 与 Task 7 都栽过）
++            byte modifiers = 0;
+             CursorModel cursor = null;
+ 
+             // 声明必须早于 ri.MouseMoved 订阅（C# 局部变量不能前向引用——Task 4 踩过）
+             double sensitivity = 1.0;
+             // 目标机几何：手机挂在 DISPLAY1（1920,0,1920x1080）的右侧。
+             // edgeX 约定 = 触发侧最外侧有效像素列：3840x1080 桌面上光标最远只能到 3839
+             //（Windows 钳制），传 3840 会让入口条件永远不可达。
+             EdgeTracker tracker = new EdgeTracker(
+                 edgeX: 3839, edgeTop: 0, edgeBottom: 1080,
+                 phoneW: 2136, phoneH: 3200, phoneRight: true);   // 占位初值，真值经 SetPhoneSize 灌入
+@@ -93,21 +96,28 @@ namespace PcKvm
+                 cursor.SetPosition(px, py);
+                 transport.Send(Protocol.EncodeEnter(px, py));
+             };
+             tracker.LeaveTakeover += delegate
+             {
+                 supp.Release();
+                 host.SetStatus("IDLE");
+                 log.WriteLine("# LEAVE takeover");
+                 transport.Send(Protocol.EncodeLeave());
+             };
+-            supp.ForegroundLost += delegate { tracker.AbortTakeover(); host.SetStatus("IDLE"); };
++            supp.ForegroundLost += delegate
++            {
++                // 与逃逸键/心跳失联同理：放弃路径必须补发 LEAVE，清手机侧 buttonsDown
++                // 与按键槽位（若连接已断，Send 是安全 no-op）
++                transport.Send(Protocol.EncodeLeave());
++                tracker.AbortTakeover();
++                host.SetStatus("IDLE");
++            };
+ 
+             ri.MouseMoved += delegate(RawMouseEvent e)
+             {
+                 mc++;
+                 if (mc % 50 == 0)
+                     log.WriteLine("MOUSE dx=" + e.Dx + " dy=" + e.Dy
+                         + " btn=0x" + e.ButtonFlags.ToString("X4") + " wheel=" + e.WheelDelta);
+ 
+                 // 未连接时 cursor 为 null：此时绝不能让状态机跑起来，
+                 // 否则推到边缘会触发 EnterTakeover → cursor.Reset() 空引用（异常被
+@@ -135,35 +145,53 @@ namespace PcKvm
+                         short sdx = cursor.NextDx((int)(e.Dx * sensitivity));
+                         short sdy = cursor.NextDy((int)(e.Dy * sensitivity));
+                         if (sdx != 0 || sdy != 0)
+                             transport.Send(Protocol.EncodeMove(sdx, sdy));
+                         // 用原始增量判定回程方向（用户意图）；钳制后的 sdx 在 x=0 处
+                         // 对负增量恒为 0，会让"刚入屏就推回"永远无法离开
+                         tracker.OnTakeoverMove(e.Dx, e.Dy, cursor.X, cursor.Y);
+                     }
+                 }
+ 
+-                short wheel = (short)(e.WheelDelta / 120);   // Windows 一格 = 120，HID 一格 = 1
+-                if (wheel != 0) transport.Send(Protocol.EncodeScroll((short)0, wheel));
+-
+-                if (e.ButtonFlags != 0)
++                // 滚轮与鼠标键只在接管期转发：IDLE 态用户是在操作 PC，
++                // 此时转发会在手机光标停留处产生误点击/误滚动（既有缺陷，Ruling 27）
++                if (cursor != null && tracker.Current == KvmState.Takeover)
+                 {
+-                    EmitButton(transport, e.ButtonFlags, 0x0001, 1);   // 左
+-                    EmitButton(transport, e.ButtonFlags, 0x0004, 2);   // 右
+-                    EmitButton(transport, e.ButtonFlags, 0x0010, 3);   // 中
++                    short wheel = (short)(e.WheelDelta / 120);   // Windows 一格 = 120，HID 一格 = 1
++                    if (wheel != 0) transport.Send(Protocol.EncodeScroll((short)0, wheel));
++
++                    if (e.ButtonFlags != 0)
++                    {
++                        EmitButton(transport, e.ButtonFlags, 0x0001, 1);   // 左
++                        EmitButton(transport, e.ButtonFlags, 0x0004, 2);   // 右
++                        EmitButton(transport, e.ButtonFlags, 0x0010, 3);   // 中
++                    }
+                 }
+             };
+             ri.KeyChanged += delegate(RawKeyEvent e)
+             {
+                 kc++;
+                 log.WriteLine("KEY scancode=0x" + e.Scancode.ToString("X")
+                     + (e.IsUp ? " UP" : " DOWN"));
++
++                byte bit = KeyMap.ModifierBit(e.Scancode, e.IsE0);
++                if (bit != 0)
++                {
++                    if (e.IsUp) modifiers &= (byte)~bit; else modifiers |= bit;
++                    // 修饰键变化也要发一条报告，否则手机侧修饰态不更新
++                    if (tracker.Current == KvmState.Takeover)
++                        transport.Send(Protocol.EncodeKey((ushort)e.Scancode, (byte)(e.IsUp ? 0 : 1), modifiers));
++                    return;
++                }
++
++                if (tracker.Current != KvmState.Takeover) return;   // IDLE 态不转发，PC 正常用
++                transport.Send(Protocol.EncodeKey((ushort)e.Scancode, (byte)(e.IsUp ? 0 : 1), modifiers));
+             };
+ 
+             string jar = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "pckvm.jar");
+             if (!DeviceLauncher.Prepare(jar))
+             {
+                 MessageBox.Show("adb 隧道/推送失败。确认手机已连接且 USB 调试已开。",
+                     "PC-KVM", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                 return;
+             }
+             System.Diagnostics.Process devProc = DeviceLauncher.Start();
+diff --git a/src/injector/Injector.java b/src/injector/Injector.java
+index b7bdc8a..4b88a2a 100644
+--- a/src/injector/Injector.java
++++ b/src/injector/Injector.java
+@@ -101,22 +101,28 @@ public class Injector {
+             r[3] = (byte) ((seq >>> 16) & 0xFF);
+             r[4] = (byte) ((seq >>> 24) & 0xFF);
+             out.write(r);
+             out.flush();
+         } else if (type == MSG_HOME) {
+             // 8 位相对轴每报告最多走 127，按屏幕尺寸算够用的次数硬顶到左上角。
+             // 3200 像素需要 ceil(3200/127)=26 次；取 40 次留余量，代价是几十毫秒。
+             for (int i = 0; i < 40; i++) {
+                 dev.sendMouse((byte) buttonsDown, (byte) -127, (byte) -127, (byte) 0);
+             }
++        } else if (type == MSG_LEAVE) {
++            // 防修饰键/鼠标键卡在按下态（遥控类软件经典 bug）：接管期间按着 Ctrl 或鼠标键
++            // 退出，不清理的话手机上会一直"按住"。PC 侧所有放弃路径都会补发 LEAVE。
++            buttonsDown = 0;
++            dev.sendMouse((byte) 0, (byte) 0, (byte) 0, (byte) 0);
++            KeyState.releaseAll(dev);
+         }
+-        // MSG_ENTER / MSG_LEAVE / MSG_CONFIG 由后续任务接管
++        // MSG_ENTER / MSG_CONFIG 由后续任务接管
+     }
+ 
+     static int btnToBit(int btn) {
+         if (btn == 1) return 1;   // 左
+         if (btn == 2) return 2;   // 右
+         if (btn == 3) return 4;   // 中
+         return 0;
+     }
+ 
+     static int payloadLength(int type) {
+diff --git a/src/injector/KeyState.java b/src/injector/KeyState.java
+index 63fae9d..cef992d 100644
+--- a/src/injector/KeyState.java
++++ b/src/injector/KeyState.java
+@@ -21,15 +21,22 @@ public class KeyState {
+         byte[] keys = new byte[6];
+         for (int i = 0; i < 6; i++) keys[i] = (byte) slots[i];
+         dev.sendKeyboard((byte) modifiers, keys);
+     }
+ 
+     static boolean contains(int usage) {
+         for (int i = 0; i < 6; i++) if (slots[i] == usage) return true;
+         return false;
+     }
+ 
++    /** 全部抬起：清修饰键与所有按键槽位，各发一条报告。 */
++    public static void releaseAll(UhidDevice dev) throws Exception {
++        modifiers = 0;
++        for (int i = 0; i < 6; i++) slots[i] = 0;
++        dev.sendKeyboard((byte) 0, new byte[6]);
++    }
++
+     static int freeSlot() {
+         for (int i = 0; i < 6; i++) if (slots[i] == 0) return i;
+         return -1;
+     }
+ }
+diff --git a/src/injector/ScancodeMap.java b/src/injector/ScancodeMap.java
+index c2266cf..d749178 100644
+--- a/src/injector/ScancodeMap.java
++++ b/src/injector/ScancodeMap.java
+@@ -1,28 +1,59 @@
+ /** Windows scancode → HID Usage ID（Keyboard/Keypad page 0x07）。 */
+ public class ScancodeMap {
+ 
+-    /** 返回 -1 表示未映射。scancode 低字节为 MakeCode。 */
++    /** 返回 -1 表示未映射。scancode 低字节为 MakeCode；E0 前缀键（低字节前带 0xE0）单走一张表。 */
+     public static int toHidUsage(int scancode) {
++        boolean e0 = (scancode & 0xE000) == 0xE000;
+         int mk = scancode & 0xFF;
++
++        if (e0) {
++            switch (mk) {
++                case 0x1C: return 0x58;   // 小键盘 Enter
++                case 0x1D: return 0xE4;   // 右 Ctrl
++                case 0x35: return 0x54;   // 小键盘 /
++                case 0x37: return 0x46;   // PrintScreen
++                case 0x38: return 0xE6;   // 右 Alt
++                case 0x47: return 0x4A;   // Home
++                case 0x48: return 0x52;   // Up
++                case 0x49: return 0x4B;   // PgUp
++                case 0x4B: return 0x50;   // Left
++                case 0x4D: return 0x4F;   // Right
++                case 0x4F: return 0x4D;   // End
++                case 0x50: return 0x51;   // Down
++                case 0x51: return 0x4E;   // PgDn
++                case 0x52: return 0x49;   // Insert
++                case 0x53: return 0x4C;   // Delete
++                case 0x5B: return 0xE3;   // 左 Win
++                case 0x5C: return 0xE7;   // 右 Win
++                case 0x5D: return 0x65;   // Menu
++                default:   return -1;
++            }
++        }
++
++        // 非 E0 表。修饰键（0x2A/0x36 左右 Shift、0x1D 左 Ctrl、0x38 左 Alt、0x5B 左 Win）
++        // 刻意不在此表：它们是报告里的修饰位而非按键槽位，由 PC 侧 KeyMap.ModifierBit
++        // 折算进 mods 字节随 MSG_KEY 下发，这里返回 -1 走"忽略"路径。
+         switch (mk) {
+             case 0x01: return 0x29;   // Esc
+             case 0x02: return 0x1E;   // 1
+             case 0x03: return 0x1F;   // 2
+             case 0x04: return 0x20;   // 3
+             case 0x05: return 0x21;   // 4
+             case 0x06: return 0x22;   // 5
+             case 0x07: return 0x23;   // 6
+             case 0x08: return 0x24;   // 7
+             case 0x09: return 0x25;   // 8
+             case 0x0A: return 0x26;   // 9
+             case 0x0B: return 0x27;   // 0
++            case 0x0C: return 0x2D;   // -
++            case 0x0D: return 0x2E;   // =
+             case 0x0E: return 0x2A;   // Backspace
+             case 0x0F: return 0x2B;   // Tab
+             case 0x10: return 0x14;   // Q
+             case 0x11: return 0x1A;   // W
+             case 0x12: return 0x08;   // E
+             case 0x13: return 0x15;   // R
+             case 0x14: return 0x17;   // T
+             case 0x15: return 0x1C;   // Y
+             case 0x16: return 0x18;   // U
+             case 0x17: return 0x0C;   // I
+@@ -48,14 +79,22 @@ public class ScancodeMap {
+             case 0x2D: return 0x1B;   // X
+             case 0x2E: return 0x06;   // C
+             case 0x2F: return 0x19;   // V
+             case 0x30: return 0x05;   // B
+             case 0x31: return 0x11;   // N
+             case 0x32: return 0x10;   // M
+             case 0x33: return 0x36;   // ,
+             case 0x34: return 0x37;   // .
+             case 0x35: return 0x38;   // /
+             case 0x39: return 0x2C;   // Space
++            case 0x3A: return 0x39;   // CapsLock
++            case 0x3B: return 0x3A; case 0x3C: return 0x3B; case 0x3D: return 0x3C;
++            case 0x3E: return 0x3D; case 0x3F: return 0x3E; case 0x40: return 0x3F;
++            case 0x41: return 0x40; case 0x42: return 0x41; case 0x43: return 0x42;
++            case 0x44: return 0x43;                       // F1-F10
++            case 0x57: return 0x44; case 0x58: return 0x45;   // F11, F12
++            case 0x45: return 0x53;   // NumLock
++            case 0x46: return 0x48;   // ScrollLock
+             default:   return -1;
+         }
+     }
+ }
