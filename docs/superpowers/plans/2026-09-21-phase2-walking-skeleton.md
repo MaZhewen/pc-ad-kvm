@@ -2610,6 +2610,9 @@ PC 侧每 1 秒发一次 PING，记录最后收到 PONG 的时间；超过 2 秒
                     {
                         log.WriteLine("# 心跳失联（" + age.ToString("F1") + "s, connected="
                                       + transport.IsConnected + "），强制解除抑制");
+                        // 与逃逸键同理：放弃路径要通知设备侧清 buttonsDown/按键槽位。
+                        // 若连接已断，Send 是安全 no-op（Transport.Send 在 _stream 为 null 时直接返回）。
+                        transport.Send(Protocol.EncodeLeave());
                         tracker.AbortTakeover();
                         supp.Release();
                         host.SetStatus("IDLE");
@@ -2678,6 +2681,10 @@ PC 侧每 1 秒发一次 PING，记录最后收到 PONG 的时间；超过 2 秒
             host.Escape += delegate
             {
                 log.WriteLine("# 逃逸键触发");
+                // 放弃路径也必须通知设备侧清状态：接管期间若按着鼠标键/修饰键再逃逸，
+                // 不补发 LEAVE 会让手机侧 buttonsDown 与按键槽位永久残留（leave 才会清）。
+                // 设备侧处理 MSG_LEAVE 时会 buttonsDown=0 并 KeyState.releaseAll。
+                transport.Send(Protocol.EncodeLeave());
                 tracker.AbortTakeover();
                 supp.Release();
                 host.SetStatus("IDLE");
