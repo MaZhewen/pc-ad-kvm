@@ -92,3 +92,38 @@ skill 规定每个 plan 只读写自己的工作区；但本计划 Task 8 Step 7
 
 （下面按任务追加。每个任务：dispatch → 报告 → 审查包 → 审查 → 修轮 → 完成。）
 
+Task 1: dispatched implementer (**sonnet** —— 4 文件搬迁 + 接口适配，属"多文件集成"档) at BASE **ae78fdc**。
+  派发时随附简报之外的承重信息：Global Constraints 全量（C# 5 禁用清单、wc -l 口径、
+  Git Bash 路径篡改、单文件 exe、零全局钩子）、`watchers` 声明位置为什么拆成两处（承重）、
+  两处有意行为新增（`# 检测到几何变化` 与退出路径的 `watchers.Stop()`）不要删。
+  另下发了三条歧义处置：①用户已退出 pc-kvm.exe → dist\ 未锁定，构建应正常；若被占用则
+  **不许杀进程**、报 BLOCKED；②同一问题两次不成即停报 BLOCKED，**不许开始怀疑有外部进程改文件**
+  （阶段二 Task 7 的 opus 实现者就是在那个偏执循环里烧掉一天，真因是它自己编辑到一半）；
+  ③`build-agent.ps1` 末尾要复制 `%TEMP%\pckvm.jar`，缺失时报出来、不许凭空造 jar。
+  开工前置已满足：用户已退出 pc-kvm.exe，`dist\` 解锁。
+Task 1: implementer 报 **NEEDS_CONTEXT** —— 它拦下了**计划里的真缺陷**，未提交、未擅自修好。
+  缺陷：Step 1b 的文字说搬"逃逸键"（`:325-335`），但给的 `TrayUi.cs` 代码块里**没有**这个处理器，
+  且 `TrayUi` 的构造器收不到 `EdgeTracker`。照抄的后果是 **Ctrl+Alt+Esc 整条逃生通道失效**
+  （实现者用 `rg` 核实 `host.Escape` 零订阅者）。它按简报的"任何一项不符就报 BLOCKED，
+  不要自行修好"停下——**纪律正确，这正是我要的行为**。
+Task 1: **R6 —— 逃逸键处理器放进 `Watchers.cs` 的构造函数。**
+  三选项取舍：A 留在 `Program.cs`（实现者测出会是 295 行，计划末尾约 355/360，只剩 5 行余量
+  ——正是 Ruling 33 要防的）→ 否决；B 进 `TrayUi` 并加 `tracker` 参数（同时违背它声明的
+  Produces 签名与我自己写的"不参与状态机逻辑"类注释）→ 否决；C 进 `Watchers` → 采纳。
+  采纳理由是净收益而非折中：它做的四件事（`Send(EncodeLeave)` → `AbortTakeover` → `Release`
+  → `SetStatus("IDLE")`）与 `Watchers.HeartbeatTick` 里那条安全网**逐字相同**，
+  放隔壁等于让"放弃序列"在这个项目里只有一处需要维护。
+  **代价（若判错）**：`Watchers` 的职责从"后台守护"扩到"后台守护 + UI 触发的放弃路径"，
+  类名的语义与内容略有偏差。若日后认为该另置，搬走约 12 行，成本极低且可见。
+Task 1: **R7 —— 实现者自行解决的两处，均确认。**
+  ①两个新类由 `public class` 降为 `internal class`：`MessageHost` 是 `class MessageHost : Form`
+  （internal），public 类的 public 构造器不能收 internal 参数类型 = CS0051；而"不得修改既有文件"
+  排除了改 `MessageHost` 的路，故降级是唯一解，单程序集内零运行时差异。已核实修饰符清单
+  （`Transport`/`Suppressor`/`RawInput`/`Protocol`/`KeyMap`/`EdgeTracker`/`DeviceLauncher`/
+  `CursorModel` 都是 public；`MessageHost`/`Program` 是 internal）。
+  后续任务不受影响：`Config`/`MouseScaler`/`SettingsForm` 只吃 public 类型。
+  ②托盘文本 `"PC-KVM（阶段二骨架）"` → `"PC-KVM"`：保持新值（旧标签已过时），
+  作为**第三处有意改动**补进了计划的等价表——初稿漏列，由实现者发现。
+Task 1: 计划已就地修正（Step 1 的 Watchers 构造器补上逃逸键订阅、Step 1b 去掉"逃逸键"并写明
+  为什么不在 TrayUi、Step 2 表格与 Step 6 等价表同步、Step 6 有意改动由两处改为三处、
+  新增两个新类必须 internal 的说明）。

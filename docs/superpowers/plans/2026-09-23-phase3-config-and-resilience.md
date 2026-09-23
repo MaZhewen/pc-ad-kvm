@@ -169,6 +169,22 @@ namespace PcKvm
             {
                 if (type == Protocol.MsgPong) _lastPongTicks = DateTime.UtcNow.Ticks;
             };
+
+            // 逃逸键 Ctrl+Alt+Esc（安全网之一）。**放在 Watchers 而不是 TrayUi**（见 R6）：
+            // 它要 tracker/supp/transport 三样，而 Watchers 的构造器本来就有；
+            // 更要紧的是它做的四件事与上面 HeartbeatTick 里那条安全网**逐字相同**，
+            // 放隔壁才能让"放弃序列"只有一处需要维护。
+            _host.Escape += delegate
+            {
+                _log("# 逃逸键触发");
+                // 放弃路径也必须通知设备侧清状态：接管期间若按着鼠标键/修饰键再逃逸，
+                // 不补发 LEAVE 会让手机侧 buttonsDown 与按键槽位永久残留（leave 才会清）。
+                // 设备侧处理 MSG_LEAVE 时会 buttonsDown=0 并 KeyState.releaseAll。
+                _transport.Send(Protocol.EncodeLeave());
+                _tracker.AbortTakeover();
+                _supp.Release();
+                _host.SetStatus("IDLE");
+            };
         }
 
         public void Start()
@@ -243,7 +259,17 @@ namespace PcKvm
 
 - [ ] **Step 1b: 新建 `src/agent/TrayUi.cs`**
 
-同样**逐字照抄**（托盘块 `:270-276`、逃逸键 `:325-335`、生命周期 `:337-346`）。
+同样**逐字照抄**（托盘块 `:270-276` 与生命周期块 `:337-346`）。
+
+> ⚠️ **逃逸键（`:325-335`）不在这里** —— 它搬进 `Watchers.cs` 的构造函数，理由见 Step 1 的
+> 代码注释与 R6。初稿把"逃逸键"写进本步骤的文字却漏了代码，照抄会让 Ctrl+Alt+Esc
+> 整条逃生通道失效（`host.Escape` 零订阅者）。**这是计划缺陷，已被实现者拦下。**
+
+**两个新类都必须写成 `internal`（即不写修饰符）**，不能是 `public class`：
+`MessageHost` 是 `class MessageHost : Form`（internal），而 public 类的 public 构造器
+不能接收 internal 参数类型 → **CS0051 编译失败**。既然约束是"不得修改既有文件"，
+降级新类就是唯一解；单程序集内零运行时差异。
+（后续任务不受影响：`Config`/`MouseScaler`/`SettingsForm` 只吃 public 类型。）
 `StreamWriter` 直接传进来（而不是 `Action<string>`），因为这里要用它的 `Close()`。
 
 ```csharp
@@ -323,7 +349,7 @@ namespace PcKvm
 | 托盘 | 270-276 | `NotifyIcon tray = new NotifyIcon();` 到 `tray.ContextMenu = ...;` |
 | 前台守卫定时器 | 278-282 | 注释 `// 前台守卫：...` 到 `guard.Start();` |
 | 心跳 | 284-323 | `// ---- Task 8 安全网 ...` 到 `heartbeat.Start();`，**含其中那个只更新 `lastPongTicks` 的 `transport.MessageReceived` 订阅**（已搬进 Watchers） |
-| 逃逸键 | 325-335 | `host.Escape += delegate` 整块 |
+| 逃逸键 | 325-335 | `host.Escape += delegate` 整块 —— **搬进 `Watchers.cs` 的构造函数**（不是 `TrayUi.cs`，见 R6） |
 | 生命周期 | 337-346 | `host.FormClosing += delegate` 与 `Application.ApplicationExit += delegate` 两块 |
 
 > ⚠️ 删除**生命周期**那一段时注意：它里面的 `tray.Visible = false;` 与 `Transport`/`DeviceLauncher`
@@ -416,16 +442,18 @@ Expected: `TOTAL: pass=15 fail=0` 与 `TOTAL: 45/45 passed, 0 failed`，均 exit
 | 放弃路径三件事 | 仍都做：`Send(EncodeLeave)` → `AbortTakeover()` → `Release()` → `SetStatus("IDLE")` |
 | Timer 类型 | 仍是 `System.Windows.Forms.Timer`（全文搜 `System.Threading.Timer` 应**零命中**） |
 | 托盘菜单项 | 仍只有「退出」（「设置…」是任务 3 加的） |
-| 逃逸键四件事 | 仍都做：`Send(EncodeLeave)` → `AbortTakeover()` → `Release()` → `SetStatus("IDLE")`；且 `# 逃逸键触发` 仍**最先**打 |
+| 逃逸键四件事 | 仍都做：`Send(EncodeLeave)` → `AbortTakeover()` → `Release()` → `SetStatus("IDLE")`；且 `# 逃逸键触发` 仍**最先**打。核实：`rg -n 'host\.Escape\s*\+=' src/agent/*.cs` 必须**恰 1 处**且在 `Watchers.cs`，`Program.cs` 里**零命中** |
 | `FormClosing` | 仍只调 `supp.Release()` |
 | 退出顺序 | `Release` → 写 `# 退出` → 托盘隐藏 → `transport.Stop` → `Cleanup` → `log.Close`，**顺序不变** |
 
-**唯一有意的行为新增（两处，都写在这里免得审查者当成回归）**：
+**有意与原文不同的地方（三处，都写在这里免得审查者当成回归）**：
 
 1. 几何变化时多打一行 `# 检测到几何变化 WxH`（理由见 Step 3 末尾的注）。
 2. 退出路径的**最前面**多了一步 `watchers.Stop()`。这是**必须的**：`Watchers` 现在有后台线程，
    不在 `log.Close()` 之前停掉它，就可能写进一个已关闭的 `StreamWriter` 而抛异常。
    原实现的后台线程只在几何轮询里（不写日志），所以以前不需要这一步。
+3. 托盘文本由 `"PC-KVM（阶段二骨架）"` 改为 `"PC-KVM"`。那个"阶段二骨架"标签已经过时
+   （现在做阶段三），Step 3 的意图也是 `"PC-KVM"`。**初稿漏列了这一条**，由实现者发现。
 
 - [ ] **Step 7: Commit**
 
