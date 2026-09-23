@@ -2860,6 +2860,33 @@ E0 前缀键的写法（示例，按同样方式补齐其余）：
 
 **声明位置**：必须放在 `int mc = 0, kc = 0;` 那一组旁边（即 `ri.KeyChanged += ...` 订阅**之前**）。`KeyChanged` 处理器会捕获并修改它，而 C# 局部变量不支持前向引用（Task 4 与 Task 7 的 `supp` 都栽在这上面）。
 
+- [ ] **Step 2b: 把滚轮与鼠标键的转发也门控在 TAKEOVER 上（控制方 Ruling 27，必做）**
+
+**这是一个既有缺陷，不是本任务新增的。** Task 4 写 `MouseMoved` 时把滚轮与三个鼠标键的转发放在**状态判定之外**，Task 6 引入状态机时也没有把它们收进去。结果：**在 IDLE 态（也就是用户正常使用 PC 的全部时间）里，每一次点击与每一格滚轮都会被转发到手机**，作用在手机光标停留的位置——用户可能因此误开手机 App、误触按钮，而且完全无法"正常用 PC 而不影响手机"。
+
+键盘那侧 Task 9 已经写对了（`if (tracker.Current != KvmState.Takeover) return;`），鼠标这侧要补齐，让"IDLE 态一个字节都不发给设备"这条不变量对**所有**输入类型成立。
+
+把 `MouseMoved` 处理器末尾那段改为整体包在状态门控里：
+
+```csharp
+                // 滚轮与鼠标键只在接管期转发：IDLE 态用户是在操作 PC，
+                // 此时转发会在手机光标停留处产生误点击/误滚动（既有缺陷，Ruling 27）
+                if (cursor != null && tracker.Current == KvmState.Takeover)
+                {
+                    short wheel = (short)(e.WheelDelta / 120);   // Windows 一格 = 120，HID 一格 = 1
+                    if (wheel != 0) transport.Send(Protocol.EncodeScroll((short)0, wheel));
+
+                    if (e.ButtonFlags != 0)
+                    {
+                        EmitButton(transport, e.ButtonFlags, 0x0001, 1);   // 左
+                        EmitButton(transport, e.ButtonFlags, 0x0004, 2);   // 右
+                        EmitButton(transport, e.ButtonFlags, 0x0010, 3);   // 中
+                    }
+                }
+```
+
+注意：`cursor != null && tracker.Current == KvmState.Takeover` 里的 `cursor != null` 是必需的（未连接时 `cursor` 为 null，`tracker` 的状态机本就不该跑）。改完后 `MouseMoved` 里应当**没有任何**在 IDLE 态发包的路径——请在报告里逐条确认。
+
 **注意**：`modifiers` 被 lambda 捕获并修改，C# 5 下需要它是**局部变量而非字段**（lambda 捕获局部变量是 C# 3 特性，可以）。若编译器报错，改为用一个 `byte[] modifiersBox = new byte[1];` 包装。
 
 - [ ] **Step 3: 设备侧在退出接管时清空按键**
