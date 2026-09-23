@@ -68,8 +68,9 @@ namespace PcKvm
             byte modifiers = 0;
             CursorModel cursor = null;
 
-            // 声明必须早于 ri.MouseMoved 订阅（C# 局部变量不能前向引用——Task 4 踩过）
-            double sensitivity = 1.0;
+            // 速度缩放器（含小数余量累积）。必须声明在 ri.MouseMoved 订阅之前：
+            // 处理器会捕获它，而 C# 局部变量不支持前向引用（Task 4/7 都栽过）
+            MouseScaler scaler = new MouseScaler(cfg.MouseSensitivity);
             // 目标机几何：手机挂在 DISPLAY1（1920,0,1920x1080）的右侧。
             // edgeX 约定 = 触发侧最外侧有效像素列：3840x1080 桌面上光标最远只能到 3839
             //（Windows 钳制），传 3840 会让入口条件永远不可达。
@@ -112,6 +113,7 @@ namespace PcKvm
                 transport.Send(Protocol.EncodeHome());
                 cursor.Reset();
                 cursor.SetPosition(px, py);
+                scaler.Reset();   // 归零的同时清掉小数余量，避免带着跨越前的零头
                 transport.Send(Protocol.EncodeEnter(px, py));
             };
             tracker.LeaveTakeover += delegate
@@ -162,8 +164,9 @@ namespace PcKvm
                     }
                     else
                     {
-                        short sdx = cursor.NextDx((int)(e.Dx * sensitivity));
-                        short sdy = cursor.NextDy((int)(e.Dy * sensitivity));
+                        // 缩放器输出的已是"应发送"的整数增量，仍要过 CursorModel 的钳制
+                        short sdx = cursor.NextDx(scaler.ApplyX(e.Dx));
+                        short sdy = cursor.NextDy(scaler.ApplyY(e.Dy));
                         if (sdx != 0 || sdy != 0)
                             transport.Send(Protocol.EncodeMove(sdx, sdy));
                         // 用原始增量判定回程方向（用户意图）；钳制后的 sdx 在 x=0 处
@@ -274,6 +277,7 @@ namespace PcKvm
             // 本任务先只记账；速度在 Task 4 接（MouseScaler）、跨越边在 Task 5 接（SetEdge）。
             trayUi.SettingsApplied += delegate(Config c)
             {
+                scaler.SetSensitivity(c.MouseSensitivity);   // 立即生效，不必重启
                 log.WriteLine("# 设置已应用：速度=" + c.MouseSensitivity.ToString("F2")
                               + " 手机在" + (c.PhoneOnLeft ? "左" : "右") + "侧"
                               + " 强杀adb=" + c.AllowKillAdb);
