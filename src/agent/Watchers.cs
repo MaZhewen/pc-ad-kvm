@@ -25,6 +25,9 @@ namespace PcKvm
         readonly MessageHost _host;
         readonly Action<string> _log;
 
+        // 跨线程字段：transport 读线程写、UI 线程心跳读——与 _stop/_devProc 同一纪律。
+        // 注：C# 不允许 volatile long（CS0677），故用 Interlocked 读/写达到同一语义
+        //（读侧带栅栏免陈旧，写侧在 32 位进程下也免撕裂；陈旧方向只会让 age 偏大，有界自纠）。
         long _lastPongTicks = DateTime.UtcNow.Ticks;
         uint _pingSeq;
         volatile bool _stop;            // 退出时置位，让后台线程自己收工
@@ -63,7 +66,8 @@ namespace PcKvm
             // 打 "# PONG seq=" 一行，两者互不重复（Task 8 审查要求"不要新增订阅造成重复日志"）。
             _transport.MessageReceived += delegate(byte type, byte[] payload)
             {
-                if (type == Protocol.MsgPong) _lastPongTicks = DateTime.UtcNow.Ticks;
+                if (type == Protocol.MsgPong)
+                    System.Threading.Interlocked.Exchange(ref _lastPongTicks, DateTime.UtcNow.Ticks);
             };
 
             // 逃逸键 Ctrl+Alt+Esc（Task 8 的安全网之一）。放在 Watchers 而不是 TrayUi：
@@ -155,7 +159,8 @@ namespace PcKvm
             //（Task 7 安全不变量 4 / Ruling 18b，第二轮跨任务扫描发现）。
             if (_tracker.Current == KvmState.Takeover)
             {
-                double age = (DateTime.UtcNow - new DateTime(_lastPongTicks)).TotalSeconds;
+                double age = (DateTime.UtcNow - new DateTime(
+                    System.Threading.Interlocked.Read(ref _lastPongTicks))).TotalSeconds;
                 if (!_transport.IsConnected || age > 2.0)
                 {
                     _log("# 心跳失联（" + age.ToString("F1") + "s, connected="

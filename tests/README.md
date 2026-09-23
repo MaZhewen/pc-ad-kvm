@@ -29,7 +29,7 @@ pwsh -File tests\agent-logic\run.ps1
 
 ## `edge-tracker/` — `EdgeTracker` 边缘状态机
 
-编译 `Main.cs` + `src\agent\EdgeTracker.cs` + `src\agent\CursorModel.cs`，**15 条用例**。
+编译 `Main.cs` + `src\agent\EdgeTracker.cs` + `src\agent\CursorModel.cs`，**24 条用例**。
 
 喂事件的方式是刻意还原 `Program.cs` 的接线顺序（先 `CursorModel.NextDx` 更新虚拟光标，
 再把**原始**增量与更新后的坐标交给 tracker），而不是让用例凭空造虚拟光标坐标。
@@ -50,6 +50,12 @@ pwsh -File tests\agent-logic\run.ps1
 | **T13** | 在边界上持续外推可离开（阈值 40 mickeys），且"走到"与"越过"可区分 |
 | **T14** | 中途反向推回原边界必须把累积量清零 |
 | **T15** | 审查 I1 回归：`dx=0` 的纯纵向/静止事件**既不累积也不清零**（斜推时清零会导致"回不去"） |
+| **L1** | 左挂镜像（T1）：从桌面左缘入屏，落点为手机右缘 `x=3199`，y 仍比例映射 |
+| **L2** | 左挂（T4 镜像）：在左缘但朝屏内推 → 不触发 |
+| **L3** | 左挂（T4 镜像）：离开左缘一列（`x=1`）→ 不触发 |
+| **L4** | 左挂镜像 T11：入口处微小【右】向抖动（`+1`）不得回程——阈值 40 在左挂下同样生效 |
+| **L5a–L5c** | 左挂镜像 T12/T13：「走到边界」不算外推；边界上外推 ≥40 才回程；纯纵向不清零 |
+| **L6a–L6b** | `SetEdge` 换边后立刻解除武装（`armed=false`），防止换边瞬间光标恰在新边缘被弹过去 |
 
 > **为什么没有 `Suppressor`（`ClipCursor`）的 harness**：这是刻意的。一个真去调
 > `ClipCursor` 的测试若中途卡住或崩掉，会让用户面对"鼠标被锁死且找不到原因"——
@@ -58,7 +64,7 @@ pwsh -File tests\agent-logic\run.ps1
 
 ## `scancode-map/` — `ScancodeMap` scancode → HID usage 映射
 
-编译 `TestMain.java` + `src\injector\ScancodeMap.java`（`--release 8`，与构建脚本一致），**45 条用例**。
+编译 `TestMain.java` + `src\injector\ScancodeMap.java`（`--release 8`，与构建脚本一致），**58 条用例**。
 
 覆盖：非 E0 基本键 / 功能键 / 标点 / **数字键盘 15 条**（本次新增，起因是接管期用户按的
 6 个键全是小键盘、旧表整段缺失 → 返回 `-1` → 注入器静默丢弃，手机毫无反应）/

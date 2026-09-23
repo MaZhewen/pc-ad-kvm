@@ -14,8 +14,9 @@ namespace PcKvm
     /// 回退明细经 warnings 交调用方记**一行**日志。绝不弹模态框
     ///（本项目栽过"模态 MessageBox 永久阻塞"的坑）。
     ///
-    /// 默认值 = 阶段二行为：PhoneSide=Right、AllowKillAdb=false 时，
-    /// 把 exe 单独拷到一台新机器上跑起来与阶段二完全一致。
+    /// 默认值：除 MouseSensitivity 外与阶段二一致（PhoneSide=Right、AllowKillAdb=false、
+    /// ReconnectSeconds=5）。MouseSensitivity 默认 0.50 是**阶段二硬编码 1.0 的一半**——
+    /// 刻意如此：用户反馈手机上光标移动太快；速度可在设置对话框里实时调整。
     /// </summary>
     public class Config
     {
@@ -121,7 +122,8 @@ namespace PcKvm
             try
             {
                 StringBuilder sb = new StringBuilder();
-                sb.AppendLine("; PC-KVM 配置。改完保存即可，不需要重启 exe（下次按键事件即生效）。");
+                sb.AppendLine("; PC-KVM 配置。运行中不会重读本文件：手动改这里要重启 exe 才生效；");
+                sb.AppendLine("; 在设置对话框里改则立即生效（改完自动写回本文件）。");
                 sb.AppendLine("; 删掉本文件 = 全部回到默认值。exe 单独拷走也能跑。");
                 sb.AppendLine("; MouseSensitivity: " + SensitivityMin + "–" + SensitivityMax + "，默认 0.50");
                 sb.AppendLine("; PhoneSide: Left | Right，默认 Right");

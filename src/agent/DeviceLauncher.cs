@@ -39,7 +39,14 @@ namespace PcKvm
             psi.RedirectStandardOutput = true;
             psi.RedirectStandardError = true;
             psi.CreateNoWindow = true;
-            Process p = Process.Start(psi);
+            // 不抛：重连监督在后台线程调这里（TOCTOU 窗口后 adb 可能拉不起来），
+            // 未处理异常会杀掉整个进程。失败返回 null，与 RunAdb/RunAdbCapture 的错误风格一致。
+            Process p;
+            try { p = Process.Start(psi); }
+            catch (System.Exception)
+            {
+                return null;
+            }
             p.BeginOutputReadLine();
             p.BeginErrorReadLine();
             return p;

@@ -29,7 +29,8 @@ namespace PcKvm
             _sensitivity = sensitivity;
         }
 
-        /// <summary>进入接管/几何变化时清零残差，避免带着上一次的零头。</summary>
+        /// <summary>进入接管时清零残差，避免带着跨越前的零头。几何变化路径**刻意不调它**：
+        /// 残差对应的是用户的手真实移动出的 mickeys，跨几何变化保留是故意的。</summary>
         public void Reset()
         {
             _resX = 0;

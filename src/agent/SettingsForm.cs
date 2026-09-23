@@ -100,7 +100,7 @@ namespace PcKvm
             ok.Text = "确定";
             ok.DialogResult = DialogResult.OK;
             ok.Location = new Point(180, 190);
-            ok.Click += delegate { Capture(); };
+            ok.Click += delegate { ReadBack(); };
             Controls.Add(ok);
 
             Button cancel = new Button();
@@ -127,9 +127,7 @@ namespace PcKvm
             _speedValue.Text = ((double)v / 100.0).ToString("F2");
         }
 
-        // 与 Control.Capture（bool 属性）撞名，非有意隐藏；按 csc 的提示加 new，
-        // 满足"零警告"的构建红线（CS0108），语义不变。
-        new void Capture()
+        void ReadBack()
         {
             MouseSensitivity = (double)_speed.Value / 100.0;
             PhoneOnLeft = _left.Checked;

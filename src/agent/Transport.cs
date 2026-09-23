@@ -119,6 +119,13 @@ namespace PcKvm
             _running = false;
             try { if (_listener != null) _listener.Stop(); } catch (Exception) { }
             try { if (_client != null) _client.Close(); } catch (Exception) { }
+            // 有界等待 accept 线程收尾：它上面的 Connected/Disconnected 处理器会写日志，
+            // 而 TrayUi 的退出流程在本方法之后才 Close 日志——不 Join 就存在
+            // "后台线程写已关闭 StreamWriter" 的未处理异常 = 进程被杀而非干净退出。
+            // 不会死锁：监听器/客户端已关，阻塞中的 AcceptTcpClient/Read 立刻抛出退出循环；
+            // 也不会自 Join：Stop 只从 UI 线程（TrayUi）调用，绝非 accept 线程自身。
+            if (_acceptThread != null && _acceptThread != Thread.CurrentThread)
+                _acceptThread.Join(2000);
         }
     }
 }

@@ -71,8 +71,9 @@ INI 风格 `key=value`，键名纯 ASCII，`;` 起注释。
 | `AllowKillAdb` | `true` / `false` | `false` | — | 即时（§9 第③级读它） |
 | `ReconnectSeconds` | 整数 | `5` | `2`–`60` | 即时（监督线程每轮重读） |
 
-**默认值即当前行为**：`Right` + `AllowKillAdb=false` 时行为与阶段二完全一致，
-即"把 exe 单独拷到一台新机器上，跑起来和以前一模一样"。
+**默认值**：除 `MouseSensitivity` 外与阶段二一致（`Right` + `AllowKillAdb=false`）。
+`MouseSensitivity` 默认 `0.50` 是阶段二硬编码 `1.0` 的**一半**——刻意如此：
+用户反馈手机上光标移动太快；速度可在设置对话框里实时调整。
 
 **坏文件策略**：解析失败 / 键缺失 / 值越界 → **用默认值**，并在日志打**一行**说明哪一项回退了。
 **绝不因为配置坏掉而拒绝启动或弹模态框**（本项目已有一次"模态 MessageBox 永久阻塞"的教训）。
