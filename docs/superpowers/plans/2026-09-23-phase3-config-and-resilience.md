@@ -2247,9 +2247,9 @@ EOF
         volatile bool _stop;
         int _failStreak;
         int _level;                 // 已升级到的档位：0 = 只做①，1 = 做过温和，2 = 做过激进
-        string _lastReport = "";
-        // ⚠️ 去重键必须是【状态种类】，不能是含递增计数的完整消息——见 ReportWaiting 的注释。
-        // 初稿把 `_failStreak` 拼进等待消息里，导致去重永不成立、每轮写一行日志（约 720 行/小时）。
+        // **只留一把去重键**（键 = 【状态种类】）。初稿有两把（`_lastReport` 管"是否变了"、
+        // `_lastLoggedState` 管日志），结果一把的早返回会**吞掉另一把的重置** —— 见 ReportState 的注释。
+        // 也**绝不能**把递增的计数拼进去重键里（否则去重永不成立，每轮写一行 ≈720 行/小时）。
         string _lastLoggedState = "";
 
         /// <summary>设备侧进程句柄。所有权归 Watchers：重连会换进程，退出时要 Kill 它。</summary>
@@ -2394,47 +2394,50 @@ EOF
         /// 每次重试都打会把有效信息淹没（本项目既栽过 2% 采样率，也栽过刷日志）。
         /// 去重比较与两处 UI 触碰全部在 UI 线程上做，故 `_lastReport` 只被 UI 线程读写，
         /// 后台线程**不碰**它。</summary>
-        void Report(string s)
-        {
-            try
-            {
-                _host.BeginInvoke((MethodInvoker)delegate
-                {
-                    if (s == _lastReport) return;
-                    _lastReport = s;
-                    _lastLoggedState = s;      // 与 ReportWaiting 共用去重键，避免两者互相打架
-                    _log("# " + s);
-                    _host.SetStatus(s);
-                });
-            }
-            catch (System.Exception) { }
-        }
-
-        /// <summary>等待中的状态上报：**状态条每轮更新（重试次数是活信息），
-        /// 日志只在【状态种类】变化时打一行**。
+        /// <summary>状态与日志上报的**统一入口**。
+        /// **status** = 要显示在状态条上的文本；**key** = 拿去重用的【状态种类】。
+        /// 两者刻意分开：等待消息里含每轮递增的重试次数，**那个次数绝不能拿去重**
+        ///（否则 `key != _lastLoggedState` 永不成立，每轮都写一行，掉线一小时约 720 行）。
         ///
-        /// ⚠️ 为什么不能直接 `Report("等待设备…（已重试 " + n + " 次，" + why + "）")`：
-        /// 那条消息里拼了每轮递增的 `n`，于是 `if (s == _lastReport) return;` **永远不相等**，
-        /// 每一轮都会写一行日志——默认 `ReconnectSeconds=5` 时掉线一小时约 **720 行**，
-        /// 正是 `Report` 注释里引以为戒的"刷日志淹没有效信息"，也违反本计划自己写的
-        /// Step 6 验收项 6（"每个状态只出现一次，不是每轮一次"）。
-        /// （这是初稿的真实缺陷，由 Task 8 的审查者发现；教训：**去重键里不能有会变的计数**。）</summary>
-        void ReportWaiting(string why, int attempts)
+        /// **状态条每次都设、绝不去重**：它是"现在是真值"。一旦被去重跳过，用户会看到状态条
+        /// 停在"等待设备…"而实际**已经连上**——而连接时没有别的地方设状态
+        ///（`Connected` 处理器不调 `SetStatus`，`Disconnected` 只在 TAKEOVER 时置 IDLE）。
+        /// 日志才按状态种类去重。
+        ///
+        /// **为什么只留一把键**：初稿有两把（`_lastReport` + `_lastLoggedState`），而
+        /// `Report` 的早返回 `if (s == _lastReport) return;` 发生在入队之前，会**连共用键的重置
+        /// 一并吞掉**。于是一次"1–2 轮就恢复的短掉线"里 `Report("已连接")` 被门掉 ⇒ 状态条
+        /// 永不设回"已连接"，且下一次相同 `why` 的掉线期等待日志被去重吃掉。
+        /// 触发条件正是本功能存在的理由（注入器单轮即被重建成功，ledger A2）。
+        /// 一把键、一个域，这个耦合就不存在了。（由 Task 8 的 scoped 复审发现。）</summary>
+        void ReportState(string status, string key)
         {
             try
             {
                 _host.BeginInvoke((MethodInvoker)delegate
                 {
-                    string status = "等待设备…（已重试 " + attempts + " 次，" + why + "）";
-                    _host.SetStatus(status);              // 状态条：每轮都更新
-                    if (why != _lastLoggedState)          // 日志：只在状态种类变了才写
+                    _host.SetStatus(status);          // 状态条：每次都设，绝不去重
+                    if (key != _lastLoggedState)      // 日志：只在状态种类变化时写一行
                     {
-                        _lastLoggedState = why;
+                        _lastLoggedState = key;
                         _log("# " + status);
                     }
                 });
             }
             catch (System.Exception) { }
+        }
+
+        /// <summary>一次性状态（"已连接"/"adb server 重启中…"/"强杀 adb 进程中…"）：
+        /// 状态与去重键同为该文本。</summary>
+        void Report(string s)
+        {
+            ReportState(s, s);
+        }
+
+        /// <summary>等待中的状态：状态条含重试次数（每轮都变），去重键只用 `why`。</summary>
+        void ReportWaiting(string why, int attempts)
+        {
+            ReportState("等待设备…（已重试 " + attempts + " 次，" + why + "）", why);
         }
 ```
 

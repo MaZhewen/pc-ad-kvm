@@ -863,3 +863,30 @@ Task 8: scoped re-review package → `review-44e50c4..3e6c274.diff`（1 commit, 
 ③唯一后果是未来的 SDD 产物（brief/report/review 包）默认不入 git —— 那恰好符合 skill 对工作区的定位
 （"git-ignored scratch"），也比我先前 `-f` 强推更干净。
 **代价（若判错）**：将来若想跟踪某个新的 SDD 文件，需要显式 `git add -f`。
+Task 8: **scoped 复审 —— 两条 finding 都已 ADDRESSED，但判 Fix round: Findings remain open**
+  （修复**引入了一处新的 Important**）。它同时回答了我专门点名的那个设计问题：
+  **把 `_lastReport` 的去重移出 `BeginInvoke` 本身是成立的** —— 它读完整文件确认 `_lastReport`
+  只被重连线程读写（`Report` 只从 `ReconnectLoop` 调）、`_lastLoggedState` 只被 UI 线程读写，
+  且同一调用线程上的 `BeginInvoke` 是 FIFO 入队，故"两把键由不同线程选"这个担心不成立。**该处不改。**
+Task 8: **新 Important（修轮 1 引入）** —— `Report` 的早返回吞掉共用键的重置。
+  `Watchers.cs:287` 的 `if (s == _lastReport) return;` **发生在入队之前**，于是被门掉的那次调用
+  **既不打日志、也不设状态条、也不重置共用键**。触发链：一次恢复后 `_lastReport = "已连接"`
+  → **一次 1–2 轮的短掉线**（还没到 `_failStreak>=3` 的②级升级去改写 `_lastReport`）→ 恢复时
+  `Report("已连接")` 仍等于 `_lastReport` ⇒ **整条被门掉**：
+  （a）**`SetStatus("已连接")` 从未执行**，而连接时**没有别处设状态**（`Connected` 处理器不调
+      `SetStatus`、`Disconnected` 只在 TAKEOVER 时置 IDLE）⇒ 状态条**一直显示"等待设备…"而实际已连上**；
+  （b）`_lastLoggedState` 停在旧 `why` ⇒ **下一个相同 `why` 的掉线期等待日志被去重吃掉**。
+  **触发条件不是边角情形**：注入器单轮即被重建成功（正是 ledger A2 记的形态）就是 **1 轮事件**，
+  故从**第二次**这种死亡起就会命中。
+Task 8: **根因在我的计划设计**：初稿有**两把去重键**（`_lastReport` 管"是否变了"、`_lastLoggedState` 管日志），
+  而两者的域不同 ⇒ **一把的早返回会吞掉另一把的重置**。（初稿那版把两者都放在委托体内，同样会吞——
+  所以这不是实现者引入的，是实现者的改动**暴露**了我设计里的这个耦合。）
+Task 8: **R17 —— 裁决：去掉 `_lastReport`，只留一把键，并把"状态条"与"日志去重"彻底分开。**
+  新增 `ReportState(string status, string key)` 作唯一入口：**状态条每次都设、绝不去重**
+  （它是当前真值，被去重跳过就会出现"已连上却显示等待中"），**日志才按 key（状态种类）去重**；
+  `Report(s)` = `ReportState(s, s)`、`ReportWaiting(why, n)` = `ReportState("等待设备…（已重试 n 次，why）", why)`。
+  **`_lastReport` 字段必须一并删除**：①已无读取者；②**csc 会对"只赋值从不读取"的私有字段报 CS0414**，
+  留着会直接破坏本项目的零警告要求。
+  **代价（若判错）**：`Report` 由"整体去重"变成"状态条每次都设、日志去重"——重复调用同一个
+  `Report("已连接")` 现在会重复设一次状态条（幂等、无副作用），换来的是状态条**永不撒谎**。
+  计划正文已就地修正（字段块 + 两个方法 + 一段讲清"为什么只留一把键"的注释）。
