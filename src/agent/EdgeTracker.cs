@@ -11,15 +11,15 @@ namespace PcKvm
     /// </summary>
     public class EdgeTracker
     {
-        readonly int _edgeX;            // 触发侧最外侧有效像素列的 x（右挂 = 3839，左挂 = 0）。
+        int _edgeX;                     // 触发侧最外侧有效像素列的 x（右挂 = 桌面宽-1，左挂 = 0）。
                                         // 约定：不是"边界外那条虚线"，而是光标真实可达的最后一列——
-                                        // Windows 把光标钳在最后一列内，GetCursorPos 永远到不了 3840。
+                                        // Windows 把光标钳在最后一列内，GetCursorPos 永远到不了桌面宽。
                                         // 左右两侧在此约定下天然对称（atEdge/安全带判定无需分侧特判）。
-        readonly int _edgeTop;
-        readonly int _edgeBottom;
+        int _edgeTop;
+        int _edgeBottom;
         int _phoneW;                    // 可变：旋转/尺寸变化时由 SetPhoneSize 更新
         int _phoneH;
-        readonly bool _phoneRight;      // true = 手机在 PC 右侧（此时从手机左边缘入屏）
+        bool _phoneRight;               // true = 手机在 PC 右侧（此时从手机左边缘入屏）
 
         // 回程外推的累积量（mickeys）。**必须累积越过阈值**才算"用户想回 PC"，
         // 不能看单次增量符号：真机实测入屏瞬间虚拟光标就在 x=0（= 与 PC 相邻的那条边），
@@ -42,7 +42,7 @@ namespace PcKvm
 
         /// <summary>phoneW/phoneH 为占位初值（竖屏 2136x3200），非权威常量；
         /// 真值在连接后首次鼠标移动、及每次旋转变化时经 SetPhoneSize 灌入（Task 5B 几何轮询）。
-        /// edgeX 约定：触发侧最外侧有效像素列的 x（右挂传 3839，左挂传 0），见字段注释。</summary>
+        /// edgeX 约定：触发侧最外侧有效像素列的 x（右挂传桌面宽-1，左挂传 0），见字段注释。</summary>
         public EdgeTracker(int edgeX, int edgeTop, int edgeBottom,
                            int phoneW, int phoneH, bool phoneRight)
         {
@@ -62,6 +62,21 @@ namespace PcKvm
             if (w <= 0 || h <= 0) return;
             _phoneW = w;
             _phoneH = h;
+        }
+
+        /// <summary>运行时改变跨越边（阶段三 #2：手机在左/右可配置）。
+        /// **刻意不重建 tracker**：EnterTakeover/LeaveTakeover 的订阅挂在对象上，
+        /// 重建会丢订阅（那是"接不到事件"的静默失效）。故只改字段。
+        /// 同时解除武装：换边后光标很可能正好落在新边缘上，等它离开安全带再重新武装，
+        /// 免得用户刚点完"确定"就被弹进接管。</summary>
+        public void SetEdge(int edgeX, int edgeTop, int edgeBottom, bool phoneRight)
+        {
+            _edgeX = edgeX;
+            _edgeTop = edgeTop;
+            _edgeBottom = edgeBottom;
+            _phoneRight = phoneRight;
+            Armed = false;
+            _backPush = 0;
         }
 
         /// <summary>放弃跨越：回到 IDLE 并解除武装，等待用户把光标移离边缘。</summary>

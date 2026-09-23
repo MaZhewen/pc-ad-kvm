@@ -18,6 +18,12 @@ namespace PcKvm
         [StructLayout(LayoutKind.Sequential)]
         struct POINT { public int X; public int Y; }
 
+        const int SM_CXVIRTUALSCREEN = 78;
+        const int SM_CYVIRTUALSCREEN = 79;
+
+        [DllImport("user32.dll")]
+        static extern int GetSystemMetrics(int nIndex);
+
         [STAThread]
         static void Main()
         {
@@ -71,12 +77,22 @@ namespace PcKvm
             // 速度缩放器（含小数余量累积）。必须声明在 ri.MouseMoved 订阅之前：
             // 处理器会捕获它，而 C# 局部变量不支持前向引用（Task 4/7 都栽过）
             MouseScaler scaler = new MouseScaler(cfg.MouseSensitivity);
-            // 目标机几何：手机挂在 DISPLAY1（1920,0,1920x1080）的右侧。
-            // edgeX 约定 = 触发侧最外侧有效像素列：3840x1080 桌面上光标最远只能到 3839
-            //（Windows 钳制），传 3840 会让入口条件永远不可达。
+            // 入口边**运行时**从真实虚拟桌面推导，不写魔数：写死 3839 时，
+            // 换一套显示器布局会让入口条件永远不可达——正是 Task 6 审查栽过的静默 bug。
+            // edgeX 约定 = 触发侧最外侧"有效像素列"：右侧取 W-1（Windows 把光标钳在最后一列内），
+            // 左侧取 0。edgeBottom 是**开区间**（EdgeTracker.cs 判定为 cursorY >= _edgeBottom 时拒绝），
+            // 故直接传桌面高度。
+            int screenW = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+            int screenH = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+            if (screenW <= 0) screenW = 3840;   // 极端回退（API 失败不该让程序起不来）
+            if (screenH <= 0) screenH = 1080;
+            log.WriteLine("# 桌面几何 " + screenW + "x" + screenH
+                          + "，手机在" + (cfg.PhoneOnLeft ? "左" : "右") + "侧");
+
             EdgeTracker tracker = new EdgeTracker(
-                edgeX: 3839, edgeTop: 0, edgeBottom: 1080,
-                phoneW: 2136, phoneH: 3200, phoneRight: true);   // 占位初值，真值经 SetPhoneSize 灌入
+                edgeX: cfg.PhoneOnLeft ? 0 : screenW - 1,
+                edgeTop: 0, edgeBottom: screenH,
+                phoneW: 2136, phoneH: 3200, phoneRight: !cfg.PhoneOnLeft);
 
             // 后台守护集中到 Watchers（Ruling 26 的抽取，见该类头注释的线程纪律）。
             // ⚠️ 必须声明在 TrayUi 的 Install() 之前（它会调 watchers.Stop()），
@@ -274,12 +290,22 @@ namespace PcKvm
             trayUi.Install();
 
             // 应用设置由组合根订阅处理（TrayUi 只弹对话框+写盘，见其 SettingsApplied 注释）。
-            // 本任务先只记账；速度在 Task 4 接（MouseScaler）、跨越边在 Task 5 接（SetEdge）。
             trayUi.SettingsApplied += delegate(Config c)
             {
                 scaler.SetSensitivity(c.MouseSensitivity);   // 立即生效，不必重启
-                log.WriteLine("# 设置已应用：速度=" + c.MouseSensitivity.ToString("F2")
-                              + " 手机在" + (c.PhoneOnLeft ? "左" : "右") + "侧"
+                // 正在接管就先干净地退出来（补发 LEAVE、解锁光标、还前台），
+                // 否则换边会让 tracker 停在 TAKEOVER 却对着新的边界判定
+                if (tracker.Current == KvmState.Takeover)
+                {
+                    transport.Send(Protocol.EncodeLeave());
+                    tracker.AbortTakeover();
+                    supp.Release();
+                    host.SetStatus("IDLE");
+                }
+                tracker.SetEdge(c.PhoneOnLeft ? 0 : screenW - 1, 0, screenH, !c.PhoneOnLeft);
+                log.WriteLine("# 设置已应用：手机在" + (c.PhoneOnLeft ? "左" : "右")
+                              + "侧（edgeX=" + (c.PhoneOnLeft ? 0 : screenW - 1) + "）"
+                              + " 速度=" + c.MouseSensitivity.ToString("F2")
                               + " 强杀adb=" + c.AllowKillAdb);
             };
 

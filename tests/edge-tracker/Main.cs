@@ -19,6 +19,14 @@ static class EdgeTest
             phoneW: 3200, phoneH: 2136, phoneRight: true);
     }
 
+    // 左挂镜像：手机在 PC 左侧 → 从手机【右】边缘入屏（phoneX = phoneW-1 = 3199），
+    // 与 PC 相邻的那条边是手机的逻辑右缘。PC 侧 _edgeX = 0（桌面左缘可达列）。
+    static EdgeTracker NewTrackerLeft()
+    {
+        return new EdgeTracker(edgeX: 0, edgeTop: 0, edgeBottom: 1080,
+            phoneW: 3200, phoneH: 2136, phoneRight: false);
+    }
+
     /// <summary>严格按 Program.cs 的接线喂事件：先 CursorModel.NextDx 更新虚拟光标，
     /// 再把**原始**增量与更新后的光标位置交给 tracker。
     /// 这样 vx 恒与真实增量自洽（不能用实现者的心智模型凭空造 vx）。</summary>
@@ -261,6 +269,97 @@ static class EdgeTest
             Feed(t, c, -25, 0);                               // 20 + 25 = 45 >= 40
             Check("T15", t.Current == KvmState.Idle && leaveCount == 1,
                 "state=" + t.Current + " leaveCount=" + leaveCount + " (expect Idle,1)");
+        }
+
+        // ---- L1（左挂镜像）: 从桌面左缘入屏，落点为手机右边缘 x=3199，y 仍比例映射 ----
+        // 与 T1 严格镜像：cursorY=540 → phoneY = 540*2136/1080 = 1068
+        {
+            EdgeTracker t = NewTrackerLeft();
+            int en = 0; short px = -1, py = -1;
+            t.EnterTakeover += delegate(short x, short y) { en++; px = x; py = y; };
+            t.OnIdleMove(-5, 0, 0, 540);          // 在左缘、继续向左推
+            Check("L1", t.Current == KvmState.Takeover && en == 1 && px == 3199 && py == 1068,
+                "state=" + t.Current + " en=" + en + " px=" + px + " py=" + py
+                + " (expect Takeover,1,3199,1068)");
+        }
+
+        // ---- L2（左挂）: 左缘但朝屏内推 → 不触发 ----
+        {
+            EdgeTracker t = NewTrackerLeft();
+            int en = 0;
+            t.EnterTakeover += delegate(short x, short y) { en++; };
+            t.OnIdleMove(5, 0, 0, 540);           // 向右推 = 朝屏内
+            Check("L2", t.Current == KvmState.Idle && en == 0,
+                "state=" + t.Current + " en=" + en + " (expect Idle,0)");
+        }
+
+        // ---- L3（左挂）: 离开左缘一列（x=1）→ 不触发 ----
+        {
+            EdgeTracker t = NewTrackerLeft();
+            int en = 0;
+            t.EnterTakeover += delegate(short x, short y) { en++; };
+            t.OnIdleMove(-5, 0, 1, 540);
+            Check("L3", t.Current == KvmState.Idle && en == 0,
+                "state=" + t.Current + " en=" + en + " (expect Idle,0)");
+        }
+
+        // ---- L4（左挂）: 入口处微小【右】向抖动不得回程（根因 B 的左挂镜像） ----
+        // T11 是右挂版的 -1 抖动；左挂的"向外推"是 +dx，故抖动是 +1。
+        // 入屏瞬间 _lastVx 被置为 phoneX = 3199（手机右缘），所以 +1 会被计入外推，
+        // 但 1 < 40 阈值，必须仍留在接管态。这条钉住"阈值在左挂下同样生效"。
+        {
+            EdgeTracker t = NewTrackerLeft();
+            CursorModel c = new CursorModel(3200, 2136);
+            int lv = 0;
+            t.LeaveTakeover += delegate { lv++; };
+            t.OnIdleMove(-5, 0, 0, 540);            // 进接管，_lastVx = 3199
+            c.SetPosition(3199, 1068);              // 对齐真实接线：Program.cs 入屏即
+                                                    // cursor.Reset()+SetPosition(入屏点)。
+                                                    // 右挂用例没显式调它是因为入屏点 x=0
+                                                    // 恰与 CursorModel 初值重合（巧合，不可依赖）
+            Feed(t, c, 1, 0);                       // 入口处向右抖 1 mickey
+            Check("L4", t.Current == KvmState.Takeover && lv == 0 && t.BackPush == 1,
+                "state=" + t.Current + " leave=" + lv + " backPush=" + t.BackPush
+                + " (expect Takeover,0,1)");
+        }
+
+        // ---- L5（左挂）: "走到边界"不算外推，在边界上继续外推 ≥40 才回程 ----
+        // 分三步，与 T12/T13 的右挂语义严格镜像。
+        {
+            EdgeTracker t = NewTrackerLeft();
+            CursorModel c = new CursorModel(3200, 2136);
+            int lv = 0;
+            t.LeaveTakeover += delegate { lv++; };
+            t.OnIdleMove(-5, 0, 0, 540);            // 进接管，vx=3199
+            c.SetPosition(3199, 1068);              // 同 L4：对齐真实接线（入屏即定位到入屏点）
+            Feed(t, c, -120, 0);                    // 往屏内走
+            Check("L5a", t.Current == KvmState.Takeover && c.X == 3079,
+                "state=" + t.Current + " vx=" + c.X + " (expect Takeover,3079)");
+            Feed(t, c, 120, 0);                     // 又滑回右缘：这是"走到边界"，不得算外推
+            Check("L5b", t.Current == KvmState.Takeover && c.X == 3199 && t.BackPush == 0,
+                "state=" + t.Current + " vx=" + c.X + " backPush=" + t.BackPush
+                + " (expect Takeover,3199,0)");
+            Feed(t, c, 20, 0);                      // 在边界上外推 20
+            Feed(t, c, 0, 3);                       // 纯纵向事件：既不累积也不清零
+            Feed(t, c, 25, 0);                      // 20 + 25 = 45 >= 40
+            Check("L5c", t.Current == KvmState.Idle && lv == 1,
+                "state=" + t.Current + " leave=" + lv + " (expect Idle,1)");
+        }
+
+        // ---- L6（左挂）: SetEdge 切换后立刻解除武装（防止换边瞬间被弹过去） ----
+        {
+            EdgeTracker t = NewTracker();
+            t.OnIdleMove(5, 0, 3839, 540);         // 右挂下先进入接管
+            Check("L6a", t.Current == KvmState.Takeover, "state=" + t.Current);
+            t.AbortTakeover();
+            t.SetEdge(0, 0, 1080, false);           // 切成左挂
+            bool armed = t.Armed;
+            int en = 0;
+            t.EnterTakeover += delegate(short x, short y) { en++; };
+            t.OnIdleMove(-5, 0, 0, 540);            // 此刻光标恰在新边缘
+            Check("L6b", !armed && t.Current == KvmState.Idle && en == 0,
+                "armedAfterSetEdge=" + armed + " state=" + t.Current + " en=" + en
+                + " (expect False, Idle, 0)");
         }
 
         Console.WriteLine("TOTAL: pass=" + _pass + " fail=" + _fail);
