@@ -520,3 +520,19 @@ Task 5: scoped re-review package → `review-b5235ca..47cbadc.diff`（1 commit, 
   dispatched **scoped re-reviewer（sonnet）**，除 finding 本身外点名两个聚焦检查：
   ①`edgeTop` 不再是 0 之后比例映射是否仍成立（要它对着代码验证实现者的论证，而不是接受）；
   ②原点是否**真的允许为负**（有没有哪个 `<= 0` 判断或 int 假设会把负原点静默钳成 0）。
+Task 5: fix round 1/5 复审 **clean** —— scoped re-reviewer（sonnet）判
+  **All findings addressed, no new Critical/Important breakage**。
+  它逐处给了行号（四常量 `:21-22`、读取 `:87-88`、回退 `:93/:95`、构造 `:102-103`、
+  `SetEdge` `:314-315`、日志 `:97-99`），并确认**判据"只测尺寸"被遵守**（`screenX/screenY` 从不被 `<= 0` 测，
+  `GetSystemMetrics` 返回有符号 `int` 故负原点原样流过）。
+  两项我点名的聚焦检查它都做了、且是**对着代码做的**：
+  ①比例映射的原点无关性——它自己追了 `EdgeTracker.cs:107` 的频带闸与 `:124-125` 的算式，
+    确认 `span` 恒为 `screenH`、分子恒落在 `[0, screenH-1]`，故**构造上就与原点无关**，
+    既有夹具（原点 0）仍是同一映射的有效测试；
+  ②确认无 `<= 0` 判断、无无符号转换、无钳制触及 `screenX/screenY`。
+  **按流程 → Task 5 complete**（代码提交 `821fa8f` + 修轮 `47cbadc`，review clean after 1 fix round）。
+Task 5: minor (deferred，复审者提出，**与本轮无关**): `Program.cs:87-90` 的虚拟桌面几何是**启动时快照**，
+  `SettingsApplied`（`:314`）沿用那批捕获值 —— 运行中改显示器布局会让 `SetEdge` 用旧边界。
+  这是**原实现就有的形态**（构造处也是一次性读取），本轮原点修复没有改变它。
+  一个观察：**本轮没有端到端覆盖非零原点**（夹具全是原点 0）。可接受：`EdgeTracker` 设计上就与原点无关，
+  而原点逻辑住在**不可离线测的 `Program.cs`** 里（P/Invoke）。记录在案、无需动作。
