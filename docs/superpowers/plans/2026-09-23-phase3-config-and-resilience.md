@@ -2248,6 +2248,9 @@ EOF
         int _failStreak;
         int _level;                 // 已升级到的档位：0 = 只做①，1 = 做过温和，2 = 做过激进
         string _lastReport = "";
+        // ⚠️ 去重键必须是【状态种类】，不能是含递增计数的完整消息——见 ReportWaiting 的注释。
+        // 初稿把 `_failStreak` 拼进等待消息里，导致去重永不成立、每轮写一行日志（约 720 行/小时）。
+        string _lastLoggedState = "";
 
         /// <summary>设备侧进程句柄。所有权归 Watchers：重连会换进程，退出时要 Kill 它。</summary>
         public System.Diagnostics.Process DeviceProcess { get { return _devProc; } }
@@ -2352,7 +2355,8 @@ EOF
                 }
 
                 string why = DeviceLauncher.DeviceVisible() ? "隧道/注入器未就绪" : "adb 看不到设备";
-                Report("等待设备…（已重试 " + _failStreak + " 次，" + why + "）");
+                // 状态条每轮更新、日志按状态种类去重 —— 千万别把 _failStreak 拼进去重的键里
+                ReportWaiting(why, _failStreak);
             }
         }
 
@@ -2398,8 +2402,36 @@ EOF
                 {
                     if (s == _lastReport) return;
                     _lastReport = s;
+                    _lastLoggedState = s;      // 与 ReportWaiting 共用去重键，避免两者互相打架
                     _log("# " + s);
                     _host.SetStatus(s);
+                });
+            }
+            catch (System.Exception) { }
+        }
+
+        /// <summary>等待中的状态上报：**状态条每轮更新（重试次数是活信息），
+        /// 日志只在【状态种类】变化时打一行**。
+        ///
+        /// ⚠️ 为什么不能直接 `Report("等待设备…（已重试 " + n + " 次，" + why + "）")`：
+        /// 那条消息里拼了每轮递增的 `n`，于是 `if (s == _lastReport) return;` **永远不相等**，
+        /// 每一轮都会写一行日志——默认 `ReconnectSeconds=5` 时掉线一小时约 **720 行**，
+        /// 正是 `Report` 注释里引以为戒的"刷日志淹没有效信息"，也违反本计划自己写的
+        /// Step 6 验收项 6（"每个状态只出现一次，不是每轮一次"）。
+        /// （这是初稿的真实缺陷，由 Task 8 的审查者发现；教训：**去重键里不能有会变的计数**。）</summary>
+        void ReportWaiting(string why, int attempts)
+        {
+            try
+            {
+                _host.BeginInvoke((MethodInvoker)delegate
+                {
+                    string status = "等待设备…（已重试 " + attempts + " 次，" + why + "）";
+                    _host.SetStatus(status);              // 状态条：每轮都更新
+                    if (why != _lastLoggedState)          // 日志：只在状态种类变了才写
+                    {
+                        _lastLoggedState = why;
+                        _log("# " + status);
+                    }
                 });
             }
             catch (System.Exception) { }

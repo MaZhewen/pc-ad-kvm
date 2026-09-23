@@ -807,3 +807,30 @@ Task 8: review package → `review-b74ef93..1886118.diff`（1 commit, 34610 B，
   另要求它**明确区分"已验证的代码"与"未验证的行为"**（本任务运行时验证为零），让用户知道自己在信什么。
   并告知：上一阶段 ledger 的纯追加、`System.Threading.Timer` 仅注释命中、构建与三套 harness 的结果
   **均已由控制方核实，无需重算**。**未预判任何结论。**
+Task 8: **review 回来 —— 0 Critical、1 Important、4 Minor；判 Needs fixes。**
+  审查者（opus）对**并发设计**这一最高风险部分的结论是**扎实的**，逐项给了证据：
+  升级状态机（`_failStreak` 逐轮 +1、②级门控 `>=3 && _level<1`、③级 `>=6 && _level<2`、
+  **`_level` 在动作前赋值故每级只触发一次**、成功路径把两者都归零 ⇒ 既不跳级也不会在健康时重升级、
+  瞬时抖动被吸收）；`Report` 的 `_lastReport` **单写者**（只在重连线程）；退出顺序 Stop-before-Close 正确
+  （并论证：`ApplicationExit` 在消息循环结束**之后**触发，故已排队但未派发的 `BeginInvoke` 永远不会执行，
+  那个残留窗口实际是关上的）；进程生命周期三处 kill 都有 `HasExited` + try/catch，**双杀无害**；
+  初始化顺序（它去 diff 之外 grep 了 `Program.cs`：`AttachConfig`(273)→`StartDevice`(274)→
+  `Install()`→`Start()`(345)→`Application.Run`(346)）；**D1–D5 确实有判别力**（逐条说明朴素实现过不了 D1/D3/D4）。
+Task 8: **Important 1 = 又是我的计划缺陷，而且是同一模式的第二次。**
+  `ReconnectLoop` 末尾 `Report("等待设备…（已重试 " + _failStreak + " 次，" + why + "）")`
+  ——**把每轮递增的 `_failStreak` 拼进了拿去去重的字符串**，于是 `if (s == _lastReport) return;`
+  **永远不相等** ⇒ **每轮都写一行日志**（默认 5s 一轮，掉线一小时约 **720 行**）。
+  **它直接违反 brief 自己的 Step 6 验收项 6**（"日志不刷屏——每个状态只出现一次，不是每轮一次"），
+  也违反 commit message 自己的声明；而 `Report` 的文档注释引用的正是本项目"刷日志淹没有效信息"的历史。
+  **换句话说：我的判据是对的，我的代码违反了我自己的判据** —— 本会话第二次（第一次是 L4/L5 的
+  `SetPosition`：判据"harness 必须复刻接线"对，代码却依赖了"初值刚好对"）。
+  **通用教训（值得进交接）：计划里凡是"去重/幂等/缓存"的键，都不能包含会随时间变化的计数或时间戳。**
+Task 8: **R15 —— 裁决：修**（Important 默认进循环，且它是我自己的计划缺陷）。
+  修法：拆开"状态条每轮更新"与"日志按状态种类去重"——加 `_lastLoggedState` 作共用去重键，
+  新增 `ReportWaiting(why, attempts)`（状态条含次数、每轮更新；日志只在 `why` 变化时写一行），
+  `Report(string)` 在写日志时同步更新 `_lastLoggedState` 以免两者互相打架。
+  并把 **Minor 3 折进本轮**（`_devProc` 加 `volatile`，一个关键字 + 一句注释，零风险）。
+  Minor 2/4/5 记入 ledger 交整分支终审 triage（重建期退出的微秒级窗口、`Process` 未 Dispose 的句柄慢泄漏、
+  `tests/agent-logic/run.ps1` 里一句过时注释）。
+  计划正文已就地修正（`_lastLoggedState` 字段 + `ReportWaiting` 方法 + 循环末尾改调用 +
+  一段"为什么去重键里不能有计数"的注释）。
