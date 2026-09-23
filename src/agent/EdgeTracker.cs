@@ -21,6 +21,19 @@ namespace PcKvm
         int _phoneH;
         readonly bool _phoneRight;      // true = 手机在 PC 右侧（此时从手机左边缘入屏）
 
+        // 回程外推的累积量（mickeys）。**必须累积越过阈值**才算"用户想回 PC"，
+        // 不能看单次增量符号：真机实测入屏瞬间虚拟光标就在 x=0（= 与 PC 相邻的那条边），
+        // 此时任何一次 rawDx=-1 的抖动都会满足"在边缘且向外推"，接管寿命 0–6 秒。
+        int _backPush;
+        // 上一次事件后的虚拟光标 x。用来区分「从屏内滑到边界」与「在边界上继续外推」：
+        // 前者是到达边界，不应计入外推；后者才是"越过边界"的回程意图。
+        int _lastVx;
+
+        /// <summary>回程外推阈值（mickeys）。一格的物理位移约 1 像素，
+        /// 40 相当于鼠标移动约 1 厘米——远大于抖动（实测抖动｜增量｜≤ 8），
+        /// 又小到用户在边界上"再推一下"即可触发。</summary>
+        const int BackPushThreshold = 40;
+
         public KvmState Current { get; private set; }
         public bool Armed { get; private set; }   // 回程冷却：离开边缘安全带后才重新武装
 
@@ -56,7 +69,11 @@ namespace PcKvm
         {
             Current = KvmState.Idle;
             Armed = false;
+            _backPush = 0;
         }
+
+        /// <summary>上一次回程判定所累积的外推量（mickeys），供日志记录。</summary>
+        public int BackPush { get { return _backPush; } }
 
         /// <summary>IDLE 态下、每次鼠标事件调用。cursorX/Y 为真实光标位置。</summary>
         public void OnIdleMove(int dx, int dy, int cursorX, int cursorY)
@@ -97,6 +114,8 @@ namespace PcKvm
 
             Current = KvmState.Takeover;
             Armed = false;
+            _backPush = 0;
+            _lastVx = phoneX;   // 入屏瞬间虚拟光标就落在这条"与 PC 相邻"的边上
             Action<short, short> h = EnterTakeover;
             if (h != null) h((short)phoneX, (short)phoneY);
         }
@@ -104,18 +123,33 @@ namespace PcKvm
         /// <summary>TAKEOVER 态下、每次鼠标事件调用。rawDx/rawDy 为原始（未钳制）增量，
         /// 表达用户意图；CursorModel 钳制后的增量表达实际位移，回程判定要的是前者——
         /// 入口处虚拟光标在 x=0，NextDx 对负增量恒钳成 0，用钳后值判定会让"刚进去就推回"
-        /// 永远无法离开。vx/vy 为虚拟光标当前坐标。</summary>
+        /// 永远无法离开。vx/vy 为虚拟光标当前坐标（已由调用方按本次增量更新）。
+        ///
+        /// 回程需要**累积越过阈值**，见 BackPush 与 BackPushThreshold 的注释：
+        /// 单次增量的符号不足以判定意图，否则入屏瞬间的 -1 抖动就会把用户踢回 PC。</summary>
         public void OnTakeoverMove(int rawDx, int rawDy, int vx, int vy)
         {
             if (Current != KvmState.Takeover) return;
 
-            // 回程判定：虚拟光标撞到与 PC 相邻的那条边
-            bool backAtEdge = _phoneRight ? vx <= 0 : vx >= _phoneW - 1;
-            if (!backAtEdge) return;
+            bool atEdge = _phoneRight ? vx <= 0 : vx >= _phoneW - 1;
+            bool wasAtEdge = _phoneRight ? _lastVx <= 0 : _lastVx >= _phoneW - 1;
+            _lastVx = vx;
 
-            // 必须仍在继续往外推（用原始增量=用户意图），否则光标停在边上就会立刻回程
-            bool pushingBack = _phoneRight ? rawDx < 0 : rawDx > 0;
-            if (!pushingBack) return;
+            // 两种情况都不算外推：光标还在屏内（含"本次事件刚刚扫到边界"——
+            // 那是走到边界，不是越过边界）；或方向朝屏内（抖动/反向）。
+            if (!atEdge || !wasAtEdge) { _backPush = 0; return; }
+
+            int outward = _phoneRight ? -rawDx : rawDx;   // >0 = 朝 PC 方向推
+            // 纯纵向/静止事件（outward == 0）**既不累积也不清零**：这类事件很常见
+            //（日志里 `dx=0 dy=N` 的采样行大量存在——斜推、高回报率鼠标、手腕横移时分包），
+            // 若拿它清零，用户斜着往 PC 方向推时累积量会被反复打散，表现为"回不去"，
+            // 那比"退得太容易"更糟。反向增量才清零（正常接线下反向会先把光标带离边界，
+            // 这里是防御性兜底）。
+            if (outward < 0) { _backPush = 0; return; }
+            if (outward == 0) return;
+
+            _backPush += outward;
+            if (_backPush < BackPushThreshold) return;
 
             Current = KvmState.Idle;
             Armed = false;          // 回到 IDLE 后先解除武装，等光标离开安全带

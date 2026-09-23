@@ -45,7 +45,8 @@ namespace PcKvm
             // supp 必须声明在 log 之后、transport 装配块之前：Task 8 会在
             // transport.Disconnected 处理器与心跳定时器里调 supp.Release()，
             // C# 局部变量不能前向引用（Task 4 踩过）。它只依赖 hwnd 与 log。
-            Suppressor supp = new Suppressor(hwnd, delegate(string s) { log.WriteLine(s); });
+            Suppressor supp = new Suppressor(hwnd, delegate(string s) { log.WriteLine(s); },
+                delegate(bool on) { host.SetCursorHidden(on); });
 
             // transport 需在 MouseMoved 处理器之前就绪（C# 局部变量在声明点之后才可见）
             Transport transport = new Transport(DeviceLauncher.Port);
@@ -100,7 +101,9 @@ namespace PcKvm
             {
                 supp.Release();
                 host.SetStatus("IDLE");
-                log.WriteLine("# LEAVE takeover");
+                // 回程外推累积量：正常回程应 >= 阈值(40)；若日志里出现很小的值，
+                // 说明仍有未被阈值挡住的回程路径
+                log.WriteLine("# LEAVE takeover（回程外推累积 " + tracker.BackPush + "）");
                 transport.Send(Protocol.EncodeLeave());
             };
             supp.ForegroundLost += delegate
@@ -156,6 +159,13 @@ namespace PcKvm
                 // 此时转发会在手机光标停留处产生误点击/误滚动（既有缺陷，Ruling 27）
                 if (cursor != null && tracker.Current == KvmState.Takeover)
                 {
+                    // 接管期的按钮事件**不抽样**记录：MOUSE 行是每 50 事件一条（2% 采样），
+                    // 而一次点击只有 2 个事件，几乎必然被漏掉——本项目正因此无法证伪
+                    // "点击导致前台被抢"这个假设。按钮事件本身很稀疏，全记不构成负担。
+                    if ((e.ButtonFlags & ~RawInput.RI_MOUSE_WHEEL) != 0)
+                        log.WriteLine("# 接管中按钮 flags=0x" + e.ButtonFlags.ToString("X4")
+                            + " phone(" + cursor.X + "," + cursor.Y + ")");
+
                     short wheel = (short)(e.WheelDelta / 120);   // Windows 一格 = 120，HID 一格 = 1
                     if (wheel != 0) transport.Send(Protocol.EncodeScroll((short)0, wheel));
 

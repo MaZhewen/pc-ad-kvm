@@ -99,6 +99,28 @@ public class ScancodeMap {
             case 0x57: return 0x44; case 0x58: return 0x45;   // F11, F12
             case 0x45: return 0x53;   // NumLock
             case 0x46: return 0x48;   // ScrollLock
+
+            // ↓ 数字键盘（NumLock 开着时的形态；NumLock 关时同样这些物理键发 E0 前缀，
+            // 走上面 E0 表的 Home/End/箭头那一组）。原来整段缺失 → 返回 -1 → 注入器静默丢弃。
+            // 真机缺陷现场：接管期内用户按的 6 个键全是这一段（0x52 0x52 0x47 0x52 0x47 0x52
+            // = 小键盘 0 0 7 0 7 0），手机上毫无反应；用户平时就用小键盘打数字
+            //（早先会话实测 0x50 0x52 0x50 0x4D = "2026"）。
+            // 这 15 个 usage（0x55-0x63）都在 HID 描述符按键数组的 Usage Maximum 0x65 之内，
+            // 不会被解析器丢弃（对比：E0 修饰键那轮就是因为映射到 0xE3+ 而整段失效）。
+            case 0x37: return 0x55;   // 小键盘 *
+            case 0x47: return 0x5F;   // 小键盘 7
+            case 0x48: return 0x60;   // 小键盘 8
+            case 0x49: return 0x61;   // 小键盘 9
+            case 0x4A: return 0x56;   // 小键盘 -
+            case 0x4B: return 0x5C;   // 小键盘 4
+            case 0x4C: return 0x5D;   // 小键盘 5
+            case 0x4D: return 0x5E;   // 小键盘 6
+            case 0x4E: return 0x57;   // 小键盘 +
+            case 0x4F: return 0x59;   // 小键盘 1
+            case 0x50: return 0x5A;   // 小键盘 2
+            case 0x51: return 0x5B;   // 小键盘 3
+            case 0x52: return 0x62;   // 小键盘 0
+            case 0x53: return 0x63;   // 小键盘 .
             default:   return -1;
         }
     }
