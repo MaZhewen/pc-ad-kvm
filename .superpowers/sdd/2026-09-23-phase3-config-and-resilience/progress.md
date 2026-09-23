@@ -1081,3 +1081,25 @@ Task: **遗留一处我决定晚一步处理**：终审 Minor #11 指出 spec §
 "错误注释让下一个会话建立错误假设"那一类（`ScancodeMap` 那句就是先例），故**不打算不管**：
 等本次 scoped 复审回来后作为一条独立的小改交给实现者，并在 ledger 记明"该条未经复审"及理由
 （注释与 spec 措辞、零代码语义，再开一轮复审的边际收益低于成本）。**这条要如实告知用户。**
+Task: 终审修复波的 scoped 复审 **clean** —— 判 **All findings addressed, no new Critical/Important breakage** ✅。
+  8 项逐条给了行号证据（Join 在 `Transport.cs:117-129`、`Config.cs:17-18` 假话已纠且初值未动、
+  `ReadBack` 替换彻底、`MouseScaler` 注释改为"几何变化路径**刻意不调它**"且确认未加调用、
+  ini 头注释改为实情、README 24/58 且补了 L1–L6b、`Process.Start` 已 try/catch 且两个调用方本就有 null 检查、
+  `Interlocked` 读写）。
+  它对 **item-8 的偏离**给了明确判断：**不是妥协，而是该语义在 C# 里唯一合法的写法，且严格更强**
+  （`Interlocked.Read` 是原子 + 获取栅栏的 64 位读，`Interlocked.Exchange` 是全栅栏写，
+  32 位进程下也无撕裂）。
+Task: **它做了一个关键澄清，纠正了终审的严重性判断（值得单独记）。** 关于 Important #1 的
+  "进程被杀"：accept 线程上的 `log.WriteLine` 抛出的 `ObjectDisposedException` **会被 `AcceptLoop`
+  既有的 `catch (Exception)` 兜住**（`Transport.cs:62`），`finally` 执行、`_running` 为 false 故循环结束，
+  且线程是 `IsBackground`（`:41`）**不会吊住进程** ⇒ **最坏结果是"日志尾巴被截断"，不是进程被杀**。
+  它明确注明：**这个兜底来自既有的 catch、不是新代码**；Join 的价值是让**正常路径可证地写完再关**，
+  而有界超时是刻意用"可证性"换"adb 在飞时也能保证退出"。
+Task: **技术洞见（值得进交接）**：**"后台线程写已关闭的日志"只在【线程体没有外层 catch】时才致命。**
+  `Transport` 有外层 catch ⇒ 只是丢日志尾巴；而 `Watchers` **原计划**里的重连线程没有 ⇒ 那才是真的会杀进程。
+  **同一形状、两种后果**——这正是 R8/R9 那一类为什么必须按"线程体有没有兜底"分别判断，
+  不能凭形状一刀切。两个独立审查者（opus 终审 vs sonnet 复审）对同一段代码给出了不同的后果判断，
+  后者更具体（引了行号），我采纳后者，并把两边都记下来。
+Task: 另记一条 out-of-scope：`Config.cs:17-18` 的"除 MouseSensitivity 外与阶段二一致"这句里
+  把 `ReconnectSeconds=5` 也算了进去，但阶段二**根本没有重连监督** ⇒ 严格说重连行为也不同于阶段二。
+  spec §5 的措辞避开了这个问题（只列 `Right` + `AllowKillAdb=false`）。纯装饰，与 R18 针对的那条无关。
