@@ -42,6 +42,10 @@ namespace PcKvm
             log.AutoFlush = true;
             log.WriteLine("# 启动 " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
 
+            // cfg 必须声明得足够早：后续的 scaler（Task 4）、EdgeTracker 构造（Task 5，
+            // 读 cfg.PhoneOnLeft）与 TrayUi 构造都要用它——C# 局部变量不能前向引用。
+            Config cfg = Config.Load(delegate(string s) { log.WriteLine(s); });
+
             // supp 必须声明在 log 之后、transport 装配块之前：Task 8 会在
             // transport.Disconnected 处理器与心跳定时器里调 supp.Release()，
             // C# 局部变量不能前向引用（Task 4 踩过）。它只依赖 hwnd 与 log。
@@ -263,8 +267,17 @@ namespace PcKvm
             };
 
             // 托盘与生命周期集中到 TrayUi（Ruling 33）。必须在 Application.Run 之前 Install。
-            TrayUi trayUi = new TrayUi(host, supp, watchers, transport, log, devProc);
+            TrayUi trayUi = new TrayUi(host, supp, watchers, transport, log, devProc, cfg);
             trayUi.Install();
+
+            // 应用设置由组合根订阅处理（TrayUi 只弹对话框+写盘，见其 SettingsApplied 注释）。
+            // 本任务先只记账；速度在 Task 4 接（MouseScaler）、跨越边在 Task 5 接（SetEdge）。
+            trayUi.SettingsApplied += delegate(Config c)
+            {
+                log.WriteLine("# 设置已应用：速度=" + c.MouseSensitivity.ToString("F2")
+                              + " 手机在" + (c.PhoneOnLeft ? "左" : "右") + "侧"
+                              + " 强杀adb=" + c.AllowKillAdb);
+            };
 
             watchers.Start();
             Application.Run(host);

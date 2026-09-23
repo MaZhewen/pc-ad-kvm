@@ -72,6 +72,42 @@ static class AgentLogicTest
             && P("ReconnectSeconds=61\n").ReconnectSeconds == 5,
             "0.09/3.01/1/61 均应回退");
 
+        // ---- C9: Save() → Load() 写回往返（spec §11 的缺口，R10 补上）----
+        // Save/Load 用 AppDomain.CurrentDomain.BaseDirectory——对本 harness 是
+        // %TEMP%\pckvm-tests\agent-logic\ 输出目录，所以完全自包含。
+        Config c9 = new Config();
+        c9.MouseSensitivity = 1.25;
+        c9.PhoneOnLeft = true;
+        c9.AllowKillAdb = true;
+        c9.ReconnectSeconds = 12;
+        bool saved9 = c9.Save();
+        Config c9b = Config.Load(null);
+        Check("C9 Save/Load 写回往返", saved9
+            && c9b.MouseSensitivity == 1.25 && c9b.PhoneOnLeft
+            && c9b.AllowKillAdb && c9b.ReconnectSeconds == 12,
+            "saved=" + saved9 + " sens=" + c9b.MouseSensitivity + " left=" + c9b.PhoneOnLeft
+            + " kill=" + c9b.AllowKillAdb + " rec=" + c9b.ReconnectSeconds);
+
+        // ---- C10: Save() 写出的文件是带 BOM 的 UTF-8 且含预期键 ----
+        string iniPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, Config.FileName);
+        bool bom10 = false, keys10 = false;
+        try
+        {
+            byte[] head = new byte[3];
+            using (FileStream fs = File.OpenRead(iniPath))
+            {
+                int n = fs.Read(head, 0, 3);
+                bom10 = n == 3 && head[0] == 0xEF && head[1] == 0xBB && head[2] == 0xBF;
+            }
+            string text10 = File.ReadAllText(iniPath);
+            keys10 = text10.Contains("MouseSensitivity=1.25") && text10.Contains("PhoneSide=Left");
+        }
+        catch (Exception) { }
+        Check("C10 写盘 UTF-8 BOM + 预期键", bom10 && keys10,
+            "bom=" + bom10 + " keys=" + keys10);
+        // 清理 C9 写下的 ini（C10 还要用它，所以删在最后），保证重跑从零开始
+        try { File.Delete(iniPath); } catch (Exception) { }
+
         Console.WriteLine("TOTAL: pass=" + _pass + " fail=" + _fail);
         if (_fail > 0) Environment.Exit(1);
     }

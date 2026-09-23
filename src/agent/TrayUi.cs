@@ -22,11 +22,17 @@ namespace PcKvm
         readonly Transport _transport;
         readonly StreamWriter _log;
         readonly Process _devProc;
+        readonly Config _cfg;
 
         public NotifyIcon Tray { get; private set; }
 
+        /// <summary>设置对话框点了确定、且配置已更新并写盘之后抛出。
+        /// 应用行为（改速度、换跨越边）由 Program.cs 订阅处理——它才持有 scaler/tracker/supp。
+        /// 本类只做界面与持久化，不碰运行时状态。</summary>
+        public event Action<Config> SettingsApplied;
+
         public TrayUi(MessageHost host, Suppressor supp, Watchers watchers,
-                      Transport transport, StreamWriter log, Process devProc)
+                      Transport transport, StreamWriter log, Process devProc, Config cfg)
         {
             _host = host;
             _supp = supp;
@@ -34,6 +40,7 @@ namespace PcKvm
             _transport = transport;
             _log = log;
             _devProc = devProc;
+            _cfg = cfg;
         }
 
         /// <summary>建托盘、装菜单、订阅生命周期事件。必须在 Application.Run 之前调用。</summary>
@@ -44,10 +51,24 @@ namespace PcKvm
             Tray.Text = "PC-KVM";
             Tray.Visible = true;
 
+            MenuItem settings = new MenuItem("设置…");
+            settings.Click += delegate
+            {
+                using (SettingsForm f = new SettingsForm(_cfg))
+                {
+                    if (f.ShowDialog(_host) != DialogResult.OK) return;
+                    _cfg.MouseSensitivity = f.MouseSensitivity;
+                    _cfg.AllowKillAdb = f.AllowKillAdb;
+                    _cfg.PhoneOnLeft = f.PhoneOnLeft;
+                    if (!_cfg.Save())
+                        _log.WriteLine("# 配置写盘失败（设置本次仍生效，只是下次启动会丢）");
+                }
+                Action<Config> h = SettingsApplied;
+                if (h != null) h(_cfg);
+            };
             MenuItem quit = new MenuItem("退出");
             quit.Click += delegate { Application.Exit(); };
-            // 任务 3 会在这两行之间插入「设置…」
-            Tray.ContextMenu = new ContextMenu(new MenuItem[] { quit });
+            Tray.ContextMenu = new ContextMenu(new MenuItem[] { settings, quit });
 
             _host.FormClosing += delegate { _supp.Release(); };
             Application.ApplicationExit += delegate
