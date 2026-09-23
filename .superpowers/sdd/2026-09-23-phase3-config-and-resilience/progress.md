@@ -350,3 +350,71 @@ Task 3: minor (deferred): `tests/agent-logic/Main.cs` 的 C10 用 `catch (Except
   失败时只看到 `bom=False keys=False`、看不出是文件缺失还是被占用。非阻塞（C9 同进程写它）。
 Task 3: 计划笔误已修：Task 3 Step 6 的 `git add` 初稿只列两个文件（会提交出编译不过的树）——
   实现者拦下并改用全部四个；计划正文已改为四个并注明原因。
+
+## 执行记录 · Task 4
+
+Task 4: dispatched implementer (**sonnet**) at BASE **69d12fe**。随附 Task 1–3 的接口事实
+  （`cfg` 已在 `Program.cs:47` 声明且不许挪；`SettingsApplied` 在 `Program.cs:275` 已有**唯一**订阅，
+  要**扩展**它而不是再加一个；`Main.cs` 现有 10 条用例、新用例要插在 `TOTAL:` 行之前；
+  `MouseScaler` 只吃 public 类型故应为 public）。
+Task 4: **R11 —— 不许启动 `dist\pc-kvm.exe`，真机的手感验收移交用户。**
+  三条理由：①跑起来会锁 `dist\pc-kvm.exe`，**Task 5–8 全都构建不了**；②手机目前**离线**，
+  启动会弹模态框永久阻塞；③子代理感受不到鼠标手感。
+  处置：实现者的验收 = build + 三套 harness + 行数 + 三条静态核对；**运行时验收并入一次汇总的真机
+  会话**（连同 R10 移交的 Task 3 对话框清单）。
+Task 4: 派发里点名一处**承重的语义**要它自查：虚拟光标模型与发给手机的增量**必须同时按缩放后的值**
+  前进（`cursor.NextDx(scaler.ApplyX(e.Dx))`），而**回程判定必须继续用原始增量**
+  （`tracker.OnTakeoverMove(e.Dx, e.Dy, ...)`）——两者一旦混用，模型就会与手机真实光标漂移。
+Task 4: 两条前序 deferred 转交本任务（都在它要编辑的文件里）：
+  ①**C5 改成有判别力**（解析前把 `Thread.CurrentThread.CurrentCulture` 设成逗号小数地区如 `de-DE`，
+  再恢复）——否则删掉 `InvariantCulture` 参数本机套件仍全绿；
+  ②`tests/README.md` 跑法区块的"两个脚本"改成三套。
+  这在流程上对应 skill 的"If an earlier task parked a finding in the area this task touches,
+  carry a pointer to that ledger entry in the dispatch"。
+Task 4: implementer **DONE** — 两个提交：**d7099a0**（feat #1）+ **c0adf03**（docs tests 计数 两个→三个）。
+  agent-logic `pass=18 fail=0`（**总数精确命中预期**）、edge-tracker `pass=15 fail=0`、
+  scancode-map `45/45`；build 零警告；`Program.cs` **294 → 298**。
+Task 4: **C5 的修复带了负对照（值得记一笔）**：实现者把 harness 复制到 `%TEMP%`、**删掉
+  `Config.Parse` 的 `InvariantCulture` 参数**，观察到 `FAIL C5 sens=0.5` —— 这就**证明了这条用例
+  现在真有判别力**，而不只是"改了看着对"。这正是本项目"控制方独立复算/不采信自述"的精神，
+  被实现者主动用上了。计划里那条 Minor 至此真正关闭。
+Task 4: **控制方独立核实（未采信自述）**：自己重编 → `编译成功`、**15 个源文件**、exit 0、37.5 KB；
+  三套 harness 复跑 `18/15/45` 全绿；`rg 'sensitivity' src/agent/` → **`Program.cs` 里那处裸局部量已消失**，
+  剩下的全在 `MouseScaler.cs` 内部（字段/构造参数/方法参数/注释）；
+  `scaler.` 的用法实测为 `:116 Reset()`（在 EnterTakeover 内）、`:168-169 ApplyX/ApplyY`（在 MouseMoved 内）、
+  `:280 SetSensitivity`（在 SettingsApplied 处理器内）—— **位置全部正确**；
+  `SettingsApplied += ` 计数 = **1**（未新增第二个订阅）；
+  `wc -l`：`Program.cs` 298 / `MouseScaler.cs` 56。
+Task 4: **行数预算**：已用 298；剩 T5/T6/T7/T8 估约 +30 → 末尾约 328/360，余量 32。
+Task 4: implementer 自报一条 minor（终评交审查者）：**几何变化路径（接管中旋转）没有 `scaler.Reset()`**，
+  只有 `EnterTakeover` 有 —— 属简报设计（Step 5 只接了 EnterTakeover）。残余 <1px，靠累积自闭合。
+Task 4: review package → `review-69d12fe..c0adf03.diff`（**2 commits**，15835 B —— 两个都是实现者的提交，
+  故**无需** BASE 簿记修正）。dispatched **task reviewer（sonnet）**，点名五个风险面：
+  ①小数余量的符号对称/截断方向/200 次不漂移；②**缩放值与原始值的那条分界线**（模型与上行用缩放、
+  回程判定用原始）要核两个调用点；③几何变化路径不清余量是否会真造成可见漂移；④中途改系数是否有状态不一致；
+  ⑤C5 的 culture 切换是否真能判别、且**每条路径都恢复了原 culture**。另要求把"真机手感验收已按 R11 移交用户"
+  作为 ⚠️ 明说。**未预判结论**。
+Task 4: **review 回来 —— Spec ✅ 合规 / Task quality Approved**；**0 Critical、0 Important、4 Minor**。
+  审查者做了五项定点核查：**手算**了余量算术（`Truncate` 对负方向对称、200×dx=1@0.5 恰好 100 像素
+  无漂移、余量恒落在 (−1,1) 故不可能溢出）；确认**缩放值与原始值的分界线在两个调用点都正确**
+  （`:143-144` 缩放上行、`:149` 原始判回程）；读了 diff 之外的 `Program.cs:149-157` 确认几何变化路径
+  确实没调 `scaler.Reset()` 并判断"真·亚像素且自闭合，保留余量其实更正确（用户的手确实动了那些 mickey）"；
+  确认 `SetSensitivity` 中途改值不会造成状态不一致；**逐条论证了 C5 的 culture 切换为什么真的能判别**
+  （de-DE 会把 "0.35" 读成 35 → 越界回退 0.50，与它报告的 `FAIL C5 sens=0.5` 一致）。
+  它还核了 S1–S8 是否"构造即真"：S2 在旧实现下会是 0/0/0、S3 在 `Math.Floor` 下会是 −1/−1、
+  S6 在 Reset 不清残差时必红、S8 钉住闭合 —— 结论是这套用例**有判别力**。
+Task 4: **按流程 Minor 不进修轮 → Task 4 complete**（提交 `d7099a0` + `c0adf03`，review clean）。
+Task 4: minor (deferred) → **parked 交终审（附我的倾向）**：`MouseScaler.cs:52` 的 `Reset()` 文档注释写
+  "进入接管/**几何变化**时清零残差"，但只有 `EnterTakeover` 真的调它，几何变化那条路径没有——
+  **注释夸大了接线**。文本是简报逐字的（我写的），但未来读者看到的是代码。
+  **我的倾向**：修注释（或顺手在几何路径也接上，虽非必需）。**理由不是洁癖**：本项目已经因为
+  一句**写错的注释**（`ScancodeMap` 那句"NumLock 关时发 E0 前缀"）让一整个任务建立在错误假设上。
+  **代价（若保留）**：未来读者可能以为几何变化会清余量，据此做判断。
+Task 4: minor (deferred): C5 的 culture 恢复没放在 `try/finally` 里（`Config.Parse` 从不抛，故无害，
+  但 `finally` 能让不变量对未来改动更显式）。
+Task 4: minor (deferred) → **Task 5 会自然消掉**：`Program.cs:276` 的注释"速度在 Task 4 接（MouseScaler）"
+  现在读起来像在做完的事上留 TODO —— Task 5 本来就要整体重写那个 `SettingsApplied` 处理器。
+Task 4: minor (deferred): 对二进制不可精确表示的因素（0.2、0.7），边界那一像素可能早一拍或晚一拍
+  （double 舍入），且没有用例钉住非二进制可表示的因素。余量从不丢弃故误差有界在 1 像素内并自闭合，
+  纯装饰性观察。
+Task 4: **complete**（提交 `d7099a0` + `c0adf03`，review clean）。
