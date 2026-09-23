@@ -6,23 +6,6 @@ using System.Windows.Forms;
 
 namespace PcKvm
 {
-    /// <summary>隐藏主窗体：只作为 Raw Input 的消息宿主与托盘载体，不显示任何 UI。</summary>
-    class MessageHost : Form
-    {
-        public MessageHost()
-        {
-            FormBorderStyle = FormBorderStyle.None;
-            ShowInTaskbar = false;
-            WindowState = FormWindowState.Minimized;
-            Opacity = 0;
-        }
-
-        protected override void SetVisibleCore(bool value)
-        {
-            base.SetVisibleCore(false);   // 永不显示
-        }
-    }
-
     static class Program
     {
         static volatile int _phoneW = 0;
@@ -42,6 +25,7 @@ namespace PcKvm
 
             MessageHost host = new MessageHost();
             IntPtr hwnd = host.Handle;   // 触发句柄创建
+            host.Show();   // 必须真实显示，隐藏窗口无法持有前台
 
             RawInput ri = new RawInput(hwnd);
             ri.Register();
@@ -57,6 +41,11 @@ namespace PcKvm
                 true, System.Text.Encoding.UTF8);
             log.AutoFlush = true;
             log.WriteLine("# 启动 " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+
+            // supp 必须声明在 log 之后、transport 装配块之前：Task 8 会在
+            // transport.Disconnected 处理器与心跳定时器里调 supp.Release()，
+            // C# 局部变量不能前向引用（Task 4 踩过）。它只依赖 hwnd 与 log。
+            Suppressor supp = new Suppressor(hwnd, delegate(string s) { log.WriteLine(s); });
 
             // transport 需在 MouseMoved 处理器之前就绪（C# 局部变量在声明点之后才可见）
             Transport transport = new Transport(DeviceLauncher.Port);
@@ -82,6 +71,22 @@ namespace PcKvm
 
             tracker.EnterTakeover += delegate(short px, short py)
             {
+                // 安全不变量 4：未连接时绝不夺取前台/锁光标——断线后 tracker 已回 IDLE，
+                // 再推边缘会重新进 TAKEOVER，而 Task 8 的心跳恢复在未连接时直接 return，
+                // 救不了"前台被夺+光标被钳"的状态
+                if (!transport.IsConnected)
+                {
+                    log.WriteLine("# 未连接设备，放弃这次跨越");
+                    tracker.AbortTakeover();
+                    return;
+                }
+                if (!supp.Engage())
+                {
+                    // 夺取失败就放弃这次跨越，保持 IDLE，绝不能让用户被困在锁死光标的状态里
+                    tracker.AbortTakeover();
+                    return;
+                }
+                host.SetStatus("TAKEOVER → 手机");
                 log.WriteLine("# ENTER takeover at phone(" + px + "," + py + ")");
                 transport.Send(Protocol.EncodeHome());
                 cursor.Reset();
@@ -90,9 +95,12 @@ namespace PcKvm
             };
             tracker.LeaveTakeover += delegate
             {
+                supp.Release();
+                host.SetStatus("IDLE");
                 log.WriteLine("# LEAVE takeover");
                 transport.Send(Protocol.EncodeLeave());
             };
+            supp.ForegroundLost += delegate { tracker.AbortTakeover(); host.SetStatus("IDLE"); };
 
             ri.MouseMoved += delegate(RawMouseEvent e)
             {
@@ -211,8 +219,16 @@ namespace PcKvm
             quit.Click += delegate { Application.Exit(); };
             tray.ContextMenu = new ContextMenu(new MenuItem[] { quit });
 
+            // 前台守卫：前台被抢走（UAC 安全桌面、锁屏等）时立即放弃抑制
+            Timer guard = new Timer();
+            guard.Interval = 250;
+            guard.Tick += delegate { supp.CheckForeground(); };
+            guard.Start();
+
+            host.FormClosing += delegate { supp.Release(); };
             Application.ApplicationExit += delegate
             {
+                supp.Release();
                 log.WriteLine("# 退出");
                 tray.Visible = false;
                 transport.Stop();

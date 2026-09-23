@@ -51,6 +51,13 @@ namespace PcKvm
             _phoneH = h;
         }
 
+        /// <summary>放弃跨越：回到 IDLE 并解除武装，等待用户把光标移离边缘。</summary>
+        public void AbortTakeover()
+        {
+            Current = KvmState.Idle;
+            Armed = false;
+        }
+
         /// <summary>IDLE 态下、每次鼠标事件调用。cursorX/Y 为真实光标位置。</summary>
         public void OnIdleMove(int dx, int dy, int cursorX, int cursorY)
         {
