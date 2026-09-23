@@ -52,6 +52,7 @@
 | 文件 | 动作 | 职责 |
 |---|---|---|
 | `src/agent/Watchers.cs` | 新建 | 后台守护集中地：几何轮询线程 + 前台守卫 Timer + 心跳 Timer + 断联重连监督（任务 1、8） |
+| `src/agent/TrayUi.cs` | 新建 | 托盘图标/菜单、设置入口、退出清理（任务 1；任务 3/5/8 就地扩展） |
 | `src/agent/Config.cs` | 新建 | `pc-kvm.ini` 读写。`Parse` 纯函数、`Load`/`Save` 碰磁盘（任务 2） |
 | `src/agent/SettingsForm.cs` | 新建 | 设置对话框：速度滑块 + 左/右 + 强杀 adb 开关（任务 3） |
 | `src/agent/MouseScaler.cs` | 新建 | 原始增量 → 缩放增量，**带小数余量累积**（任务 4） |
@@ -71,21 +72,44 @@
 
 ---
 
-### Task 1: P0 —— 抽 `Watchers.cs`（纯搬迁）
+### Task 1: P0 —— 抽 `Watchers.cs` + `TrayUi.cs`（纯搬迁）
 
 **为什么必须先做**：`Program.cs` 实测 **359/360** 行（`wc -l`），Ruling 26 明文承诺
 "此后若再超 360 必须抽取，不得再上调"。任务 3/5/6/7/8 都要往里加东西。
 
+**为什么是两块而不是一块（Ruling 33，飞行前扫描的修正）**：初稿只搬三个 watcher（62 行），
+实测估算后 `Program.cs` 会在本计划末尾落到 **约 371 行**——**踩破 360 红线 11 行**，
+而任务 5/6/7/8 里都写着"≤360"的自检，那条自检必然踩空。精确测量（`wc -l` 口径）：
+
+| 块 | 行号 | 行数 |
+|---|---|---|
+| 几何轮询线程 | 252-268 | 17 |
+| 前台守卫定时器 | 278-282 | 5 |
+| 心跳定时器 | 284-323 | 40 |
+| 托盘 | 270-276 | 7 |
+| 逃逸键 | 325-335 | 11 |
+| 生命周期（FormClosing + ApplicationExit） | 337-346 | 10 |
+| **合计** | | **90** |
+
+搬 90 行、补回约 17 行 → `359−90+17 = 286`；本计划后续功能共加约 60 行 → **约 346，余量 14** ✅。
+只搬 62 行则落在约 371 ❌。两块分别成文件是因为它们属**不同风险域**：
+`Watchers` 管"后台存活性检查"（含 adb 进程 churn，审查者点名的风险区），
+`TrayUi` 管"界面与生命周期"。合成一个文件会让 `Watchers` 变成杂物间。
+
 **Files:**
 - Create: `src/agent/Watchers.cs`
-- Modify: `src/agent/Program.cs`（删三段、加接线）
+- Create: `src/agent/TrayUi.cs`
+- Modify: `src/agent/Program.cs`（删六段、加接线）
 
 **Interfaces:**
-- Consumes: `Transport`、`EdgeTracker`、`Suppressor`、`MessageHost`、`Protocol`（都已存在）
+- Consumes: `Transport`、`EdgeTracker`、`Suppressor`、`MessageHost`、`Protocol`、`DeviceLauncher`（都已存在）
 - Produces:
   - `Watchers(Transport transport, EdgeTracker tracker, Suppressor supp, MessageHost host, Action<string> log)`
   - `void Watchers.Start()`
   - `event Action<int,int> Watchers.GeometryQueried` —— **每次成功查到几何都抛（含未变化）**
+  - `TrayUi(MessageHost host, Suppressor supp, Watchers watchers, Transport transport, Action<string> log, Process devProc)`
+  - `void TrayUi.Install()`
+  - `NotifyIcon TrayUi.NotifyIcon { get; }`（任务 3 往里加菜单项）
 
 - [ ] **Step 1: 新建 `src/agent/Watchers.cs`**
 
@@ -120,6 +144,7 @@ namespace PcKvm
 
         long _lastPongTicks = DateTime.UtcNow.Ticks;
         uint _pingSeq;
+        volatile bool _stop;            // 退出时置位，让后台线程自己收工
         System.Threading.Thread _geoPoll;
         Timer _guard;
         Timer _heartbeat;
@@ -150,9 +175,10 @@ namespace PcKvm
         {
             _geoPoll = new System.Threading.Thread(delegate()
             {
-                while (true)
+                while (!_stop)
                 {
                     System.Threading.Thread.Sleep(2000);
+                    if (_stop) return;
                     if (!_transport.IsConnected) continue;   // 掉线时静默跳过，不刷日志
                     int w, h;
                     if (!DeviceLauncher.QueryDisplay(out w, out h)) continue;
@@ -173,6 +199,17 @@ namespace PcKvm
             _heartbeat.Interval = 1000;
             _heartbeat.Tick += delegate { HeartbeatTick(); };
             _heartbeat.Start();
+        }
+
+        /// <summary>退出前调用（由 TrayUi 的 ApplicationExit 处理器调用）。
+        /// 必须在 log.Close() 之前——否则后台线程会写进一个已关闭的 StreamWriter。
+        /// 不 Join 线程：几何轮询是 IsBackground，最多 2 秒后自己看到 _stop 退出，
+        /// 而进程此刻已经在收尾，不值得为它多等。</summary>
+        public void Stop()
+        {
+            _stop = true;
+            if (_guard != null) _guard.Stop();
+            if (_heartbeat != null) _heartbeat.Stop();
         }
 
         void HeartbeatTick()
@@ -204,13 +241,93 @@ namespace PcKvm
 }
 ```
 
-- [ ] **Step 2: 修改 `src/agent/Program.cs` —— 删掉三段被搬走的代码**
+- [ ] **Step 1b: 新建 `src/agent/TrayUi.cs`**
 
-删除以下三段（**逐字删除，不要顺手改动别处**）：
-- 几何轮询线程整块（原 `:252-268`，`System.Threading.Thread rotPoll = ...` 到 `rotPoll.Start();`）
-- 托盘图标之后的前台守卫定时器（原 `:278-282`，注释 `// 前台守卫：...` 到 `guard.Start();`）
-- 心跳块（原 `:284-323`，`// ---- Task 8 安全网 ...` 到 `heartbeat.Start();`），
-  **包含其中那个只更新 `lastPongTicks` 的 `transport.MessageReceived` 订阅**（已搬进 Watchers）
+同样**逐字照抄**（托盘块 `:270-276`、逃逸键 `:325-335`、生命周期 `:337-346`）。
+`StreamWriter` 直接传进来（而不是 `Action<string>`），因为这里要用它的 `Close()`。
+
+```csharp
+using System;
+using System.Diagnostics;
+using System.Drawing;
+using System.IO;
+using System.Windows.Forms;
+
+namespace PcKvm
+{
+    /// <summary>
+    /// 托盘图标、设置入口与退出清理（阶段三 P0 抽取的第二块，见计划任务 1 的 Ruling 33）。
+    /// 与 Watchers 分家的理由：Watchers 管"后台存活性检查"（含 adb 进程 churn），
+    /// 这里管"界面与生命周期"，属两个不同的风险域；合成一个文件会让 Watchers 变成杂物间。
+    /// 本类不参与任何输入或状态机逻辑。
+    /// </summary>
+    public class TrayUi
+    {
+        readonly MessageHost _host;
+        readonly Suppressor _supp;
+        readonly Watchers _watchers;
+        readonly Transport _transport;
+        readonly StreamWriter _log;
+        readonly Process _devProc;
+
+        public NotifyIcon Tray { get; private set; }
+
+        public TrayUi(MessageHost host, Suppressor supp, Watchers watchers,
+                      Transport transport, StreamWriter log, Process devProc)
+        {
+            _host = host;
+            _supp = supp;
+            _watchers = watchers;
+            _transport = transport;
+            _log = log;
+            _devProc = devProc;
+        }
+
+        /// <summary>建托盘、装菜单、订阅生命周期事件。必须在 Application.Run 之前调用。</summary>
+        public void Install()
+        {
+            Tray = new NotifyIcon();
+            Tray.Icon = SystemIcons.Application;   // 任务 6 换成 exe 自带的那份
+            Tray.Text = "PC-KVM";
+            Tray.Visible = true;
+
+            MenuItem quit = new MenuItem("退出");
+            quit.Click += delegate { Application.Exit(); };
+            // 任务 3 会在这两行之间插入「设置…」
+            Tray.ContextMenu = new ContextMenu(new MenuItem[] { quit });
+
+            _host.FormClosing += delegate { _supp.Release(); };
+            Application.ApplicationExit += delegate
+            {
+                // 顺序要紧：先停后台监督（否则它会与 _log.Close() 抢），再释放抑制、收设备。
+                _watchers.Stop();
+                _supp.Release();
+                _log.WriteLine("# 退出");
+                Tray.Visible = false;
+                _transport.Stop();
+                DeviceLauncher.Cleanup(_devProc);
+                _log.Close();
+            };
+        }
+    }
+}
+```
+
+- [ ] **Step 2: 修改 `src/agent/Program.cs` —— 删掉六段被搬走的代码**
+
+删除以下六段（**逐字删除，不要顺手改动别处**；行号是本次的实测值，实施时按内容定位）：
+
+| 段 | 原行号 | 起止 |
+|---|---|---|
+| 几何轮询线程 | 252-268 | `System.Threading.Thread rotPoll = ...` 到 `rotPoll.Start();` |
+| 托盘 | 270-276 | `NotifyIcon tray = new NotifyIcon();` 到 `tray.ContextMenu = ...;` |
+| 前台守卫定时器 | 278-282 | 注释 `// 前台守卫：...` 到 `guard.Start();` |
+| 心跳 | 284-323 | `// ---- Task 8 安全网 ...` 到 `heartbeat.Start();`，**含其中那个只更新 `lastPongTicks` 的 `transport.MessageReceived` 订阅**（已搬进 Watchers） |
+| 逃逸键 | 325-335 | `host.Escape += delegate` 整块 |
+| 生命周期 | 337-346 | `host.FormClosing += delegate` 与 `Application.ApplicationExit += delegate` 两块 |
+
+> ⚠️ 删除**生命周期**那一段时注意：它里面的 `tray.Visible = false;` 与 `Transport`/`DeviceLauncher`
+> 调用都已在 `TrayUi.Install()` 里落地；`Application.Run(host);` 这一行**不要删**。
 
 - [ ] **Step 3: 在 `Program.cs` 里接上 `Watchers`**
 
@@ -225,9 +342,9 @@ namespace PcKvm
 
 ```csharp
             // 后台守护集中到 Watchers（Ruling 26 的抽取，见该类头注释的线程纪律）。
-            // ⚠️ 必须声明在 ApplicationExit 订阅之前：那个处理器会调 watchers.Stop() 与
-            // watchers.DeviceProcess，而 C# 局部变量不能前向引用（Task 4/7/8 都栽过这一类）。
-            // 但 Start() 要等到后面才调——过早启动重连监督会抢在首次建隧道之前动手。
+            // ⚠️ 必须声明在 TrayUi 的 Install() 之前（它会调 watchers.Stop()），
+            // 而 C# 局部变量不能前向引用（Task 4/7/8 都栽过这一类）。
+            // 但 Start() 要等最后才调——过早启动重连监督会抢在首次建隧道之前动手。
             Watchers watchers = new Watchers(transport, tracker, supp, host,
                 delegate(string s) { log.WriteLine(s); });
             watchers.GeometryQueried += delegate(int w, int h)
@@ -240,7 +357,16 @@ namespace PcKvm
             };
 ```
 
-② `watchers.Start();` —— 放在 `Application.Run(host);` **那一行之前**（即 `Main` 的最后）：
+② `TrayUi` 的构造与 `Install()`，放在**原托盘那段的位置**（`DeviceLauncher.Start()` 之后，
+因为要传 `devProc` 进去）：
+
+```csharp
+            // 托盘与生命周期集中到 TrayUi（Ruling 33）。必须在 Application.Run 之前 Install。
+            TrayUi trayUi = new TrayUi(host, supp, watchers, transport, log, devProc);
+            trayUi.Install();
+```
+
+③ `watchers.Start();` —— 放在 `Application.Run(host);` **那一行之前**（即 `Main` 的最后）：
 
 ```csharp
             watchers.Start();
@@ -264,7 +390,8 @@ Expected: `编译成功`、exit 0、**零警告**。
 ```bash
 cd /g/pc-kvm && wc -l src/agent/Program.cs
 ```
-Expected: **约 306 行**（原 359，移出约 58 行、加回约 8 行）。若仍在 350 以上说明没删干净。
+Expected: **约 286 行**（原 359，移出实测 90 行、加回约 17 行）。若仍在 320 以上说明没删干净
+——**不要就此继续**，那意味着后面几个任务的自检会踩空 360 红线（这正是 Ruling 33 的成因）。
 
 - [ ] **Step 5: 跑既有两个 harness，确认搬迁没碰坏纯逻辑**
 
@@ -288,27 +415,49 @@ Expected: `TOTAL: pass=15 fail=0` 与 `TOTAL: 45/45 passed, 0 failed`，均 exit
 | 掉线时轮询行为 | 仍 `continue` 静默跳过、不刷日志 |
 | 放弃路径三件事 | 仍都做：`Send(EncodeLeave)` → `AbortTakeover()` → `Release()` → `SetStatus("IDLE")` |
 | Timer 类型 | 仍是 `System.Windows.Forms.Timer`（全文搜 `System.Threading.Timer` 应**零命中**） |
+| 托盘菜单项 | 仍只有「退出」（「设置…」是任务 3 加的） |
+| 逃逸键四件事 | 仍都做：`Send(EncodeLeave)` → `AbortTakeover()` → `Release()` → `SetStatus("IDLE")`；且 `# 逃逸键触发` 仍**最先**打 |
+| `FormClosing` | 仍只调 `supp.Release()` |
+| 退出顺序 | `Release` → 写 `# 退出` → 托盘隐藏 → `transport.Stop` → `Cleanup` → `log.Close`，**顺序不变** |
+
+**唯一有意的行为新增（两处，都写在这里免得审查者当成回归）**：
+
+1. 几何变化时多打一行 `# 检测到几何变化 WxH`（理由见 Step 3 末尾的注）。
+2. 退出路径的**最前面**多了一步 `watchers.Stop()`。这是**必须的**：`Watchers` 现在有后台线程，
+   不在 `log.Close()` 之前停掉它，就可能写进一个已关闭的 `StreamWriter` 而抛异常。
+   原实现的后台线程只在几何轮询里（不写日志），所以以前不需要这一步。
 
 - [ ] **Step 7: Commit**
 
 ```bash
 cd /g/pc-kvm
-git add src/agent/Watchers.cs src/agent/Program.cs
+git add src/agent/Watchers.cs src/agent/TrayUi.cs src/agent/Program.cs
 git commit -F - <<'EOF'
-refactor: 抽 Watchers.cs —— 几何轮询/前台守卫/心跳（Ruling 26 的承诺）
+refactor: 抽 Watchers.cs + TrayUi.cs —— 后台守护与托盘/生命周期（Ruling 26 的承诺）
 
 Program.cs 实测 359/360 行（wc -l 口径），只剩 1 行预算，而阶段三的配置化、
 NumLock 翻译、图标、重连监督都要往里加东西。Ruling 26 已明文承诺
 "此后若再超 360 必须抽取，不得再上调"，本任务兑现它。
 
-纯搬迁，零逻辑改动。三个接口适应点：
+**为什么是两个文件而不是一个（飞行前扫描修正了初稿）**：初稿只搬三个 watcher（实测 62 行），
+按实测值推演，本计划末尾 Program.cs 会落到约 371 行——踩破 360 红线 11 行，而任务 5/6/7/8
+里都写着 "≤360" 的自检。实测各块：几何轮询 17 + 前台守卫 5 + 心跳 40 + 托盘 7 + 逃逸键 11
++ 生命周期 10 = 90 行；搬走并补回约 17 行接线后 Program.cs 约 286 行，本计划后续功能
+共加约 60 行 → 约 346，余量 14。
+分两个文件是因为它们属**不同风险域**：Watchers 管"后台存活性检查"（含 adb 进程 churn，
+审查者点名的风险区），TrayUi 管"界面与生命周期"。合成一个会让 Watchers 变成杂物间。
+
+纯搬迁，零逻辑改动。三处接口适应：
 1. 几何轮询的回调改为 GeometryQueried 事件（每次成功查询都抛，消费方比较）——
    这样 Watchers 不持有第二份几何状态，不会与 Program.cs 的副本漂移。
 2. 心跳原来引用 Program 的静态字段（_phoneW 等），改为本类字段。
 3. PONG 时间戳订阅搬进来；Program.cs 里那个只打日志的订阅保留，两者不重复打日志。
 
-唯一有意的行为变化：几何变化时新增一行 "# 检测到几何变化 WxH"。
-阶段二排查几何问题时正是因为分不清"没查到"与"没变化"而多花了一轮。
+有意新增两处（已在计划里声明，免得被当成回归）：
+- 几何变化时多打一行 "# 检测到几何变化 WxH"。阶段二排查几何问题时正是因为分不清
+  "没查到"与"没变化"而多花了一轮。
+- 退出路径最前面加了一步 watchers.Stop()：现在 Watchers 有后台线程，不在 log.Close()
+  之前停掉它就可能写进已关闭的 StreamWriter。原实现的后台线程不写日志，故以前不需要。
 
 线程纪律写进了类头注释：guard/heartbeat 必须是 WinForms Timer（tick 会碰 host/tracker/supp），
 几何轮询是后台线程且绝不直接碰控件。
@@ -685,13 +834,16 @@ EOF
 
 **Files:**
 - Create: `src/agent/SettingsForm.cs`
-- Modify: `src/agent/Program.cs`（托盘菜单 + 改成从配置初始化）
+- Modify: `src/agent/TrayUi.cs`（加「设置…」菜单项 + `SettingsApplied` 事件 + 吃下 `Config`）
+- Modify: `src/agent/Program.cs`（读配置 + 订阅 `SettingsApplied`）
 
 **Interfaces:**
 - Consumes: `Config`（任务 2）
 - Produces:
   - `SettingsForm(Config current)` 构造
   - 属性 `double MouseSensitivity`、`bool PhoneOnLeft`、`bool AllowKillAdb`
+  - `event Action<Config> TrayUi.SettingsApplied`
+  - `TrayUi` 构造函数**多加一个末位参数** `Config cfg`（任务 1 里还没有它，本任务加）
 
 - [ ] **Step 1: 实现 `src/agent/SettingsForm.cs`**
 
@@ -835,46 +987,74 @@ namespace PcKvm
 }
 ```
 
-- [ ] **Step 2: 在 `Program.cs` 里接上配置与设置菜单**
+- [ ] **Step 2: 在 `TrayUi.cs` 里加「设置…」，并把"应用设置"交回 `Program.cs`**
 
-先在 `Main` 顶部（`log` 创建之后）读配置：
+**先读配置**：在 `Program.cs` 的 `Main` 里、`log` 创建**之后**加一行（`cfg` 会被后面的
+`scaler`、`tracker`、`TrayUi` 构造使用，所以必须声明得足够早）：
 
 ```csharp
             Config cfg = Config.Load(delegate(string s) { log.WriteLine(s); });
 ```
 
-再把托盘那段（`Program.cs:270-276` 附近）替换为：
+并把 `trayUi` 的构造点改为多传一个 `cfg`：
 
 ```csharp
-            NotifyIcon tray = new NotifyIcon();
-            tray.Icon = SystemIcons.Application;   // 任务 6 换成自己的图标
-            tray.Text = "PC-KVM";
-            tray.Visible = true;
+            TrayUi trayUi = new TrayUi(host, supp, watchers, transport, log, devProc, cfg);
+            trayUi.Install();
+```
+
+**设计要点（Ruling 33 的连带修正）**：托盘菜单现在住在 `TrayUi.cs` 里，而"应用设置"要用到
+`scaler` / `tracker` / `supp` / `transport` —— 那些都是 `Program.cs` 的局部量。所以
+`TrayUi` **只负责弹对话框与写盘**，应用行为通过事件交回组合根。
+
+在 `TrayUi.cs` 里加：
+
+```csharp
+        /// <summary>设置对话框点了确定、且配置已更新并写盘之后抛出。
+        /// 应用行为（改速度、换跨越边）由 Program.cs 订阅处理——它才持有 scaler/tracker/supp。
+        /// 本类只做界面与持久化，不碰运行时状态。</summary>
+        public event Action<Config> SettingsApplied;
+```
+
+在 `Install()` 里，把「退出」那两行之间插入「设置…」：
+
+```csharp
             MenuItem settings = new MenuItem("设置…");
             settings.Click += delegate
             {
-                using (SettingsForm f = new SettingsForm(cfg))
+                using (SettingsForm f = new SettingsForm(_cfg))
                 {
-                    if (f.ShowDialog(host) != DialogResult.OK) return;
-                    cfg.MouseSensitivity = f.MouseSensitivity;
-                    cfg.AllowKillAdb = f.AllowKillAdb;
-                    if (cfg.PhoneOnLeft != f.PhoneOnLeft)
-                    {
-                        cfg.PhoneOnLeft = f.PhoneOnLeft;
-                        // 任务 5 会在这里调用 tracker.SetEdge(...)；
-                        // 本任务先只改配置，边界的运行时推导在任务 5 落地
-                    }
-                    if (!cfg.Save())
-                        log.WriteLine("# 配置写盘失败（设置本次仍生效，只是下次启动会丢）");
+                    if (f.ShowDialog(_host) != DialogResult.OK) return;
+                    _cfg.MouseSensitivity = f.MouseSensitivity;
+                    _cfg.AllowKillAdb = f.AllowKillAdb;
+                    _cfg.PhoneOnLeft = f.PhoneOnLeft;
+                    if (!_cfg.Save())
+                        _log.WriteLine("# 配置写盘失败（设置本次仍生效，只是下次启动会丢）");
                 }
+                Action<Config> h = SettingsApplied;
+                if (h != null) h(_cfg);
             };
             MenuItem quit = new MenuItem("退出");
             quit.Click += delegate { Application.Exit(); };
-            tray.ContextMenu = new ContextMenu(new MenuItem[] { settings, quit });
+            Tray.ContextMenu = new ContextMenu(new MenuItem[] { settings, quit });
 ```
 
-> `using (...)` 是 C# 3 语法，合法。`ShowDialog(host)` 以状态条为父窗口，避免对话框
-> 跑到别的窗口后面。
+这要求 `TrayUi` 也拿到 `Config`：把构造函数改为
+`TrayUi(MessageHost host, Suppressor supp, Watchers watchers, Transport transport, StreamWriter log, Process devProc, Config cfg)`
+并在字段区加 `readonly Config _cfg;`（构造里赋值）。**任务 1 里先不加这个参数**——
+它是任务 3 才引入的，任务 3 的实现者负责同时改构造函数与 `Program.cs` 的调用点。
+
+在 `Program.cs` 里，`trayUi.Install();` 之后加订阅（本任务先只处理速度之外的两项，
+速度在任务 4 接、跨越边在任务 5 接）：
+
+```csharp
+            trayUi.SettingsApplied += delegate(Config c)
+            {
+                log.WriteLine("# 设置已应用：速度=" + c.MouseSensitivity.ToString("F2")
+                              + " 手机在" + (c.PhoneOnLeft ? "左" : "右") + "侧"
+                              + " 强杀adb=" + c.AllowKillAdb);
+            };
+```
 
 - [ ] **Step 3: 编译**
 
@@ -1100,10 +1280,17 @@ Expected: `C1`–`C8`、`S1`–`S8` 全 `PASS`，`TOTAL: pass=16 fail=0`，exit 
                 scaler.Reset();   // 归零的同时清掉小数余量，避免带着跨越前的零头
 ```
 
-并在设置对话框的回调里，`cfg.MouseSensitivity = f.MouseSensitivity;` 之后加：
+在**任务 3 建立的那个 `trayUi.SettingsApplied` 处理器**里，把日志那行之前加上速度的应用
+（`scaler` 是 `Program.cs` 的局部量，所以只能写在这里，不能写进 `TrayUi.cs`）：
 
 ```csharp
-                    scaler.SetSensitivity(cfg.MouseSensitivity);   // 立即生效，不必重启
+            trayUi.SettingsApplied += delegate(Config c)
+            {
+                scaler.SetSensitivity(c.MouseSensitivity);   // 立即生效，不必重启
+                log.WriteLine("# 设置已应用：速度=" + c.MouseSensitivity.ToString("F2")
+                              + " 手机在" + (c.PhoneOnLeft ? "左" : "右") + "侧"
+                              + " 强杀adb=" + c.AllowKillAdb);
+            };
 ```
 
 - [ ] **Step 6: 编译 + 核实行数 + 跑既有 harness**
@@ -1367,42 +1554,38 @@ Expected: `T1`–`T15`（15 条）、`L1`–`L6b`（9 条）全 `PASS`，`TOTAL:
                 phoneW: 2136, phoneH: 3200, phoneRight: !cfg.PhoneOnLeft);
 ```
 
-- [ ] **Step 6: 在设置回调里接上 `SetEdge`**
+- [ ] **Step 6: 在 `SettingsApplied` 处理器里接上 `SetEdge`**
 
-把任务 3 留下的那个占位注释块：
+任务 3 建的 `SettingsApplied` 处理器现在必须处理"换了哪一侧"。**注意 `TrayUi` 已经把
+`_cfg.PhoneOnLeft` 改好并写盘了**，处理器只需负责运行时那部分（`tracker` 换边）：
 
-```csharp
-                    if (cfg.PhoneOnLeft != f.PhoneOnLeft)
-                    {
-                        cfg.PhoneOnLeft = f.PhoneOnLeft;
-                        // 任务 5 会在这里调用 tracker.SetEdge(...)；
-                        // 本任务先只改配置，边界的运行时推导在任务 5 落地
-                    }
-```
-
-替换为：
+把任务 4 之后的处理器整体改为：
 
 ```csharp
-                    if (cfg.PhoneOnLeft != f.PhoneOnLeft)
-                    {
-                        cfg.PhoneOnLeft = f.PhoneOnLeft;
-                        // 正在接管就先干净地退出来（补发 LEAVE、解锁光标、还前台），
-                        // 否则换边会让 tracker 停在 TAKEOVER 却对着新的边界判定
-                        if (tracker.Current == KvmState.Takeover)
-                        {
-                            transport.Send(Protocol.EncodeLeave());
-                            tracker.AbortTakeover();
-                            supp.Release();
-                            host.SetStatus("IDLE");
-                        }
-                        tracker.SetEdge(cfg.PhoneOnLeft ? 0 : screenW - 1, 0, screenH,
-                                        !cfg.PhoneOnLeft);
-                        log.WriteLine("# 已切换到手机在" + (cfg.PhoneOnLeft ? "左" : "右")
-                                      + "侧（edgeX=" + (cfg.PhoneOnLeft ? 0 : screenW - 1) + "）");
-                    }
+            trayUi.SettingsApplied += delegate(Config c)
+            {
+                scaler.SetSensitivity(c.MouseSensitivity);   // 立即生效，不必重启
+                // 正在接管就先干净地退出来（补发 LEAVE、解锁光标、还前台），
+                // 否则换边会让 tracker 停在 TAKEOVER 却对着新的边界判定
+                if (tracker.Current == KvmState.Takeover)
+                {
+                    transport.Send(Protocol.EncodeLeave());
+                    tracker.AbortTakeover();
+                    supp.Release();
+                    host.SetStatus("IDLE");
+                }
+                tracker.SetEdge(c.PhoneOnLeft ? 0 : screenW - 1, 0, screenH, !c.PhoneOnLeft);
+                log.WriteLine("# 设置已应用：手机在" + (c.PhoneOnLeft ? "左" : "右")
+                              + "侧（edgeX=" + (c.PhoneOnLeft ? 0 : screenW - 1) + "）"
+                              + " 速度=" + c.MouseSensitivity.ToString("F2")
+                              + " 强杀adb=" + c.AllowKillAdb);
+            };
 ```
 
-> `screenW` / `screenH` 是 `Main` 的局部量、`tracker` 也是，都被这个回调捕获——C# 闭包合法。
+> `screenW` / `screenH` / `tracker` / `scaler` / `transport` / `supp` / `host` 都是 `Main` 的
+> 局部量，被这个回调捕获——C# 闭包合法（`supp` 更是早就为 Task 8 提前声明在 transport 之前）。
+> 那次"先 AbortTakeover 再 SetEdge"的顺序不是讲究：`SetEdge` 会把 `Armed` 置 false，
+> 而 `AbortTakeover` 也会；两者都跑没有副作用，但**先退接管**是为了不让 `Release()` 漏掉。
 
 - [ ] **Step 7: 编译 + 核实行数 + 跑全部 harness**
 
@@ -1520,21 +1703,21 @@ Expected: `编译成功` exit 0；能提取到图标，尺寸 32×32（非 0，�
 
 - [ ] **Step 4: 托盘图标改用同一资源**
 
-把 `Program.cs` 里 `tray.Icon = SystemIcons.Application;` 那一行（任务 3 里我们保留过它）
-替换为：
+把 `TrayUi.cs` 里 `Install()` 内的 `Tray.Icon = SystemIcons.Application;` 那一行
+（任务 1 里我们保留过它）替换为：
 
 ```csharp
             // 用 exe 自己嵌入的图标（/win32icon 那份），不再是 SystemIcons.Application
             // ——那个 Windows 通用图标是用户看到的"丑"的主要来源。取不到则回退，绝不抛。
             try
             {
-                tray.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+                Tray.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
             }
             catch (Exception)
             {
-                tray.Icon = SystemIcons.Application;
+                Tray.Icon = null;
             }
-            if (tray.Icon == null) tray.Icon = SystemIcons.Application;
+            if (Tray.Icon == null) Tray.Icon = SystemIcons.Application;
 ```
 
 - [ ] **Step 5: 编译 + 核实行数**
@@ -2122,16 +2305,34 @@ EOF
                 log.WriteLine("# 首次拉起注入器失败（重连监督会继续尝试）");
 ```
 
-把 `Application.ApplicationExit` 里的 `DeviceLauncher.Cleanup(devProc);` 替换为：
+把 `TrayUi.cs` 的构造函数**去掉末位参数 `Process devProc`**（连同 `_devProc` 字段），
+并把 `Install()` 里的 `DeviceLauncher.Cleanup(_devProc);` 改为用 `Watchers` 持有的那个：
 
 ```csharp
-                watchers.Stop();                                   // 先停监督，避免与 log.Close() 抢
-                DeviceLauncher.Cleanup(watchers.DeviceProcess);     // Kill + rm jar + 拆 reverse
+                DeviceLauncher.Cleanup(_watchers.DeviceProcess);   // Kill + rm jar + 拆 reverse
 ```
 
-> `watchers` 已在任务 1 Step 3 声明在 `tracker` 之后、`ApplicationExit` 订阅之前，
-> 所以这里能直接捕获它。**不要把它挪到 `ApplicationExit` 之后**——那会让这里编译不过
-> （C# 局部变量不能前向引用，Task 4/7/8 都栽过）。
+（`_watchers.Stop()` 已在任务 1 就写在 `ApplicationExit` 的最前面，位置正确，不用动。）
+
+同时把 `Watchers.Stop()` 补上"顺手 Kill 设备侧进程"：
+
+```csharp
+        public void Stop()
+        {
+            _stop = true;
+            if (_guard != null) _guard.Stop();
+            if (_heartbeat != null) _heartbeat.Stop();
+            try { if (_devProc != null && !_devProc.HasExited) _devProc.Kill(); }
+            catch (System.Exception) { }
+        }
+```
+
+并把 `Program.cs` 里 `trayUi` 的构造点去掉 `devProc` 实参：
+
+```csharp
+            TrayUi trayUi = new TrayUi(host, supp, watchers, transport, log, cfg);
+            trayUi.Install();
+```
 
 - [ ] **Step 4: 编译 + 核实行数 + 跑 harness**
 
