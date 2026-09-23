@@ -555,3 +555,25 @@ Task 6: dispatched implementer (**sonnet**) at BASE **30358ad**（`Program.cs` 3
     的尺寸非零（防"其实还是 csc 默认图标"）；③`build-agent.ps1` 前三字节仍是 `ef bb bf`；④两张预览 PNG 存在且尺寸对。
   - 明确要求：生成器脚本**不要留在仓库里**（除非它真是构建的一部分），删掉并说明。
   - R11 继续生效（不许启动 exe；托盘/资源管理器里的观感并入用户的汇总真机会话）。
+Task 6: implementer **DONE** — commit **c92859c**（5 文件：`assets/pc-kvm.ico` 106250 B / 7 尺寸 /
+  256 用 PNG 压缩；两张预览 PNG；`build/build-agent.ps1` 加 `/win32icon`；`TrayUi.cs` 托盘换嵌入图标）。
+  自报：逐**目录项**核了 6 个 BMP 头 + 256 的 PNG 签名；`ExtractAssociatedIcon` 32×32 且**逐像素比对
+  确认是我们的设计而非通用图标**；生成器是一次性脚本放在 `%TEMP%` 用完已删、仓库无残留。
+Task 6: **控制方独立核实（未采信自述）**：重编 → 15 文件、exit 0、**142.5 KB**
+  （比之前的 38.5 KB 多出的约 104 KB 正是嵌入的图标——这是"图标真进去了"的旁证）；
+  三套 harness `18/24/45` 全绿；**`build-agent.ps1` 前三字节实测 `efbbbf`（BOM 保住了）**；
+  ICO 头 `00000100` + 图像数 **7**；`ExtractAssociatedIcon(dist\pc-kvm.exe)` = **32×32** 非零；
+  `TrayUi.cs` 97 / `Program.cs` 334（未被本任务触碰）。
+Task 6: 计划笔误已修（第 4 个被实现者拦下的）：Task 6 Step 7 的 `git add` 初稿写的是
+  `src/agent/Program.cs`，而托盘那行在 `TrayUi.cs`（Task 1 搬走的）—— 实现者按任务上下文判断并
+  提交了 `TrayUi.cs`，**判断正确**。计划正文已改为 `TrayUi.cs` 并补上预览 PNG，注明原因。
+Task 6: **零视觉的应对已执行**：派了有视觉能力的代理去看 `assets/pc-kvm-preview-256.png` 与
+  `pc-kvm-preview-16.png`（16px 最近邻放大），要求它给出**可据以返工的具体判断**
+  （实际看到什么、16px 是否还认得出、深/浅背景各处会不会消失、有无明显缺陷、一句话结论），
+  并明确"读不出来就直说、不要按文件名猜"。这一路与代码审查**并行**、互不依赖。
+Task 6: review package → `review-4def56f..c92859c.diff`（1 commit, 3818 B，做过 BASE 簿记修正）。
+  dispatched **task reviewer（sonnet）**，并明确把"图标**长什么样**"划出它的范围（文本 diff 里
+  二进制只显示 "Binary files differ"），它审的是**代码与构建接线**：BOM 是否真的保住（它是整文件
+  重写还是逐行改动）、托盘回退在 `ExtractAssociatedIcon` **返回 null 而不抛**时是否正确、
+  `Tray.Icon` 会不会留 null、`/win32icon:` 的路径/引号/缺失时是否 fail-fast、
+  以及是否引入了新的运行时文件依赖（单文件 exe 硬约束）。
