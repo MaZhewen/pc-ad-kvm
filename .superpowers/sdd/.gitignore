@@ -1,12 +1,1 @@
 *
-!.gitignore
-# SDD 工作产物默认不入版本控制（superpowers 工具的默认行为）。
-# 下面这一条是刻意放行：progress.md 是不可再生的恢复地图（Ruling 1-32 + 34 条
-# deferred minor），brief/report 记录了每个任务的实现边界与实现者当时的判断。
-# 详见 progress.md 的 Ruling 32。要撤销就把下面两行删掉。
-#
-# 为什么是两行：上面那条 `*` 不带斜杠，按 gitignore 规则它匹配**该目录下任意深度**
-# 的路径，所以目录下每个文件都是被它直接命中的（不是因为父目录被排除）。因此既要
-# 放行目录本身，也要放行其下所有文件，两行缺一不可。
-!2026-09-21-phase2-walking-skeleton/
-!2026-09-21-phase2-walking-skeleton/**

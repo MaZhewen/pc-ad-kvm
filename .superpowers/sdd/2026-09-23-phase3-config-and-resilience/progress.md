@@ -834,3 +834,32 @@ Task 8: **R15 —— 裁决：修**（Important 默认进循环，且它是我�
   `tests/agent-logic/run.ps1` 里一句过时注释）。
   计划正文已就地修正（`_lastLoggedState` 字段 + `ReportWaiting` 方法 + 循环末尾改调用 +
   一段"为什么去重键里不能有计数"的注释）。
+Task 8: fix round 1/5 implementer **DONE** — commit **3e6c274**（**仅 `Watchers.cs` +44/−5**，
+  `Program.cs` 未被碰、仍 **357**）。agent-logic 29/29、edge-tracker 24/24、scancode-map 58/58；
+  build 零警告 exit 0。
+  它给的证据正是我要的形式：**推理**——连续 N 轮同样 `why` 只写 **1 行**（首轮记键，其后仅状态条更新次数）；
+  **可核事实**——`rg -n '_lastLoggedState|_lastReport'` 的全部读写点 + 逐点声明线程归属：
+  `_lastReport`（L43/287/288）只在重连后台线程（单线程）；`_lastLoggedState`（L47/294/317/319）
+  **只在 UI 线程**（全在 `BeginInvoke` 委托体内）。它另复跑了 11 处 `_log(`/`SetStatus`，
+  确认全在 UI 线程或 BeginInvoke 内、**重连线程零直写**。
+  Minor 3 折入（`_devProc` 加 `volatile` + 注释）；Minor 2/4/5 未动、留终审。
+Task 8: **控制方独立核实（未采信自述）**：实测 `_lastLoggedState` 的读写点确在 `BeginInvoke` 委托体内
+  （`Report` 的 L291-294、`ReportWaiting` 的 L313-321）；`_devProc` 已是 `volatile`（L39）且带注释
+  （L37-38 说明"重连线程写 / UI 线程读（DeviceProcess、TrayUi 清理、Stop 的 Kill）"）。
+  **同时发现它做了一处我计划里没有的设计改动**：它把 `_lastReport` 的**去重比较移出了 `BeginInvoke`**
+  （放到重连线程上），只把实际 I/O 留在委托体内 —— 与计划代码不同。已在 scoped 复审里**专门点名要它判**
+  （不是预判，我确实不知道哪种更好）：两种安排各自会不会造成**漏打**或**重打**状态变化日志、
+  以及把去重移出 UI 线程是否引入新风险。
+Task 8: scoped re-review package → `review-44e50c4..3e6c274.diff`（1 commit, 7209 B，BASE 簿记修正）。
+  dispatched **scoped re-reviewer（sonnet）**。
+
+## R16 —— 裁决 `.superpowers/sdd/.gitignore` 的长期脏状态
+
+背景：该文件被 superpowers 工具改回一行 `*`（本工作区会话中一直显示为 `M`），
+两个实现者都如实报来"未提交、未动、待控制方裁决"。
+裁决：**提交它**。理由：①它让工作树永久脏，而我在一个用 commit 区间算审查包的流程里工作，
+脏树是个隐患；②**已跟踪的文件不受 `.gitignore` 影响** —— 两份 ledger（阶段二 `b8d167b`、
+阶段三）都已被跟踪，故用户此前"ledger 入仓"的决定**继续成立**；
+③唯一后果是未来的 SDD 产物（brief/report/review 包）默认不入 git —— 那恰好符合 skill 对工作区的定位
+（"git-ignored scratch"），也比我先前 `-f` 强推更干净。
+**代价（若判错）**：将来若想跟踪某个新的 SDD 文件，需要显式 `git add -f`。
