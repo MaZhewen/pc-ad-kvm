@@ -25,5 +25,16 @@ if ($LASTEXITCODE -ne 0) { throw "编译失败" }
 $exe = Get-Item "$dist\pc-kvm.exe"
 Write-Host ("编译成功: {0}  ({1:N1} KB)" -f $exe.FullName, ($exe.Length / 1KB)) -ForegroundColor Green
 
-Copy-Item "$env:TEMP\pckvm.jar" "$dist\pckvm.jar" -Force
-Write-Host "已复制 pckvm.jar 到 dist\" -ForegroundColor Green
+# dist\pckvm.jar 由 build-injector.ps1 产出（它才是唯一会被 exe 推给手机的那一份）。
+# 这里**不再**无条件从 %TEMP% 拷贝——%TEMP% 里那份可能比 src\injector 旧，
+# 于是"构建成功"而设备侧改动从没到过手机（2026-09-23 的实际事故）。
+$jar = "$dist\pckvm.jar"
+if (-not (Test-Path $jar)) { throw "缺少 dist\pckvm.jar：请先跑 build\build-injector.ps1" }
+$newest = Get-ChildItem (Join-Path $root 'src\injector') -Filter '*.java' |
+          Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if ($newest.LastWriteTime -gt (Get-Item $jar).LastWriteTime) {
+    throw ("dist\pckvm.jar 比设备侧源码旧（jar=" + (Get-Item $jar).LastWriteTime +
+           "；最新源码=" + $newest.Name + " " + $newest.LastWriteTime +
+           "）：请先跑 build\build-injector.ps1")
+}
+Write-Host ("pckvm.jar 新鲜度 OK（{0:N0} 字节）" -f (Get-Item $jar).Length) -ForegroundColor Green

@@ -100,31 +100,43 @@ public class ScancodeMap {
             case 0x45: return 0x53;   // NumLock
             case 0x46: return 0x48;   // ScrollLock
 
-            // ↓ 数字键盘（NumLock **开**着时的形态）。原来整段缺失 → 返回 -1 → 注入器静默丢弃。
-            // （2026-09-23 更正：本节原写着"NumLock 关时同样这些物理键发 E0 前缀，走上面 E0 表"，
-            //  那是**错的**。真机实测：物理数字键盘不受 NumLock 影响，恒发普通码——小键盘 7 是
-            //  0x47，导航区那颗独立的 Home 才是 0xE047。NumLock 关的翻译由 PC 侧完成
-            // （KeyMap.NumpadNavE0Scancode 把它翻成 0xE047 再送过来），此处只负责"开"的一侧。
-            //  上面 E0 表的 0x47..0x53 那一组既服务导航键区，也服务 NumLock 关时被翻译过来的码。）
-            // 真机缺陷现场：接管期内用户按的 6 个键全是这一段（0x52 0x52 0x47 0x52 0x47 0x52
-            // = 小键盘 0 0 7 0 7 0），手机上毫无反应；用户平时就用小键盘打数字
-            //（早先会话实测 0x50 0x52 0x50 0x4D = "2026"）。
-            // 这 15 个 usage（0x55-0x63）都在 HID 描述符按键数组的 Usage Maximum 0x65 之内，
-            // 不会被解析器丢弃（对比：E0 修饰键那轮就是因为映射到 0xE3+ 而整段失效）。
+            // ↓ 数字键盘的**数字与小数点**。原来整段缺失 → 返回 -1 → 注入器静默丢弃
+            //（真机缺陷现场：接管期内用户按的 6 个键全是这一段 0x52 0x52 0x47 0x52 0x47 0x52
+            //  = 小键盘 0 0 7 0 7 0，手机上毫无反应）。
+            //
+            // ⚠️ 第二层缺陷（2026-09-23 真机实测，映射补上后仍然不产字符）：
+            // **不能映到 Keypad usage（0x5F..0x63）**。Android 的
+            // /system/usr/keychars/Virtual.kcm 里这 11 个键都是这种形态：
+            //     key NUMPAD_7 { label: '7'  base: fallback MOVE_HOME  numlock: '7' }
+            // 即**只有"手机自己的 NumLock"亮着才产字符**；否则 base 那条把按键变成导航动作
+            // （7→行首、8→上、1→行尾、0→Insert、.→Delete…）。
+            // 而本虚拟键盘的描述符里**没有任何 LED Output 报告**（HidDescriptor 全是 Input），
+            // Android 永远点不亮它的 NumLock → base 永远生效 → **小键盘永远不产字符**，
+            // 与 PC 的 NumLock 状态完全无关。真机铁证：直接注入 usage 0x5F，getevent 得到
+            // KEY_KP7（内核并未按 LED 翻译），但 kcm 把它变成 MOVE_HOME —— 屏幕上什么都不出现。
+            // 这也解释了"怎么切 numlock 都不出数字"。
+            //
+            // 修法：映到**数字行**的 usage。它们在 kcm 里 base 就是字面字符
+            //（key 7 { base: '7' }、key 0 { base: '0' }…），任何 numlock 状态下都产字符。
+            // NumLock 关时的导航语义由 PC 侧翻译成上面的 E0 码负责，与本表无关。
+            case 0x47: return 0x24;   // 小键盘 7 → '7'
+            case 0x48: return 0x25;   // 小键盘 8 → '8'
+            case 0x49: return 0x26;   // 小键盘 9 → '9'
+            case 0x4B: return 0x21;   // 小键盘 4 → '4'
+            case 0x4C: return 0x22;   // 小键盘 5 → '5'
+            case 0x4D: return 0x23;   // 小键盘 6 → '6'
+            case 0x4F: return 0x1E;   // 小键盘 1 → '1'
+            case 0x50: return 0x1F;   // 小键盘 2 → '2'
+            case 0x51: return 0x20;   // 小键盘 3 → '3'
+            case 0x52: return 0x27;   // 小键盘 0 → '0'
+            case 0x53: return 0x37;   // 小键盘 . → '.'
+
+            // 运算符**不受 numlock 影响**（kcm 里 base 就是字面字符：'*' '-' '+' '/'），
+            // 保持 Keypad usage —— 语义上它们确实是小键盘键，且不必借道数字行。
+            // 同理 0x35（数字行 /）与 0x4A/0x4E 在本表的其它条目。
             case 0x37: return 0x55;   // 小键盘 *
-            case 0x47: return 0x5F;   // 小键盘 7
-            case 0x48: return 0x60;   // 小键盘 8
-            case 0x49: return 0x61;   // 小键盘 9
             case 0x4A: return 0x56;   // 小键盘 -
-            case 0x4B: return 0x5C;   // 小键盘 4
-            case 0x4C: return 0x5D;   // 小键盘 5
-            case 0x4D: return 0x5E;   // 小键盘 6
             case 0x4E: return 0x57;   // 小键盘 +
-            case 0x4F: return 0x59;   // 小键盘 1
-            case 0x50: return 0x5A;   // 小键盘 2
-            case 0x51: return 0x5B;   // 小键盘 3
-            case 0x52: return 0x62;   // 小键盘 0
-            case 0x53: return 0x63;   // 小键盘 .
             default:   return -1;
         }
     }

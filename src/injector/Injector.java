@@ -75,13 +75,19 @@ public class Injector {
 
     static void handle(UhidDevice dev, OutputStream out, byte type, byte[] p) throws Exception {
         if (type == MSG_MOVE) {
-            int dx = i16(p, 0), dy = i16(p, 1 + 1);
-            // int8 轴：超过 ±127 要拆成多条报告，否则会丢位移
-            while (dx != 0 || dy != 0) {
-                int sx = clamp127(dx), sy = clamp127(dy);
-                dev.sendMouse((byte) buttonsDown, (byte) sx, (byte) sy, (byte) 0);
-                dx -= sx; dy -= sy;
-            }
+            sendRelative(dev, i16(p, 0), i16(p, 1 + 1));
+        } else if (type == MSG_ENTER) {
+            // 入屏定位。PC 侧发 ENTER 之前**总是**先发 HOME（把设备光标硬顶到 (0,0)），
+            // 所以这里只需按相对位移把光标挪到 (x,y)——与 PC 侧 CursorModel.SetPosition
+            // 的记账就此一致。
+            //
+            // ⚠️ 原先这个分支不存在（handle() 结尾只留了句"由后续任务接管"），后果是
+            // 2026-09-23 真机实测的两个缺陷：PC 侧模型以为光标在 (3199,y)，设备却停在 (0,0)，
+            // 两者相差整整一个屏宽 →
+            //   ① 手机在左侧时，指针从**左**缘冒出来（应该从与 PC 相邻的右缘）；
+            //   ② 模型一进场就已"贴在回程边"上，向右推 40 mickey 立刻弹回 PC；
+            //      且阈值按**原始 mickey** 计而可见位移 = 40×灵敏度 → "速度越慢越容易回 PC"。
+            sendRelative(dev, i16(p, 0), i16(p, 1 + 1));
         } else if (type == MSG_BUTTON) {
             int btn = p[0] & 0xFF, down = p[1] & 0xFF;
             int bit = btnToBit(btn);
@@ -103,11 +109,9 @@ public class Injector {
             out.write(r);
             out.flush();
         } else if (type == MSG_HOME) {
-            // 8 位相对轴每报告最多走 127，按屏幕尺寸算够用的次数硬顶到左上角。
-            // 3200 像素需要 ceil(3200/127)=26 次；取 40 次留余量，代价是几十毫秒。
-            for (int i = 0; i < 40; i++) {
-                dev.sendMouse((byte) buttonsDown, (byte) -127, (byte) -127, (byte) 0);
-            }
+            // 硬顶到左上角：位移取得比任何手机屏都大，靠设备把光标钳在边缘，
+            // 于是 HOME 之后设备光标必然在 (0,0)——这是 MSG_ENTER 相对定位的前提。
+            sendRelative(dev, HOME_PUSH, HOME_PUSH);
         } else if (type == MSG_LEAVE) {
             // 防修饰键/鼠标键卡在按下态（遥控类软件经典 bug）：接管期间按着 Ctrl 或鼠标键
             // 退出，不清理的话手机上会一直"按住"。PC 侧所有放弃路径都会补发 LEAVE。
@@ -115,7 +119,23 @@ public class Injector {
             dev.sendMouse((byte) 0, (byte) 0, (byte) 0, (byte) 0);
             KeyState.releaseAll(dev);
         }
-        // MSG_ENTER / MSG_CONFIG 由后续任务接管
+        // MSG_CONFIG 由后续任务接管（MSG_ENTER 已实现，见 MSG_ENTER 分支）
+    }
+
+    /** HOME 的"硬顶"位移：5080 = 40×127，大于任何手机屏的宽/高（3200/2136）。 */
+    static final int HOME_PUSH = -5080;
+
+    /**
+     * 把一次相对位移拆成多条 ≤127 的报告发出去（HID 相对轴是 int8）。
+     * MSG_MOVE / MSG_ENTER / MSG_HOME 共用它；拆分算法在 PointerPlan（纯函数，有离线用例）。
+     */
+    static void sendRelative(UhidDevice dev, int dx, int dy) throws Exception {
+        int n = PointerPlan.stepCount(dx, dy);
+        for (int i = 0; i < n; i++) {
+            dev.sendMouse((byte) buttonsDown,
+                          (byte) PointerPlan.stepX(dx, i),
+                          (byte) PointerPlan.stepY(dy, i), (byte) 0);
+        }
     }
 
     static int btnToBit(int btn) {

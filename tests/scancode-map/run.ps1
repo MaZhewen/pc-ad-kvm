@@ -14,10 +14,11 @@ New-Item -ItemType Directory -Force -Path $out | Out-Null
 
 $harness = Join-Path $PSScriptRoot 'TestMain.java'
 $target  = Join-Path $src 'ScancodeMap.java'
-foreach ($s in @($harness, $target)) { if (-not (Test-Path $s)) { throw "缺少: $s" } }
+$plan    = Join-Path $src 'PointerPlan.java'
+foreach ($s in @($harness, $target, $plan)) { if (-not (Test-Path $s)) { throw "缺少: $s" } }
 
 Write-Host "javac（--release 8，与构建脚本一致；会打印弃用警告，正常）..." -ForegroundColor Cyan
-& $javac --release 8 -nowarn -d $out $harness $target
+& $javac --release 8 -nowarn -d $out $harness $target $plan
 if ($LASTEXITCODE -ne 0) { throw "javac 失败" }
 
 & $java -cp $out TestMain

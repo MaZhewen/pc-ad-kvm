@@ -34,6 +34,13 @@ if (Test-Path $zip) { Remove-Item -Force $zip }
 Compress-Archive -Path $dex -DestinationPath $zip -Force
 Move-Item $zip $jar
 
+# dist\pckvm.jar 是**唯一会被 exe 推给手机的那一份**（DeviceLauncher.PushJar 只认它，
+# 每次启动与每轮重连都会推）。所以每次构建都必须刷新它。
+# 2026-09-23 教训：设备侧改了源码却只跑了 build-agent.ps1，而那个脚本是从 %TEMP% 拷 jar 的，
+# 于是"构建成功"但手机拿到的还是旧 jar，缺陷照旧。
+Copy-Item $jar (Join-Path $root 'dist\pckvm.jar') -Force
+Write-Host "已刷新 dist\pckvm.jar" -ForegroundColor Green
+
 Write-Host "推送到设备..." -ForegroundColor Cyan
 & adb push $jar /data/local/tmp/pckvm.jar
 if ($LASTEXITCODE -ne 0) { throw "adb push 失败" }

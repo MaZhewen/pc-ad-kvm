@@ -33,24 +33,27 @@ public class TestMain {
         check("nonE0 0x27 (;)  -> 0x33", ScancodeMap.toHidUsage(0x27), 0x33);
         check("nonE0 0x3A (CapsLock) -> 0x39", ScancodeMap.toHidUsage(0x3A), 0x39);
 
-        // 数字键盘（NumLock 开）——本次新增。
-        // 真机缺陷现场：接管期内用户按的 6 个键全是这一段（0x52 0x52 0x47 0x52 0x47 0x52
-        // = 小键盘 0 0 7 0 7 0），而这一段在非 E0 表里整段缺失 → 返回 -1 → 注入器静默丢弃
-        // → 手机上毫无反应。用户平时就用小键盘打数字（早先会话实测 0x50 0x52 0x50 0x4D = "2026"）。
+        // 数字键盘的数字与小数点 —— 必须映到**数字行** usage，不能映到 Keypad usage。
+        // 理由（2026-09-23 真机铁证）：Android 的 Virtual.kcm 里 NUMPAD_0..9/NUMPAD_DOT 都是
+        //   key NUMPAD_7 { label: '7'  base: fallback MOVE_HOME  numlock: '7' }
+        // 只有"手机自己的 NumLock"亮着才产字符；而本虚拟键盘**没有 LED Output 报告**，
+        // Android 永远点不亮它 → base 永远生效 → 小键盘永远不产字符（与 PC 的 NumLock 无关）。
+        // 数字行的 base 是字面字符（key 7 { base: '7' }），任何状态下都产字符。
+        check("nonE0 0x47 (Num 7) -> 0x24 ('7')", ScancodeMap.toHidUsage(0x47), 0x24);
+        check("nonE0 0x48 (Num 8) -> 0x25 ('8')", ScancodeMap.toHidUsage(0x48), 0x25);
+        check("nonE0 0x49 (Num 9) -> 0x26 ('9')", ScancodeMap.toHidUsage(0x49), 0x26);
+        check("nonE0 0x4B (Num 4) -> 0x21 ('4')", ScancodeMap.toHidUsage(0x4B), 0x21);
+        check("nonE0 0x4C (Num 5) -> 0x22 ('5')", ScancodeMap.toHidUsage(0x4C), 0x22);
+        check("nonE0 0x4D (Num 6) -> 0x23 ('6')", ScancodeMap.toHidUsage(0x4D), 0x23);
+        check("nonE0 0x4F (Num 1) -> 0x1E ('1')", ScancodeMap.toHidUsage(0x4F), 0x1E);
+        check("nonE0 0x50 (Num 2) -> 0x1F ('2')", ScancodeMap.toHidUsage(0x50), 0x1F);
+        check("nonE0 0x51 (Num 3) -> 0x20 ('3')", ScancodeMap.toHidUsage(0x51), 0x20);
+        check("nonE0 0x52 (Num 0) -> 0x27 ('0')", ScancodeMap.toHidUsage(0x52), 0x27);
+        check("nonE0 0x53 (Num .) -> 0x37 ('.')", ScancodeMap.toHidUsage(0x53), 0x37);
+        // 运算符不受 numlock 影响（kcm 里 base 就是字面字符），保持 Keypad usage
         check("nonE0 0x37 (Num *)  -> 0x55", ScancodeMap.toHidUsage(0x37), 0x55);
-        check("nonE0 0x47 (Num 7)  -> 0x5F", ScancodeMap.toHidUsage(0x47), 0x5F);
-        check("nonE0 0x48 (Num 8)  -> 0x60", ScancodeMap.toHidUsage(0x48), 0x60);
-        check("nonE0 0x49 (Num 9)  -> 0x61", ScancodeMap.toHidUsage(0x49), 0x61);
         check("nonE0 0x4A (Num -)  -> 0x56", ScancodeMap.toHidUsage(0x4A), 0x56);
-        check("nonE0 0x4B (Num 4)  -> 0x5C", ScancodeMap.toHidUsage(0x4B), 0x5C);
-        check("nonE0 0x4C (Num 5)  -> 0x5D", ScancodeMap.toHidUsage(0x4C), 0x5D);
-        check("nonE0 0x4D (Num 6)  -> 0x5E", ScancodeMap.toHidUsage(0x4D), 0x5E);
         check("nonE0 0x4E (Num +)  -> 0x57", ScancodeMap.toHidUsage(0x4E), 0x57);
-        check("nonE0 0x4F (Num 1)  -> 0x59", ScancodeMap.toHidUsage(0x4F), 0x59);
-        check("nonE0 0x50 (Num 2)  -> 0x5A", ScancodeMap.toHidUsage(0x50), 0x5A);
-        check("nonE0 0x51 (Num 3)  -> 0x5B", ScancodeMap.toHidUsage(0x51), 0x5B);
-        check("nonE0 0x52 (Num 0)  -> 0x62", ScancodeMap.toHidUsage(0x52), 0x62);
-        check("nonE0 0x53 (Num .)  -> 0x63", ScancodeMap.toHidUsage(0x53), 0x63);
 
         // E0 前缀键
         // 四个 E0 修饰键必须返回 -1——它们是修饰字节里的位（PC 侧 KeyMap 折算），
@@ -101,11 +104,56 @@ public class TestMain {
         check("NumLock关 小键盘0→Insert", ScancodeMap.toHidUsage(0xE052), 0x49);
         check("NumLock关 小键盘.→Delete", ScancodeMap.toHidUsage(0xE053), 0x4C);
         check("NumLock关 小键盘5→无对应", ScancodeMap.toHidUsage(0xE04C), -1);
-        // 对照：NumLock 开时走普通码那一段，必须是数字键盘 usage
-        check("NumLock开 小键盘7→KP7", ScancodeMap.toHidUsage(0x47), 0x5F);
-        check("NumLock开 小键盘0→KP0", ScancodeMap.toHidUsage(0x52), 0x62);
+        // 对照：NumLock 开时走普通码那一段，必须是**字面字符** usage（见上面 kcm 的理由）
+        check("NumLock开 小键盘7→'7'", ScancodeMap.toHidUsage(0x47), 0x24);
+        check("NumLock开 小键盘0→'0'", ScancodeMap.toHidUsage(0x52), 0x27);
+
+        // ---- PointerPlan：相对位移的拆分（MSG_MOVE / MSG_ENTER / MSG_HOME 共用）----
+        // 不变量：各条之和必须**恰好**等于目标——少一条丢位移，多一条会多发一条空报告。
+        checkd("PointerPlan 条数(355,0) = 3", PointerPlan.stepCount(355, 0), 3);
+        checkd("PointerPlan 条数(0,0) = 0", PointerPlan.stepCount(0, 0), 0);
+        checkd("PointerPlan 条数(254,0) = 2（整倍不许多一条）", PointerPlan.stepCount(254, 0), 2);
+        checkd("PointerPlan 条数(3199,1018) = 26（取较长轴）", PointerPlan.stepCount(3199, 1018), 26);
+        checkd("PointerPlan 条数(-5080,-5080) = 40（= HOME 原固定 40 条）",
+               PointerPlan.stepCount(-5080, -5080), 40);
+        checkd("PointerPlan 和 x(3199) = 3199", sumX(3199, 1018), 3199);
+        checkd("PointerPlan 和 y(1018) = 1018", sumY(3199, 1018), 1018);
+        checkd("PointerPlan 和 x(-3199) = -3199", sumX(-3199, 0), -3199);
+        checkd("PointerPlan 末条取余数 (3199 第 25 条) = 24", PointerPlan.stepX(3199, 25), 24);
+        checkd("PointerPlan 越界返回 0 (3199 第 26 条) = 0", PointerPlan.stepX(3199, 26), 0);
+        // 每条都必须落在 int8 相对轴的合法范围里，否则设备侧解析器把它当别的值
+        int overstep = 0;
+        int[] samples = {3199, 1018, -3199, -5080, 127, 128, 254, 1, 0, -1};
+        for (int s = 0; s < samples.length; s++) {
+            int v = samples[s];
+            for (int i = 0; i < PointerPlan.stepCount(v, v); i++) {
+                int a = PointerPlan.stepX(v, i), b = PointerPlan.stepY(v, i);
+                if (a > 127 || a < -127 || b > 127 || b < -127) overstep++;
+            }
+        }
+        checkd("PointerPlan 每条 |v| <= 127", overstep, 0);
 
         System.out.println("TOTAL: " + (total - fails) + "/" + total + " passed, " + fails + " failed");
         System.exit(fails);
+    }
+
+    /** 十进制打印版本（PointerPlan 的期望值写成十六进制反而看不清）。 */
+    static void checkd(String name, int actual, int expected) {
+        total++;
+        boolean ok = actual == expected;
+        if (!ok) fails++;
+        System.out.println((ok ? "PASS" : "FAIL") + "  " + name + " got=" + actual + " want=" + expected);
+    }
+
+    static int sumX(int dx, int dy) {
+        int s = 0;
+        for (int i = 0; i < PointerPlan.stepCount(dx, dy); i++) s += PointerPlan.stepX(dx, i);
+        return s;
+    }
+
+    static int sumY(int dx, int dy) {
+        int s = 0;
+        for (int i = 0; i < PointerPlan.stepCount(dx, dy); i++) s += PointerPlan.stepY(dy, i);
+        return s;
     }
 }

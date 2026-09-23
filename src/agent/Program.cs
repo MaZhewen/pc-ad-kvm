@@ -230,8 +230,11 @@ namespace PcKvm
             ri.KeyChanged += delegate(RawKeyEvent e)
             {
                 kc++;
+                // 末尾的 numlock 位决定小键盘行为，而它来自"读操作系统"：读到过期值时症状是
+                // "怎么切 numlock 都不出数字"，本行是唯一能一眼分辨的仪器（2026-09-23 教训）。
                 log.WriteLine("KEY scancode=0x" + e.Scancode.ToString("X")
-                    + (e.IsUp ? " UP" : " DOWN"));
+                    + (e.IsUp ? " UP" : " DOWN")
+                    + (e.IsE0 ? "" : " numlock=" + (GetKeyState(VK_NUMLOCK) & 1)));
 
                 byte bit = KeyMap.ModifierBit(e.Scancode, e.IsE0);
                 if (bit != 0)
@@ -250,12 +253,11 @@ namespace PcKvm
                 int sendSc = e.Scancode;
                 if (!e.IsE0)
                 {
-                    // GetKeyState 在 UI 线程调用（Raw Input 的 WM_INPUT 就在消息循环上），开销可忽略
                     if ((GetKeyState(VK_NUMLOCK) & 1) == 0)
                     {
                         int nav = KeyMap.NumpadNavE0Scancode(sendSc & 0xFF);
                         if (nav == 0) return;        // 小键盘 5 在 NumLock 关时 = Clear，丢弃
-                        if (nav > 0) sendSc = nav;
+                        if (nav > 0) { sendSc = nav; log.WriteLine("# 小键盘翻成 0x" + nav.ToString("X") + "（NumLock 关）"); }
                     }
                 }
                 transport.Send(Protocol.EncodeKey((ushort)sendSc, (byte)(e.IsUp ? 0 : 1), modifiers));

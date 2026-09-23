@@ -62,14 +62,25 @@ pwsh -File tests\agent-logic\run.ps1
 > 为验证安全性反而制造不安全。该文件的验收靠逐条安全不变量的人工审计 + 真机演练
 > （含 `taskkill` 解锁那条）。
 
-## `scancode-map/` — `ScancodeMap` scancode → HID usage 映射
+## `scancode-map/` — 设备侧纯逻辑（`ScancodeMap` 映射 + `PointerPlan` 位移拆分）
 
-编译 `TestMain.java` + `src\injector\ScancodeMap.java`（`--release 8`，与构建脚本一致），**58 条用例**。
+编译 `TestMain.java` + `src\injector\ScancodeMap.java` + `src\injector\PointerPlan.java`
+（`--release 8`，与构建脚本一致），**69 条用例**。
 
-覆盖：非 E0 基本键 / 功能键 / 标点 / **数字键盘 15 条**（本次新增，起因是接管期用户按的
-6 个键全是小键盘、旧表整段缺失 → 返回 `-1` → 注入器静默丢弃，手机毫无反应）/
-E0 前缀键 / 四个 E0 修饰键必须返回 `-1`。
+`ScancodeMap` 覆盖：非 E0 基本键 / 功能键 / 标点 / **数字键盘 14 条** / E0 前缀键 /
+四个 E0 修饰键必须返回 `-1`。
 
-最后一条是不变量检查：**全表任何映射都不得超过 `0x65`**（HID 描述符按键数组的
+数字键盘里那 11 个数字/小数点键**必须映到数字行 usage（`0x1E`–`0x27`、`0x37`），
+不能映到 Keypad usage**。这是两层缺陷叠出来的结论：第一层是整段缺失（返回 `-1` → 注入器
+静默丢弃，真机现象"按了没反应"）；补上之后**仍然不产字符**，因为 Android 的
+`/system/usr/keychars/Virtual.kcm` 里 `NUMPAD_0..9`/`NUMPAD_DOT` 是
+`base: fallback <导航动作>` + `numlock: '<字符>'`——**只有手机自己的 NumLock 亮着才产字符**，
+而本虚拟键盘的描述符里没有 LED Output 报告，那个灯永远点不亮 → `base` 永远生效 →
+小键盘永远不产字符，与 PC 的 NumLock 状态无关。详见 `ScancodeMap.java` 的注释。
+
+`PointerPlan` 覆盖：位移拆分的**各条之和必须恰好等于目标**（少一条丢位移、多一条多发空报告）、
+每条 `|v| <= 127`、整倍数不多发一条、两轴取较长边、`-5080` 恰好 40 条（= 原先 HOME 硬编码的条数）。
+
+最后一条 `ScancodeMap` 用例是不变量检查：**全表任何映射都不得超过 `0x65`**（HID 描述符按键数组的
 Usage Maximum）。这条不是形式主义——左 Win 与四个 E0 修饰键都曾因为映射到 `0xE3+`
 而被设备端解析器静默丢弃，症状是"能打字但某些键完全没反应"，没有任何报错。
