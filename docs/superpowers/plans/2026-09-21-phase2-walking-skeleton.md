@@ -1338,9 +1338,19 @@ public class KeyState {
 
     /** scancode 是 Windows 形式（低字节 MakeCode，E0 置 0xE000），此处先只处理非 E0 的普通键。 */
     public static void apply(UhidDevice dev, int scancode, boolean down, int mods) throws Exception {
-        modifiers = mods & 0xFF;
+        int newMods = mods & 0xFF;
+        boolean modsChanged = (newMods != modifiers);
+        modifiers = newMods;
+
         int usage = ScancodeMap.toHidUsage(scancode);
-        if (usage < 0) return;   // 未映射的键直接忽略，不破坏报告
+        if (usage < 0) {
+            // 修饰键（或未映射键）。**修饰态一变就必须立刻发一条键盘报告**：
+            // 鼠标报文里不带 mods 字节，若等到下一次按键才发，像"按住 Ctrl 再点击"
+            // 这类操作在手机上永远看不到修饰键（Task 9 审查 Important #2，
+            // 且这正是计划自己注明的意图「修饰键变化也要发一条报告」）。
+            if (modsChanged) dev.sendKeyboard((byte) modifiers, slotsToBytes());
+            return;
+        }
 
         if (down) {
             if (!contains(usage)) {
@@ -1350,9 +1360,14 @@ public class KeyState {
         } else {
             for (int i = 0; i < 6; i++) if (slots[i] == usage) slots[i] = 0;
         }
+        dev.sendKeyboard((byte) modifiers, slotsToBytes());
+    }
+
+    /** 把 6 个槽位打包成一条键盘报告的载荷。 */
+    static byte[] slotsToBytes() {
         byte[] keys = new byte[6];
         for (int i = 0; i < 6; i++) keys[i] = (byte) slots[i];
-        dev.sendKeyboard((byte) modifiers, keys);
+        return keys;
     }
 
     static boolean contains(int usage) {
@@ -2763,10 +2778,15 @@ E0 前缀键的写法（示例，按同样方式补齐其余）：
         if (e0) {
             switch (mk) {
                 case 0x1C: return 0x58;   // 小键盘 Enter
-                case 0x1D: return 0xE4;   // 右 Ctrl
+                // ↓ 四个 E0 修饰键必须返回 -1（Task 9 审查 Important #1/#2 + Minor #1 修正）：
+                // 它们是修饰字节里的位，不是按键槽。原表把它们映射成槽位 usage
+                // 0xE4/0xE6/0xE3/0xE7，而那些值**超过了 HID 描述符按键数组的
+                // Usage Maximum（0x65）**，解析器直接丢弃 → 既进不了修饰字节、
+                // 又白占一个槽位（按住右 Ctrl+右 Alt 再按 5 个键，第 6 个会被静默丢）。
+                case 0x1D: return -1;     // 右 Ctrl（修饰位 0x10，由 PC 侧折算）
                 case 0x35: return 0x54;   // 小键盘 /
                 case 0x37: return 0x46;   // PrintScreen
-                case 0x38: return 0xE6;   // 右 Alt
+                case 0x38: return -1;     // 右 Alt（修饰位 0x40，由 PC 侧折算）
                 case 0x47: return 0x4A;   // Home
                 case 0x48: return 0x52;   // Up
                 case 0x49: return 0x4B;   // PgUp
@@ -2777,9 +2797,9 @@ E0 前缀键的写法（示例，按同样方式补齐其余）：
                 case 0x51: return 0x4E;   // PgDn
                 case 0x52: return 0x49;   // Insert
                 case 0x53: return 0x4C;   // Delete
-                case 0x5B: return 0xE3;   // 左 Win
-                case 0x5C: return 0xE7;   // 右 Win
-                case 0x5D: return 0x65;   // Menu
+                case 0x5B: return -1;     // 左 Win（真机左 Win 就是 E0 0x5B！修饰位 0x08）
+                case 0x5C: return -1;     // 右 Win（修饰位 0x80）
+                case 0x5D: return 0x65;   // Menu（0x65 恰在 Usage Max 上，合法）
                 default:   return -1;
             }
         }
@@ -2826,10 +2846,14 @@ E0 前缀键的写法（示例，按同样方式补齐其余）：
                 if (mk == 0x36) return 0x20;   // 右 Shift
                 if (mk == 0x1D) return 0x01;   // 左 Ctrl
                 if (mk == 0x38) return 0x04;   // 左 Alt
-                if (mk == 0x5B) return 0x08;   // 左 Win
+                if (mk == 0x5B) return 0x08;   // 左 Win（历史形态；现代键盘走下面的 E0 分支）
             }
             else
             {
+                // Task 9 审查 Important #1 修正：**真机的左 Win 就是 E0 0x5B**，
+                // 原表只写了非 E0 的 0x5B（死条目）、E0 分支又漏了 0x5B，导致
+                // 按左 Win 时 LGUI 位永不置位 → 手机上左 Win 完全无效。
+                if (mk == 0x5B) return 0x08;   // 左 Win（真机形态 E0 0x5B）
                 if (mk == 0x1D) return 0x10;   // 右 Ctrl
                 if (mk == 0x38) return 0x40;   // 右 Alt
                 if (mk == 0x5C) return 0x80;   // 右 Win
