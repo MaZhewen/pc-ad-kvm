@@ -1147,7 +1147,9 @@ rg -n 'Config.Load|SettingsApplied' src/agent/Program.cs src/agent/TrayUi.cs
 
 ```bash
 cd /g/pc-kvm
-git add src/agent/SettingsForm.cs src/agent/Program.cs
+# 四个文件都要提交：本任务同时改了 TrayUi.cs（加菜单项与事件），且 R10 追加了两条用例。
+# 初稿这里只列了两个文件——那会提交出一棵编译不过的树（实现者拦下并改用全部四个）。
+git add src/agent/SettingsForm.cs src/agent/TrayUi.cs src/agent/Program.cs tests/agent-logic/Main.cs
 git commit -F - <<'EOF'
 feat: 设置对话框 —— 速度滑块 + 手机在左/右 + 强杀 adb 开关
 

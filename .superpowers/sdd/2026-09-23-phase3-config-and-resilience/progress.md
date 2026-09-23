@@ -302,3 +302,51 @@ Task 3: minor (deferred) → **转交 Task 4**（那轮同样编辑 `tests/agent
   删掉 `InvariantCulture` 参数套件仍全绿）；
   ②`tests/README.md` 的跑法区块仍有"两个脚本"字样，而现在是三套——一个词的事。
   两条都在 Task 4 触碰的同一个子系统内，一并处理比单开修轮划算。
+Task 3: implementer **DONE** — commit **b29ad71**（4 文件 +213/−4）。`Program.cs` **281 → 294**。
+  agent-logic `pass=10 fail=0`（C9/C10 落地）、edge-tracker `pass=15 fail=0`、scancode-map `45/45`；
+  build 零警告 exit 0。
+Task 3: **控制方独立核实（未采信自述）**：自己重编 → `编译成功`、**14 个源文件**、exit 0、37.0 KB；
+  三套 harness 复跑全绿；`rg 'MenuItem' src/agent/TrayUi.cs` → **恰两个**（`:54` 设置…、`:69` 退出）；
+  `rg 'Config.Load|SettingsApplied'` → `Program.cs:47` 一处 Load（位置正确：在 `log` 创建之后、
+  `supp` 之前，后续 `scaler`/`edgeX`/`TrayUi` 才用得上）、事件声明一处（`TrayUi.cs:32`）、
+  订阅一处（`Program.cs:275`）；`wc -l`：`Program.cs` 294 / `SettingsForm.cs` 139 / `TrayUi.cs` 87 /
+  `Main.cs` 114。
+Task 3: **行数预算跟踪（R1/Ruling 33 的预测兑现情况）**：Task 3 用掉 +13；剩余 T4/T5/T6/T7/T8
+  估约 +43 → 计划末尾约 **337/360**，余量 23。目前预测成立，无需再抽。
+Task 3: implementer 自报三处刻意偏离，逐条初评（终评交审查者）：
+  ①**CS0108**：简报逐字的 `void Capture()` 与 WinForms 的 `Control.Capture` 撞名，与简报自己的
+    "零警告"要求冲突；实现者按编译器建议加 `new`（`new void Capture()`），语义不变。
+    ⚠️ **我的初判：`new` 能消警告，但留下一个遮蔽 `Control.Capture` 的成员**——对 `Form` 子类来说
+    这仍是个陷阱（将来有人写 `this.Capture` 会撞上意外的绑定）。更干净的是**改名**（如 `ReadControls`）。
+    属计划笔误（名字是我定的）。交审查者判定，若它也认为该改名则进一次修轮。
+  ②**简报的 `git add` 只列了 2 个文件**，而 Step 2 还要改 `TrayUi.cs`、R10 又加了测试用例——
+    只提交 2 个会让工作树坏掉。实现者提交了全部 4 个改动文件，**判断正确**。计划笔误，我改。
+  ③测试 ini 的清理放在 C10 末尾（C10 消费 C9 写的文件）。能跑通，但把两条用例耦合了；
+    若 C9 中途失败则产物留存。轻微，交审查者看。
+Task 3: review package → `review-59d12e4..b29ad71.diff`（1 commit, 15598 B，做过 BASE 簿记修正）。
+  dispatched **task reviewer（sonnet）**，点名四个风险面（`new Capture` 的处置是否恰当、
+  `cfg` 的声明位置、C9/C10 的断言与清理、以及 **R10 之下对话框的交互行为根本没有被本任务验证**
+  ——要它把这条作为 ⚠️ 明说，而不是拿机器检查当覆盖）。**未预判结论**。
+Task 3: **review 回来 —— Spec ✅ 合规 / Task quality Approved**；**0 Critical、0 Important、2 Minor**。
+  审查者逐条核了：`SettingsForm` 是 public、`TrayUi` 严格限于"对话框+持久化"（运行时应用在
+  `Program.cs` 的订阅者里）、`cfg` 的声明位置对**所有**后续消费者都安全、C# 5 合规、
+  两个既有 harness 未被触碰、C9 确实断言了四项往返、C10 断言了 BOM 与键值。
+  它还额外查了一件我没点名的事：`run.ps1` 每次运行前会 `Remove-Item -Recurse -Force` 输出目录，
+  所以即使测试进程在 C9 与 C10 之间死掉，重跑也是干净的——C9/C10 的清理耦合因此不构成风险。
+Task 3: ⚠️ 审查者如实标出两项**无法从 diff 验证**（我已确认，均非缺口）：
+  ①对话框的**交互行为**（R10 决定移交用户）——机器检查不覆盖它，用户在有设备时应走一遍那份清单；
+  ②零警告构建是报告里的声明，它没有重跑 csc（我已独立重编核实过：14 文件、exit 0、零警告）。
+Task 3: **按流程 Minor 不进修轮 → Task 3 complete**（提交 `b29ad71`，review clean，无需修轮）。
+Task 3: minor (deferred) → **parked 交终审（我与审查者有分歧，两侧都记下）**：
+  `SettingsForm.cs:214` 的 `new void Capture()` 永久遮蔽了 `Control.Capture`（WinForms 的鼠标捕获属性）；
+  类内裸写 `Capture`（不带括号）仍指向那个属性——将来若需要在本窗体上做鼠标捕获就是陷阱。
+  **审查者判**：`new` 是编译器自己的建议、偏差只有一关键字 + 两行注释、调用点无歧义（bool 属性不可调用），
+  「改名更干净但偏离逐字代码更多」，故 Minor。
+  **我的不同意见**：那份"逐字代码"是**我写的**（名字是我定的），所以"偏离"不是有效理由；改名（如 `ReadBack`）
+  能彻底消除遮蔽，而 `new` 只是消掉警告、把陷阱留在原地。
+  **处置**：它是 Minor、且审查已 Approved，故不为其单开修轮；**parked 交终审**，由终审决定改名还是保留。
+  **代价（若保留）**：一个低概率陷阱（只有将来在这个设置对话框上需要鼠标捕获时才会咬人）。
+Task 3: minor (deferred): `tests/agent-logic/Main.cs` 的 C10 用 `catch (Exception) { }` 丢掉了失败原因，
+  失败时只看到 `bom=False keys=False`、看不出是文件缺失还是被占用。非阻塞（C9 同进程写它）。
+Task 3: 计划笔误已修：Task 3 Step 6 的 `git add` 初稿只列两个文件（会提交出编译不过的树）——
+  实现者拦下并改用全部四个；计划正文已改为四个并注明原因。
