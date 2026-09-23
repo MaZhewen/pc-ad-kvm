@@ -47,7 +47,17 @@ namespace PcKvm
         public void Install()
         {
             Tray = new NotifyIcon();
-            Tray.Icon = SystemIcons.Application;   // 任务 6 换成 exe 自带的那份
+            // 用 exe 自己嵌入的图标（/win32icon 那份），不再是 SystemIcons.Application
+            // ——那个 Windows 通用图标是用户看到的"丑"的主要来源。取不到则回退，绝不抛。
+            try
+            {
+                Tray.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+            }
+            catch (Exception)
+            {
+                Tray.Icon = null;
+            }
+            if (Tray.Icon == null) Tray.Icon = SystemIcons.Application;
             Tray.Text = "PC-KVM";
             Tray.Visible = true;
 

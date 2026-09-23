@@ -10,8 +10,12 @@ if (-not (Test-Path $dist)) { New-Item -ItemType Directory -Force -Path $dist | 
 $sources = Get-ChildItem -Path $src -Filter '*.cs' | ForEach-Object { $_.FullName }
 if ($sources.Count -eq 0) { throw "src\agent 下没有 .cs 文件" }
 
+$icon = Join-Path $root 'assets\pc-kvm.ico'
+if (-not (Test-Path $icon)) { throw "找不到图标: $icon" }
+
 Write-Host "编译 $($sources.Count) 个源文件..." -ForegroundColor Cyan
 & $csc -nologo -target:winexe -platform:x64 -optimize+ `
+       -win32icon:"$icon" `
        -out:"$dist\pc-kvm.exe" `
        -r:System.Windows.Forms.dll `
        -r:System.Drawing.dll `
