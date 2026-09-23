@@ -496,3 +496,10 @@ Task 5: fix round 1/5 dispatched（resume 原实现者，只带 Important 1）�
   （`span = _edgeBottom - _edgeTop`、`phoneY = (cursorY - _edgeTop) * _phoneH / span`）
   在原点非零时是否仍正确 —— 这是我改动的连带面，不让它默认没事。
   计划正文已就地修正（三个常量 + 两处推导 + 那段"为什么原点也要读"的注释）。
+
+Task 5: **控制方自己的失误（记一笔，防复发）**：提交 `5802635` 的信息末尾被塞进了两行 shell 噪音
+  （一个多余的 `"` 与一句 `echo ...; git log ...`）——我在同一条命令里用了**两个 heredoc**
+  （先给 ledger 追写、再给 commit 传信息），嵌套把第二个 heredoc 的终止符吃错了。
+  **决定不改写**：`--amend` 虽然技术上安全（未推送、纯信息变更），但**Task 5 的实现者此刻正在同一
+  仓库里改 `Program.cs`**，重写 HEAD 等于与活跃写入者抢索引——正是本项目一贯要避免的协调风险，
+  两行噪音不值得冒。**对策**：提交信息改用单条 `-m "多行字符串"`，不再用嵌套 heredoc。
