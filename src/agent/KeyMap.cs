@@ -16,10 +16,14 @@
                 if (mk == 0x36) return 0x20;   // 右 Shift
                 if (mk == 0x1D) return 0x01;   // 左 Ctrl
                 if (mk == 0x38) return 0x04;   // 左 Alt
-                if (mk == 0x5B) return 0x08;   // 左 Win
+                if (mk == 0x5B) return 0x08;   // 左 Win（历史形态；现代键盘走下面的 E0 分支）
             }
             else
             {
+                // Task 9 审查 Important #1 修正：**真机的左 Win 就是 E0 0x5B**，
+                // 原表只写了非 E0 的 0x5B（死条目）、E0 分支又漏了 0x5B，导致
+                // 按左 Win 时 LGUI 位永不置位 → 手机上左 Win 完全无效。
+                if (mk == 0x5B) return 0x08;   // 左 Win（真机形态 E0 0x5B）
                 if (mk == 0x1D) return 0x10;   // 右 Ctrl
                 if (mk == 0x38) return 0x40;   // 右 Alt
                 if (mk == 0x5C) return 0x80;   // 右 Win

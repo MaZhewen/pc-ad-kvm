@@ -9,10 +9,15 @@ public class ScancodeMap {
         if (e0) {
             switch (mk) {
                 case 0x1C: return 0x58;   // 小键盘 Enter
-                case 0x1D: return 0xE4;   // 右 Ctrl
+                // ↓ 四个 E0 修饰键必须返回 -1（Task 9 审查 Important #1/#2 + Minor #1 修正）：
+                // 它们是修饰字节里的位，不是按键槽。原表把它们映射成槽位 usage
+                // 0xE4/0xE6/0xE3/0xE7，而那些值**超过了 HID 描述符按键数组的
+                // Usage Maximum（0x65）**，解析器直接丢弃 → 既进不了修饰字节、
+                // 又白占一个槽位（按住右 Ctrl+右 Alt 再按 5 个键，第 6 个会被静默丢）。
+                case 0x1D: return -1;     // 右 Ctrl（修饰位 0x10，由 PC 侧折算）
                 case 0x35: return 0x54;   // 小键盘 /
                 case 0x37: return 0x46;   // PrintScreen
-                case 0x38: return 0xE6;   // 右 Alt
+                case 0x38: return -1;     // 右 Alt（修饰位 0x40，由 PC 侧折算）
                 case 0x47: return 0x4A;   // Home
                 case 0x48: return 0x52;   // Up
                 case 0x49: return 0x4B;   // PgUp
@@ -23,9 +28,9 @@ public class ScancodeMap {
                 case 0x51: return 0x4E;   // PgDn
                 case 0x52: return 0x49;   // Insert
                 case 0x53: return 0x4C;   // Delete
-                case 0x5B: return 0xE3;   // 左 Win
-                case 0x5C: return 0xE7;   // 右 Win
-                case 0x5D: return 0x65;   // Menu
+                case 0x5B: return -1;     // 左 Win（真机左 Win 就是 E0 0x5B！修饰位 0x08）
+                case 0x5C: return -1;     // 右 Win（修饰位 0x80）
+                case 0x5D: return 0x65;   // Menu（0x65 恰在 Usage Max 上，合法）
                 default:   return -1;
             }
         }
