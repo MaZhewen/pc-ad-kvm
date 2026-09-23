@@ -775,3 +775,35 @@ Task 8: **控制方加了一项计划外的要求（有明确理由）**：Task 
   D3/D4 钉住 `unauthorized`/`offline` **必须算不可用**（它们含 "device" 的子串风险低但仍需钉），
   D5 钉 null/空串不崩。
   **代价（若判错）**：多约 10 行重构 + 5 条用例；换来的是这个最大任务至少有一处真正的机器验证。
+Task 8: implementer **DONE_WITH_CONCERNS** — commit **1886118**（7 文件 +300/−15，含上一阶段 ledger 的追加）。
+  agent-logic **29/29**（D1–D5 落地）、edge-tracker 24/24、scancode-map 58/58；编译零警告 exit 0；
+  `Program.cs` **357/360** ⇒ **R13 的 `InputRouter.cs` 抽取未触发**（余量 3 行，全程未上调红线）。
+  四条 concern：
+  ①**与 brief 的两处受控偏差**：(a) 日志按**绑定的 R9** 改经 `LogFromWorker()` 的 BeginInvoke——
+    **brief 原文正是"后台线程直写 `_log`"那个 Critical 形态**，故它**选择服从 R9 而不是 brief 字面**，
+    这是对的（R9 就是我为这个形状下的绑定裁决，brief 那几行是旧的）；(b) `TryRebuildLink` 与②级
+    升级前加了 4 个 `_stop` 守卫，防"掉线时退出"竞态弄脏退出清理。
+  ②静态检查 2 的 1 个命中是**注释**（Task 1 写的禁令文档本身），代码零命中。
+  ③**真机三档演练按 R11 推迟，且手机今日离线无法实跑 ⇒ 运行时验证为零**（如实申报）。
+  ④工作区在开工前已有 `M .superpowers/sdd/.gitignore`（非它所改、未提交、未动）。
+Task 8: **控制方独立核实（未采信自述）**：
+  - **上一阶段 ledger 是纯追加**：`git diff --numstat` = **`16 0`**（零删除），761 → 777 行；
+    追加内容以 Task 8 小节开头、以 R11 推迟说明结尾 ✅（这正是 R4 要求的"只追加、不改写"）
+  - 重编 → 15 文件、exit 0、146.0 KB；三套 `29/24/58` 全绿
+  - `System.Threading.Timer` **唯一命中是注释**（零代码命中）；`SetWindowsHookEx|WH_KEYBOARD_LL` **零命中**
+  - `Watchers.cs` 的日志点分类：`_log(` 在 `:70`（逃逸键，UI 线程走 MessageHost 热键）与
+    `:156`（心跳，UI 线程 WinForms Timer）；重连线程的写入在 `:267`（`LogFromWorker`）与
+    `:281`（`Report`），而 `LogFromWorker` 自身在 `:298` 走 `_host.BeginInvoke(... _log(s) ...)`
+    ⇒ **重连线程零直接写日志** ✅
+  - 进程所有权：`devProc` 已从 `TrayUi` 消失，`TrayUi.cs:90` 改用 `_watchers.DeviceProcess` ✅
+  - 行数：`Program.cs` 357 / `Watchers.cs` 303 / `DeviceLauncher.cs` 230 / `TrayUi.cs` 95 / `Main.cs` 246
+Task 8: review package → `review-b74ef93..1886118.diff`（1 commit, 34610 B，做过 BASE 簿记修正）。
+  dispatched **task reviewer —— 用 opus**（本计划风险最高的 diff：并发 + 线程 + 生命周期 + 外部进程；
+  按 skill 的 Model Selection"subtle concurrency change 用最强模型"）。派发里点名六个风险面：
+  ①升级状态机（`_failStreak`/`_level` 会不会跳级/成功后重升级/循环/因瞬时抖动升级）；
+  ②`Report()` 的状态比较是否已收敛到单一线程；③退出顺序（`Stop()` vs 重连线程 vs `log.Close()`）
+  ——那 4 个 `_stop` 守卫是"真的关上了窗口"还是"只是收窄"；④进程生命周期（谁会 Kill、会不会泄漏或双杀）；
+  ⑤初始化顺序（`AttachConfig`/`StartDevice` 与 `Start()` 的先后）；⑥D1–D5 是否真钉住了表头误判陷阱。
+  另要求它**明确区分"已验证的代码"与"未验证的行为"**（本任务运行时验证为零），让用户知道自己在信什么。
+  并告知：上一阶段 ledger 的纯追加、`System.Threading.Timer` 仅注释命中、构建与三套 harness 的结果
+  **均已由控制方核实，无需重算**。**未预判任何结论。**
