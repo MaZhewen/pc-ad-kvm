@@ -987,3 +987,69 @@ dispatched **final whole-branch reviewer —— opus**。范围 `cd86784..e47804
 1. **去重 / 幂等 / 缓存的键里，不能包含会随时间变化的计数或时间戳**（R15）。
 2. **别用两把键管同一件事**——一把的早返回会吞掉另一把的重置（R17）。
    两者指向同一件事：**去重逻辑要有一个单一、显式的域。**
+
+## 终审结果（opus）：0 Critical、2 Important、11 Minor —— **Ready to merge: With fixes**
+
+它**独立重跑了可执行检查**（fresh 全量编译 15 个 `.cs` + `/win32icon` → exit 0 零警告；
+三套 harness 从仓库源码重编重跑 → **24/29/58**；`Program.cs` 357/360；零 `SetWindowsHookEx`），
+其余结论明确标注为静态推理。它还额外读了 `Program.cs`/`Transport.cs`/`DeviceLauncher.cs`
+的当前全文与 spec §5/§9。
+
+**它给的 Strengths 里有几条我很看重**（都是我担心的跨任务面）：
+跨任务一致性良好（`Watchers`/`TrayUi`/`Program` 三权分立无重复所有权；设备侧进程所有权
+从 `Program` 到 `Watchers` 的迁移在 `StartDevice`/`DeviceProcess`/`Stop()`/`TrayUi` 退出四处一致）；
+**线程纪律经静态审计成立**（重连循环在入口、`EnsureTunnel` 后、`PushJar` 后三处重查 `_stop`，
+故退出路径不会留下刚建好的隧道/注入器；`_lastLoggedState` 只在 UI 线程）；
+**四份"放弃序列"都正确**（心跳安全网/逃逸键/ForegroundLost/SettingsApplied 四处都是
+Leave → AbortTakeover → Release → status）；且它确认了 `Suppressor.Release()` 把 `ClipCursor(0)`
+放首位、UX 放末尾，`Engage()` 的 `IsEngaged` 在日志调用之前。
+
+**Important #1 —— `Program.cs:279/300/317` 仍在本项目"最坏失效类别"里，这是最后一处。**
+`Connected`/`Disconnected`/PONG 处理器在 Transport 的 accept/read 线程上直接 `log.WriteLine`；
+退出时 `_transport.Stop()` 虽在 `_log.Close()` 之前，但 **`Stop()` 只置标志与关 socket、不 Join**，
+故在飞的 `Disconnected` 写入仍可能落在 `Close()` 之后 = **后台线程未捕获异常 = 进程被杀**。
+今天只靠顺序运气缓解（`DeviceLauncher.Cleanup` 的 adb 调用买了约 100 ms）。
+**这正是我在 Task 1 复审后如实挂进 ledger 等终审的那条**（ledger 第 211 行附近），
+现被终审提升为 Important 并判**合并前修**。修法约 3 行：在 `Transport.Stop()` 里 Join accept 线程。
+
+**Important #2 —— 又是我的假话，而且正是本项目栽过的那一类。**
+`Config.cs` 类头与 spec §5 都写"默认值即当前行为…与阶段二完全一致"，但
+**`MouseSensitivity` 阶段二是硬编码 `1.0`、新默认是 `0.50`** ⇒ 新机器上会跑出**一半**速度，
+"拷贝即等价"的承诺不成立。终审说"这条必须**有意识地**决定，因为它是一个贴着
+'无行为变化'标签的静默行为变化"。（对照：`ScancodeMap` 那句错注释曾让整个任务建立在错误假设上。）
+**R18 —— 我的裁决：保 `0.50`、改那两句假话。** 依据：用户的原话就是"鼠标移动速度过快"，
+默认减半正是他要的方向；而"可调"由滑块提供（实时生效）。
+**代价（若判错）**：把 exe 单独拷到新机器上手感与阶段二不同——但那正是用户想要的方向；
+且改回 1.00 只需一行。**这条我已向用户明示，他一句话可改。**
+
+**终审对 Minor #3 的裁决与我一致**：`new void Capture()` 该**改名**而不是加 `new` ——
+它明确说"逐字简报"这条理由没有分量，因为简报那个名字本身就是错误。
+（这正是我当时与 task reviewer 的分歧点；两个独立审查者先后认同改名。）
+
+**它另发现 3 条我没记录过的 Minor**：`Config.Save()` 写进 ini 的头注释称
+"改完保存即可、下次按键事件即生效"是**假的**（运行时没有任何东西重读 ini，只有设置对话框
+会改内存里的对象）；`tests/README.md` 的用例数陈旧（写 15/45，实测 24/58）且漏了 L1–L6b；
+`DeviceLauncher.Start()` 的 `Process.Start` 未加 try/catch（重连线程上若 adb 启动失败
+= 后台线程未捕获异常 = 进程被杀，与 #1 同一类别）。
+
+**它的 deferred-minor triage**：合并前修 2 条（#1 + #2）；同轮顺手修 4 条零边际成本
+（`Capture` 改名、`MouseScaler.Reset()` 注释、ini 头注释、README 计数）；
+其余（阶段二 UHID_START 未读、滚轮 /120 截断、硬编码 JBR 路径、Task 5/6/7/8 的各项、
+以及**阶段二那个被明确留给终审的发布竞态**）**可以留**——它对阶段二那条的论证很实：
+x64 TSO 下 `_geometryChanged = true`（volatile，写在 `cursor = …` 之后）不会被重排到写之前，
+且即使理论性错过也有界（标志留置，下一次鼠标事件会应用 HOME），最坏一个事件的漂移。
+
+**它给的首要建议**：合并后**立刻**排那次延期的真机会话——本分支对
+"0.50 默认手感 / 设置对话框 / 左侧跨越 / NumLock 真机翻译 / 三档重连"
+**零运行时证据**；首次实跑应刻意走：两侧边缘进出、接管中 `adb kill-server`（心跳强制解除路径）、
+以及连接状态下退出（先于/后于 #1 的修复各一次，正好验那条竞态）。
+
+**R19 —— 裁决：按终审建议派一次修复波**（skill：findings 一次派完，不逐条派），
+含 #1、#2 与 4 条零边际成本 Minor，并**加进它点出的 `Process.Start` 未守卫那条**
+（与 #1 同属"后台线程未捕获异常 = 进程被杀"这一本项目最坏类别，且只是一层 try/catch）。
+`Capture` 改名一并做（两个独立审查者都判改名）。
+**#8（设置对话框开着时推到边缘会进接管）判为"记录而非加守卫"**：加守卫需让 `EnterTakeover`
+知道对话框存在 = 引入耦合，而恢复路径本就存在（逃逸键 / 原路推回 40 mickey）。
+**#10（③级在开关关闭时也置 `_level=2`）与 spec §9 的措辞**留待合并后随文档一并改。
+**代价（若判错）**：这一轮里改动最多的其实是注释与文档（真代码只有 #1 的 Join、
+#7 的 try/catch、#3 的改名），风险低；但"一次修 8 项"本身有引入新瑕疵的可能，故仍要一次 scoped 复审。
