@@ -40,10 +40,9 @@ namespace PcKvm
         System.Threading.Thread _reconnect;
         int _failStreak;
         int _level;                 // 已升级到的档位：0 = 只做①，1 = 做过温和，2 = 做过激进
-        string _lastReport = "";
-        // 去重键必须是【状态种类】，不能是含递增计数的完整消息——
-        // 否则 `s == _lastReport` 永不成立，每轮都会写一行（掉线一小时约 720 行）。
-        // 只在 UI 线程读写（Report/ReportWaiting 的 BeginInvoke 委托体内）。
+        // 唯一的日志去重键 = 【状态种类】，不能是含递增计数的完整消息——
+        // 否则每轮都会写一行（掉线一小时约 720 行）。只在 UI 线程读写
+        // （ReportState 的 BeginInvoke 委托体内）。
         string _lastLoggedState = "";
 
         /// <summary>几何轮询每次**成功**查到都抛（含未变化值）。
@@ -277,51 +276,46 @@ namespace PcKvm
             return _devProc != null;
         }
 
-        /// <summary>状态变化上报。**只在状态真的变了**才写日志与改状态条——
-        /// 每次重试都打会把有效信息淹没（本项目既栽过 2% 采样率，也栽过刷日志）。
-        /// 本方法跑在重连监督线程上：日志与控件都必须经 BeginInvoke 回 UI 线程（R9/Ruling 28）。
-        /// 写日志时同步更新 _lastLoggedState（与 ReportWaiting 共用同一个去重键，
-        /// 否则 `Report("adb server 重启中…")` 之后的第一轮等待会与它对不上）。</summary>
-        void Report(string s)
-        {
-            if (s == _lastReport) return;
-            _lastReport = s;
-            try
-            {
-                // _lastLoggedState 只在 BeginInvoke 委托体里读写（UI 线程），无跨线程撕裂（R9）
-                _host.BeginInvoke((MethodInvoker)delegate
-                {
-                    _lastLoggedState = s;
-                    _log("# " + s);
-                });
-            }
-            catch (System.Exception) { }
-            try
-            {
-                // 跨线程：必须 marshal 回 UI 线程（Task 8 审查 Ruling 28 同一条约束）
-                _host.BeginInvoke((MethodInvoker)delegate { _host.SetStatus(s); });
-            }
-            catch (System.Exception) { }
-        }
-
-        /// <summary>等待中的状态上报：**状态条每轮更新（含重试次数），日志只在状态种类变化时打一行**。
-        /// 与 Report 共用同一个去重键，故两者不会互相打架。</summary>
-        void ReportWaiting(string why, int attempts)
+        /// <summary>状态与日志上报的统一入口。
+        /// **status** = 要显示在状态条上的文本；**key** = 拿去重用的【状态种类】。
+        /// 两者刻意分开：等待消息里含每轮递增的重试次数，**那个次数绝不能拿去重**
+        ///（否则 `key != _lastLoggedState` 永不成立，每轮都会写一行，掉线一小时约 720 行）。
+        ///
+        /// **状态条每次都设、绝不去重**：它是"现在是真值"，一旦被去重跳过，用户就会看到
+        /// 停在"等待设备…"而实际已连上。日志才按状态种类去重。
+        ///
+        /// 为什么只留一把键（不再保留上一版那把"已显示文本"旧键）：两把键分属不同域时，一把的早返回会
+        /// **吞掉另一把的重置** —— 那正是本缺陷的成因（短掉线恢复时 `Report("已连接")`
+        /// 被旧键门掉，顺带没重置 `_lastLoggedState`，于是下一次掉线的等待阶段
+        /// 一条日志都不打）。一把键、一个域，这个耦合就不存在了。</summary>
+        void ReportState(string status, string key)
         {
             try
             {
                 _host.BeginInvoke((MethodInvoker)delegate
                 {
-                    string status = "等待设备…（已重试 " + attempts + " 次，" + why + "）";
-                    _host.SetStatus(status);              // 状态条：每轮都更新
-                    if (why != _lastLoggedState)          // 日志：只在状态种类变了才写
+                    _host.SetStatus(status);          // 状态条：每次都设，绝不去重
+                    if (key != _lastLoggedState)      // 日志：只在状态种类变化时写一行
                     {
-                        _lastLoggedState = why;
+                        _lastLoggedState = key;
                         _log("# " + status);
                     }
                 });
             }
             catch (System.Exception) { }
+        }
+
+        /// <summary>一次性状态（"已连接"/"adb server 重启中…"/"强杀 adb 进程中…"）：
+        /// 状态与去重键同为该文本。</summary>
+        void Report(string s)
+        {
+            ReportState(s, s);
+        }
+
+        /// <summary>等待中的状态：状态条含重试次数（每轮都变），去重键只用 why。</summary>
+        void ReportWaiting(string why, int attempts)
+        {
+            ReportState("等待设备…（已重试 " + attempts + " 次，" + why + "）", why);
         }
 
         /// <summary>后台线程写【事件】日志的通道（R9）：marshal 回 UI 线程再写。
