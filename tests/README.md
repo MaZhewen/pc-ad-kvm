@@ -13,6 +13,7 @@
 ```powershell
 pwsh -File tests\edge-tracker\run.ps1
 pwsh -File tests\scancode-map\run.ps1
+pwsh -File tests\agent-logic\run.ps1
 ```
 
 两个脚本都会**从仓库当前源码**重新编译（绝不复用 `%TEMP%` 里的预编译产物——
@@ -23,6 +24,7 @@ pwsh -File tests\scancode-map\run.ps1
 | 用途 | 需要 |
 |---|---|
 | `edge-tracker` | `%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe`（C# 5，无需 SDK） |
+| `agent-logic` | 同 `edge-tracker`（`csc.exe`）；覆盖 `Config` / `MouseScaler` / `KeyMap` |
 | `scancode-map` | PyCharm 自带 JDK：`C:\Program Files\JetBrains\PyCharm 2026.2.0.1\jbr\bin\`（路径硬编码，与 `build\build-injector.ps1` 同一套，换机器要改两处） |
 
 ## `edge-tracker/` — `EdgeTracker` 边缘状态机
