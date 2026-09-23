@@ -87,6 +87,24 @@ public class TestMain {
         }
         check("全表 usage 均 <= 0x65", over, 0);
 
+        // NumLock 关时，PC 侧（KeyMap.NumpadNavE0Scancode）会把数字键盘普通码翻成 E0 形态，
+        // 期望设备侧这些 E0 码映到【导航】usage。下面逐条钉住这个跨语言契约——
+        // 若哪天有人改了 E0 表，这里会立刻红。
+        check("NumLock关 小键盘7→Home", ScancodeMap.toHidUsage(0xE047), 0x4A);
+        check("NumLock关 小键盘8→Up", ScancodeMap.toHidUsage(0xE048), 0x52);
+        check("NumLock关 小键盘9→PgUp", ScancodeMap.toHidUsage(0xE049), 0x4B);
+        check("NumLock关 小键盘4→Left", ScancodeMap.toHidUsage(0xE04B), 0x50);
+        check("NumLock关 小键盘6→Right", ScancodeMap.toHidUsage(0xE04D), 0x4F);
+        check("NumLock关 小键盘1→End", ScancodeMap.toHidUsage(0xE04F), 0x4D);
+        check("NumLock关 小键盘2→Down", ScancodeMap.toHidUsage(0xE050), 0x51);
+        check("NumLock关 小键盘3→PgDn", ScancodeMap.toHidUsage(0xE051), 0x4E);
+        check("NumLock关 小键盘0→Insert", ScancodeMap.toHidUsage(0xE052), 0x49);
+        check("NumLock关 小键盘.→Delete", ScancodeMap.toHidUsage(0xE053), 0x4C);
+        check("NumLock关 小键盘5→无对应", ScancodeMap.toHidUsage(0xE04C), -1);
+        // 对照：NumLock 开时走普通码那一段，必须是数字键盘 usage
+        check("NumLock开 小键盘7→KP7", ScancodeMap.toHidUsage(0x47), 0x5F);
+        check("NumLock开 小键盘0→KP0", ScancodeMap.toHidUsage(0x52), 0x62);
+
         System.out.println("TOTAL: " + (total - fails) + "/" + total + " passed, " + fails + " failed");
         System.exit(fails);
     }

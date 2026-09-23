@@ -166,6 +166,52 @@ static class AgentLogicTest
         for (int i = 0; i < 200; i++) sum += ms.ApplyX(1);
         Check("S8 长期不漂移", sum == 100, "200 次 dx=1 @0.5 共发 " + sum + "（期望 100）");
 
+        // ---- N1: NumLock 关时数字键盘应翻成 E0 形态（设备侧既有 E0 表会映成导航 usage） ----
+        // 实测依据（2026-09-23 真机日志）：物理数字键盘不受 NumLock 影响恒发普通码
+        //（小键盘 7 = 0x47，导航区独立 Home = 0xE047）。所以"关"这一侧必须由我们显式翻译，
+        // 否则手机永远是小键盘模式 = 与 PC 键盘的 NumLock 灯相反。
+        Check("N1 翻译成 E0 形态",
+            KeyMap.NumpadNavE0Scancode(0x47) == 0xE047
+            && KeyMap.NumpadNavE0Scancode(0x48) == 0xE048
+            && KeyMap.NumpadNavE0Scancode(0x49) == 0xE049
+            && KeyMap.NumpadNavE0Scancode(0x4B) == 0xE04B
+            && KeyMap.NumpadNavE0Scancode(0x4D) == 0xE04D
+            && KeyMap.NumpadNavE0Scancode(0x4F) == 0xE04F
+            && KeyMap.NumpadNavE0Scancode(0x50) == 0xE050
+            && KeyMap.NumpadNavE0Scancode(0x51) == 0xE051
+            && KeyMap.NumpadNavE0Scancode(0x52) == 0xE052
+            && KeyMap.NumpadNavE0Scancode(0x53) == 0xE053,
+            "0x47..0x53（除 0x4C）都应翻成 0xE0xx");
+
+        // ---- N2: 小键盘 5（NumLock 关 = Clear）无 HID 对应，必须返回 0 让调用方丢弃 ----
+        Check("N2 小键盘5 丢弃", KeyMap.NumpadNavE0Scancode(0x4C) == 0,
+            "0x4C → " + KeyMap.NumpadNavE0Scancode(0x4C) + "（期望 0）");
+
+        // ---- N3: 不受 NumLock 影响的键返回 -1（原样发送） ----
+        Check("N3 不受影响的原样发", KeyMap.NumpadNavE0Scancode(0x37) == -1
+            && KeyMap.NumpadNavE0Scancode(0x4A) == -1
+            && KeyMap.NumpadNavE0Scancode(0x4E) == -1
+            && KeyMap.NumpadNavE0Scancode(0x35) == -1
+            && KeyMap.NumpadNavE0Scancode(0x1E) == -1,
+            "0x37(*) 0x4A(-) 0x4E(+) 0x35(/) 与普通字母键都应返回 -1");
+
+        // ---- N4（钉子）: 这条用例是为了防止有人"顺手"把翻译改成返回 usage 而不是 scancode。
+        // 返回的必须是 scancode（带 0xE000 标志），因为线上协议送的就是 scancode，
+        // 设备侧 scancode→usage 的翻译已经存在（ScancodeMap 的 E0 表）。
+        Check("N4 返回的是 scancode 不是 usage",
+            (KeyMap.NumpadNavE0Scancode(0x47) & 0xE000) == 0xE000,
+            "0x47 → 0x" + KeyMap.NumpadNavE0Scancode(0x47).ToString("X"));
+
+        // ---- N5（回归钉子）: 假 Shift E0 0x2A 不得被当成修饰键 ----
+        // 实测日志里出现过 0xE02A + 0xE049（部分键盘给导航键区发的兼容前缀）。
+        // KeyMap 的 E0 分支只含 0x5B/0x1D/0x38/0x5C，故 0x2A 必须返回 0，
+        // 否则会往手机注入一次幽灵 Shift。这条钉住它，免得以后有人"补全"E0 分支时引入回归。
+        Check("N5 假Shift 不得当修饰键", KeyMap.ModifierBit(0x2A, true) == 0,
+            "ModifierBit(0x2A, isE0=true) = " + KeyMap.ModifierBit(0x2A, true) + "（期望 0）");
+        Check("N5b 真左Shift 仍是修饰键", KeyMap.ModifierBit(0x2A, false) == 0x02,
+            "ModifierBit(0x2A, isE0=false) = 0x" + KeyMap.ModifierBit(0x2A, false).ToString("X2")
+            + "（期望 0x02）");
+
         Console.WriteLine("TOTAL: pass=" + _pass + " fail=" + _fail);
         if (_fail > 0) Environment.Exit(1);
     }

@@ -30,5 +30,43 @@
             }
             return 0;
         }
+
+        /// <summary>
+        /// NumLock **关**时，数字键盘的普通 scancode 应改送哪个 scancode。
+        ///
+        /// 实测依据（2026-09-23 真机日志，铁证）：物理数字键盘**不受 NumLock 影响，
+        /// 恒发同一个普通 scancode**——小键盘 7 是 0x47，而导航区那颗独立的 Home 才是 0xE047。
+        /// 是 Windows 依据 NumLock 把 0x47 解释成 NUMPAD7 还是 HOME。
+        /// 原 ScancodeMap 注释写成"NumLock 关时同样这些物理键发 E0 前缀"是**错的**，
+        /// 于是 0x47→0x5F 无条件生效 → 手机永远小键盘模式 → 与 PC 键盘的 NumLock 灯相反。
+        ///
+        /// 修法：把"NumLock 关"的小键盘码翻成它**自己的 E0 形态**，交给设备侧既有的
+        /// E0 表去映成 Home/PgUp/… —— 那张表的"关"列与导航键区本来就逐项相同，
+        /// 于是**设备侧零改动**。返回的是 scancode 而非 usage，因为线上协议送的就是 scancode。
+        ///
+        /// 返回 0 = 该键在 NumLock 关时无 HID 对应（小键盘 5 = Clear），调用方**丢弃**。
+        /// 返回 -1 = 不受 NumLock 影响，调用方**原样发送**。
+        /// </summary>
+        public static int NumpadNavE0Scancode(int mk)
+        {
+            switch (mk)
+            {
+                case 0x47:   // 7 → Home
+                case 0x48:   // 8 → Up
+                case 0x49:   // 9 → PgUp
+                case 0x4B:   // 4 → Left
+                case 0x4D:   // 6 → Right
+                case 0x4F:   // 1 → End
+                case 0x50:   // 2 → Down
+                case 0x51:   // 3 → PgDn
+                case 0x52:   // 0 → Insert
+                case 0x53:   // . → Delete
+                    return 0xE000 | mk;
+                case 0x4C:   // 5（NumLock 关）= Clear，HID 无对应
+                    return 0;
+                default:     // 0x37 * / 0x4A - / 0x4E + / 0x35 斜杠：不受 NumLock 影响
+                    return -1;
+            }
+        }
     }
 }

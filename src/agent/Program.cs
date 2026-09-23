@@ -26,6 +26,11 @@ namespace PcKvm
         [DllImport("user32.dll")]
         static extern int GetSystemMetrics(int nIndex);
 
+        const int VK_NUMLOCK = 0x90;
+
+        [DllImport("user32.dll")]
+        static extern short GetKeyState(int vKey);
+
         [STAThread]
         static void Main()
         {
@@ -239,7 +244,21 @@ namespace PcKvm
                 }
 
                 if (tracker.Current != KvmState.Takeover) return;   // IDLE 态不转发，PC 正常用
-                transport.Send(Protocol.EncodeKey((ushort)e.Scancode, (byte)(e.IsUp ? 0 : 1), modifiers));
+
+                // NumLock 关时把数字键盘普通码翻成 E0 形态（#5）。上面日志已经打过**原始**
+                // scancode——日志必须记录真实观测，不能记录翻译后的值。
+                int sendSc = e.Scancode;
+                if (!e.IsE0)
+                {
+                    // GetKeyState 在 UI 线程调用（Raw Input 的 WM_INPUT 就在消息循环上），开销可忽略
+                    if ((GetKeyState(VK_NUMLOCK) & 1) == 0)
+                    {
+                        int nav = KeyMap.NumpadNavE0Scancode(sendSc & 0xFF);
+                        if (nav == 0) return;        // 小键盘 5 在 NumLock 关时 = Clear，丢弃
+                        if (nav > 0) sendSc = nav;
+                    }
+                }
+                transport.Send(Protocol.EncodeKey((ushort)sendSc, (byte)(e.IsUp ? 0 : 1), modifiers));
             };
 
             string jar = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "pckvm.jar");
