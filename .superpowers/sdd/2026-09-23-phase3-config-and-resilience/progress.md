@@ -909,3 +909,37 @@ Task 8: scoped re-review package → `review-abf9a5a..5a6e36b.diff`（1 commit, 
   要求它自己走一遍监督循环并给出**四种情形**（稳态连接 / 1 轮掉线 / 10 轮含②级 / 到达③级）
   各自的日志行数，并与实现者的数字对照；
   ③R9 是否仍不受影响（重连线程零 `_log`/`SetStatus`）；④被删的键是否真的彻底消失（留半截会 CS0414）。
+Task 8: fix round 2/5 复审 **clean** —— 判 **All findings addressed, no new Critical/Important breakage** ✅。
+  它逐点给了行号（`ReportState` 在 `:291-306`、`SetStatus` 在 `:297` 位于 `if (key != _lastLoggedState)` 之前
+  故不可能被跳过、两个转发器 `:310-313`/`:316-319` 与 R17 裁决完全一致），并确认触发场景已修
+  （1–2 轮掉线后 `Report("已连接")` 一定执行 `SetStatus`，状态条不再卡在"等待设备…"；
+  `_lastLoggedState` 在 UI 线程重置，下一个同 why 的等待阶段能正常记日志）。
+  **它做了我要的逆向检查并给出自己的四种情形行数**：稳态连接 **0** 行；1 轮掉线 **2** 行；
+  10 轮含②级（默认 AllowKillAdb=false）**4** 行；到达③级 **6** 行 —— 并论证**没有新增重复打日志**：
+  ②/③级报告由 `_level` 保证每级只触发一次，`已连接` 报告之间总隔着会移动键的等待报告。
+  它另**抓出实现者报告里一处算术失误**（实现者写"共 5 行"，其自身算式 1+1+1+1=4）——判为报告笔误、
+  非代码缺陷。**这类"报告数字不准"它没有放过，记一笔。**
+  `_lastReport` 零命中（`rg` exit 1）、`_lastLoggedState` 在 `:298` 既赋值又被读 ⇒ 无 CS0414 路径、
+  与"零警告"声明自洽；`Program.cs` 本轮未碰（diff 只有 `Watchers.cs`）。
+Task 8: **按流程 → Task 8 complete**（提交 `1886118` + `3e6c274` + `5a6e36b`，review clean after 2 fix rounds）。
+Task 8: minor (deferred，复审者提出、**先于本轮修复**): `AllowKillAdb=false` 时、`_failStreak >= 6` 的那些轮，
+  ③级分支仍 `continue` 而不上报 ⇒ **那一轮既不打日志也不刷新状态条**（重试次数停一拍）。
+  属 brief 原本的 Step 2 形状、先于本修轮；一次一拍、无害。
+Task 8: minor (deferred): 实现者走查 ③ 的行数写 5、实际 4（报告笔误，非代码缺陷）。
+
+## 全计划状态：Task 1–8 全部完成并通过审查
+
+| Task | 提交 | 审查结果 |
+|---|---|---|
+| 1 P0 抽 `Watchers`/`TrayUi` | `ccf32a7` + `64c350b` | clean after 1 fix round（我加的轮询线程日志行） |
+| 2 `Config` 配置层 | `014d55a` | clean（0 Important） |
+| 3 设置对话框 | `b29ad71` | clean（0 Important） |
+| 4 #1 速度 + 小数余量 | `d7099a0` + `c0adf03` | clean（0 Important） |
+| 5 #2 手机在左/右 + 左挂回归 | `821fa8f` + `47cbadc` | clean after 1 fix round（虚拟桌面**原点**） |
+| 6 #3 图标 | `c92859c` + `e75563d` | 代码 Approved + 外观经独立逐像素复测确认 |
+| 7 #5 NumLock | `b018951` | clean（0 Important） |
+| 8 #4 断联自愈 | `1886118` + `3e6c274` + `5a6e36b` | clean after 2 fix rounds（去重键，两次都是我设计的缺陷） |
+
+离线用例终值：`edge-tracker` 24、`scancode-map` 58、`agent-logic` 29（原 15 / 45 / 0 → 共 **111 条**）。
+`Program.cs` **357/360** —— 全程**未上调红线**，R13 的 `InputRouter.cs` 抽取未触发。
+**整阶段运行时验证为零**（手机离线）：所有真机验收待用户批量的硬件会话。
