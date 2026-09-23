@@ -890,3 +890,22 @@ Task 8: **R17 —— 裁决：去掉 `_lastReport`，只留一把键，并把"�
   **代价（若判错）**：`Report` 由"整体去重"变成"状态条每次都设、日志去重"——重复调用同一个
   `Report("已连接")` 现在会重复设一次状态条（幂等、无副作用），换来的是状态条**永不撒谎**。
   计划正文已就地修正（字段块 + 两个方法 + 一段讲清"为什么只留一把键"的注释）。
+Task 8: fix round 2/5 implementer **DONE** — commit **5a6e36b**（**仅 `Watchers.cs` +31/−37**，净减 6 行；
+  未 amend `1886118`/`3e6c274`）。`_lastReport` 字段与全部读写**已删**；新增
+  `ReportState(status, key)`（**状态条在去重分支之前、每次都设**；日志按 key 去重），
+  `Report(s)`=ReportState(s,s)、`ReportWaiting(why,n)`=状态带次数/键只用 why。
+  build 零警告（**无 CS0414**）exit 0；三套 `29/24/58` 全绿；`Program.cs` 仍 **357**（未碰）。
+  它给了我要的两个推演：**短掉线（第二次）→ 2 行日志、状态条回到"已连接"**；
+  **10 轮含②级 → 5 行日志、状态条每轮更新次数、最终"已连接"**。
+  另一处如实申报：我在派发给的注释文本里有两处提到 `_lastReport`，删字段后那两句会自相矛盾，
+  它**最小改写为"旧键"**并声明语义未丢——**判断正确**。
+Task 8: **控制方独立核实（未采信自述）**：`rg '_lastReport' src/agent/Watchers.cs` → **零命中** ✅；
+  `SetStatus` 三处命中（L82 逃逸键、L167 心跳、**L297 `ReportState` 在去重判断 L298 之前**）
+  ⇒ **三处都在去重分支之外**，状态条必被设置 ✅。
+Task 8: scoped re-review package → `review-abf9a5a..5a6e36b.diff`（1 commit, 7883 B；FIX_BASE 取 `abf9a5a`，
+  跳过我的两个文档提交）。dispatched **scoped re-reviewer（sonnet）**，除 finding 外点名四个检查：
+  ①`Watchers.cs` 里**每一处** `SetStatus` 是否都在去重分支之外；
+  ②**合键的逆向风险** —— `_lastReport` 去掉后，有没有哪个状态变成会**重复打日志**？
+  要求它自己走一遍监督循环并给出**四种情形**（稳态连接 / 1 轮掉线 / 10 轮含②级 / 到达③级）
+  各自的日志行数，并与实现者的数字对照；
+  ③R9 是否仍不受影响（重连线程零 `_log`/`SetStatus`）；④被删的键是否真的彻底消失（留半截会 CS0414）。
