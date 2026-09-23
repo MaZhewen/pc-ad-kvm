@@ -1593,6 +1593,8 @@ Expected: `T1`–`T15`（15 条）、`L1`–`L6b`（9 条）全 `PASS`，`TOTAL:
 在 `Program.cs` 的 `POINT` 结构体附近加：
 
 ```csharp
+        const int SM_XVIRTUALSCREEN = 76;
+        const int SM_YVIRTUALSCREEN = 77;
         const int SM_CXVIRTUALSCREEN = 78;
         const int SM_CYVIRTUALSCREEN = 79;
 
@@ -1609,16 +1611,26 @@ Expected: `T1`–`T15`（15 条）、`L1`–`L6b`（9 条）全 `PASS`，`TOTAL:
             // edgeX 约定 = 触发侧最外侧"有效像素列"：右侧取 W-1（Windows 把光标钳在最后一列内），
             // 左侧取 0。edgeBottom 是**开区间**（EdgeTracker.cs 判定为 cursorY >= _edgeBottom 时拒绝），
             // 故直接传桌面高度。
+            int screenX = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            int screenY = GetSystemMetrics(SM_YVIRTUALSCREEN);
             int screenW = GetSystemMetrics(SM_CXVIRTUALSCREEN);
             int screenH = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-            if (screenW <= 0) screenW = 3840;   // 极端回退（API 失败不该让程序起不来）
-            if (screenH <= 0) screenH = 1080;
-            log.WriteLine("# 桌面几何 " + screenW + "x" + screenH
+            // ⚠️ 原点也要读（R12）。只用尺寸会把原点默认成 (0,0)，而**任何把显示器挂在主屏
+            // 左侧或上方的布局**原点都不是 (0,0)：此时左边缘应是 `SM_X` 而非 0、右边缘应是
+            // `SM_X + W - 1` 而非 `W - 1`，且 `cursorX >= W - 1` 可能永远不可达 —— 正是本功能
+            // 要防的"入口条件永远不可达"。只堵尺寸变化是不够的。
+            // 尺寸是判成败的判据（必须为正）；**原点允许为负**，故不能用 <= 0 判失败。
+            if (screenW <= 0 || screenH <= 0)
+            {
+                screenX = 0; screenY = 0; screenW = 3840; screenH = 1080;
+            }
+            log.WriteLine("# 桌面几何 x=" + screenX + " y=" + screenY + " "
+                          + screenW + "x" + screenH
                           + "，手机在" + (cfg.PhoneOnLeft ? "左" : "右") + "侧");
 
             EdgeTracker tracker = new EdgeTracker(
-                edgeX: cfg.PhoneOnLeft ? 0 : screenW - 1,
-                edgeTop: 0, edgeBottom: screenH,
+                edgeX: cfg.PhoneOnLeft ? screenX : screenX + screenW - 1,
+                edgeTop: screenY, edgeBottom: screenY + screenH,
                 phoneW: 2136, phoneH: 3200, phoneRight: !cfg.PhoneOnLeft);
 ```
 
@@ -1642,7 +1654,8 @@ Expected: `T1`–`T15`（15 条）、`L1`–`L6b`（9 条）全 `PASS`，`TOTAL:
                     supp.Release();
                     host.SetStatus("IDLE");
                 }
-                tracker.SetEdge(c.PhoneOnLeft ? 0 : screenW - 1, 0, screenH, !c.PhoneOnLeft);
+                tracker.SetEdge(c.PhoneOnLeft ? screenX : screenX + screenW - 1,
+                                screenY, screenY + screenH, !c.PhoneOnLeft);
                 log.WriteLine("# 设置已应用：手机在" + (c.PhoneOnLeft ? "左" : "右")
                               + "侧（edgeX=" + (c.PhoneOnLeft ? 0 : screenW - 1) + "）"
                               + " 速度=" + c.MouseSensitivity.ToString("F2")

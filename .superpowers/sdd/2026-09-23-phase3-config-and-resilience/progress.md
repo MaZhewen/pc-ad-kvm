@@ -455,3 +455,44 @@ Task 5: concern 2（`SetEdge` 无边界守卫）：调用方都传推导/守卫�
   也能安全退化（不会崩、只会判不出边缘）。实现者未采取行动，交审查者判定。
 Task 5: concern 3（agent-logic 是 18 不是简报写的 16）：属 Task 3 加 C9/C10 后的账目漂移，与本事无关。
 Task 5: review package → `review-1cf954f..821fa8f.diff`（1 commit —— 实现者只有一个提交，无簿记修正需求）。
+Task 5: **review 回来 —— Spec ✅ 合规 / Task quality Approved**；0 Critical、**1 Important**、4 Minor。
+  审查者做的事：walks 了 `EdgeTracker` 全部**六个** `_phoneRight` 分支（它为了这个把整个文件读了，
+  因为 diff 的上下文不含那些行）并逐条判定左侧是右侧的**严格符号/关系镜像**；把九个 L 用例逐条对上分支，
+  结论"无一条靠构造通过"（并用中间那次 `pass=20 fail=4` 作为判别力证据）；
+  确认 `SetEdge` **不重建**、订阅存活；确认 `screenW/screenH` 在**两个**消费者（构造与处理器闭包）
+  之前声明、无前向引用；确认 `SetEdge` 的解除武装既不"吸人"（L6b 钉住）也不"困人"
+  （`OnIdleMove` 在光标移出 ±12 安全带后会重新武装）；确认 `_lastVx` 在换边后残留无害
+  （只在 Takeover 里读，且下次入屏会重新播种，何况处理器已先强制退出接管）。
+  它**独立核实**了 L4/L5 那个偏差的事实基础（`CursorModel.cs:20-21` 停在 (0,0)、
+  `Program.cs:130-131` 真的 `Reset()`+`SetPosition`），判为**正确且是改进**。
+Task 5: **Important 1（plan-mandated）= 又是我写的设计缺口**：入口边推导**只用尺寸、没用原点**。
+  原码 `edgeX = cfg.PhoneOnLeft ? 0 : screenW - 1` 只读 `SM_CX/CYVIRTUALSCREEN`，把原点默认成 (0,0)。
+  **任何把显示器挂在主屏左侧或上方的布局**都会让 `SM_X/YVIRTUALSCREEN` 非零 —— 此时左边缘应是
+  `SM_X` 而非 0、右边缘应是 `SM_X + W - 1` 而非 `W - 1`，且 `cursorX >= W - 1` **可能永远不可达**。
+  **讽刺之处**：这正是我亲手写在那一行旁边注释里的失效（"写死 3839 时，换一套显示器布局会让入口
+  条件永远不可达"）—— 我只堵了**尺寸**变化、没堵**原点**变化。**设计层面，非实现者之过。**
+Task 5: **R12 —— 裁决：现在就修，不 park。** 理由：①它是 **Important** 不是 Minor，按规则默认进循环；
+  ②修复只约 6 行，且直接实现代码注释与 spec 动机已写明的原则；③留成潜在静默 bug 等于"为布局健壮性
+  做的功能在一种常见布局下仍然失效"；④代价是一次小修轮。
+  处置：加 `SM_XVIRTUALSCREEN`(76)/`SM_YVIRTUALSCREEN`(77) 两个常量，改
+  `edgeX: 手机在左 ? screenX : screenX + screenW - 1`、`edgeTop: screenY`、
+  `edgeBottom: screenY + screenH`（**原点非零时原来那个 `0`/`screenH` 同样错**），
+  `SetEdge` 同步；日志补打 `x= y=` 以便真机问题一眼可诊断。
+  **一处判据也要点明**：尺寸是判成败的判据（必须为正），而**原点允许为负**（左侧挂屏就是负的），
+  所以原点**不能**拿 `<= 0` 当失败——只有尺寸坏了才整体回退，且回退时原点必须归零。
+  **代价（若判错）**：多读两个 system metric、多约 8 行；`Program.cs` 预算仍充裕。
+Task 5: minor (deferred): 实时改显示器布局时 `screenW/screenH` 是启动时快照，`SettingsApplied` 闭包沿用旧值；
+  在处理器内部重读 `GetSystemMetrics` 就能让换边自纠正。非阻塞（要重启才生效，与现状一致）。
+Task 5: minor (deferred): **左侧的重新武装路径没有被钉住** —— L6b 只验了"光标停在新边缘时进不去"，
+  没有覆盖"向右移出安全带 → `Armed=true` → 再向左推能进"。补一条用例即可闭合。
+Task 5: minor (deferred): `SetEdge` 没有边界守卫，而 `SetPhoneSize` 有。同意实现者的不动作：
+  两个调用点都传推导/守卫过的值，`OnIdleMove` 对垃圾边界也只是"永不触发"而不崩。仅当出现第三个
+  调用点时再考虑加守卫。
+Task 5: minor (deferred): 右侧 T 用例仍依赖"`CursorModel` 初值 (0,0) 恰等于入屏点"这一巧合
+  （虽在 L4 的注释里写明了，但 T 用例本身没改）。它们目前正确但脆弱；后续清理时给 T 用例也补显式
+  `SetPosition(0, y)` 即可消除。
+Task 5: fix round 1/5 dispatched（resume 原实现者，只带 Important 1）。
+  派发里额外要求它**自查一处连带语义**：`edgeTop` 从 `0` 变成 `screenY` 之后，入屏的比例映射
+  （`span = _edgeBottom - _edgeTop`、`phoneY = (cursorY - _edgeTop) * _phoneH / span`）
+  在原点非零时是否仍正确 —— 这是我改动的连带面，不让它默认没事。
+  计划正文已就地修正（三个常量 + 两处推导 + 那段"为什么原点也要读"的注释）。
