@@ -577,3 +577,23 @@ Task 6: review package → `review-4def56f..c92859c.diff`（1 commit, 3818 B，�
   重写还是逐行改动）、托盘回退在 `ExtractAssociatedIcon` **返回 null 而不抛**时是否正确、
   `Tray.Icon` 会不会留 null、`/win32icon:` 的路径/引号/缺失时是否 fail-fast、
   以及是否引入了新的运行时文件依赖（单文件 exe 硬约束）。
+Task 6: **代码 review 回来 —— Spec ✅ 合规 / Task quality Approved**；0 Critical、0 Important、2 Minor。
+  审查者的关键核实：①**BOM 是靠逐行插入保住的**（hunk 起于旧文件第 3 行、承载 BOM 的第 1 行未被触碰，
+  无整文件重写）；②托盘回退**同时覆盖"抛异常"与"返回 null"两条路径**（`if (Tray.Icon == null)` 那句），
+  且图标赋值在 `Tray.Visible = true` **之前**——托盘不会先闪一下通用图标；
+  ③`/win32icon:` 用绝对路径 + `Test-Path` fail-fast + 正确引号；④**单文件 exe 性质保持**
+  （托盘用的是 `Icon.ExtractAssociatedIcon(Application.ExecutablePath)`，即 exe 自带的嵌入资源，
+  不是去读 `assets\pc-kvm.ico`）；⑤它**独立读了 ICO 字节**核对头与 7 个目录项；
+  ⑥一条漂亮的旁证：`assets/pc-kvm-preview-256.png` **恰 4100 字节**，与 ICO 目录里 256 那条 PNG 项
+  大小完全一致 ⇒ 预览图是图标里的**真实载荷**，不是另渲染的一份。
+  它另判 GDI+ 那条怪癖（`new Icon(path,256,256)` 落到 128）"plausible and immaterial"：
+  本任务唯一依赖的提取路径是 `ExtractAssociatedIcon`（返回 32×32 BMP 项），256 那条 PNG 是给
+  资源管理器大缩略图用的、shell 自己能处理。
+Task 6: minor (deferred): `Tray.Icon = null` 在 catch 里是冗余的（抛之前赋值根本没发生，新建的
+  `NotifyIcon` 的 Icon 本来就是 null）。无害，且是简报逐字代码（我写的），纯装饰。
+Task 6: minor (deferred): `ExtractAssociatedIcon` 来的 `Icon` 在托盘销毁时没被 Dispose。
+  单实例托盘程序可忽略（进程退出即回收），修它要引入超出简报范围的释放管道。
+Task 6: **代码部分 complete**（待视觉判读确认"好不好看"这一条，那才是用户需求"美化一点的"的判据）。
+  **重要**：spec 里"16px 下必须仍能辨认"与"深浅色背景下都能看清"两句是**可验证的要求**，
+  故视觉判读若在这两条上给出问题，就是**对着 spec 的真 Important finding**，该进修轮——
+  这正是我设计这一步的原因（否则"美观"只能整条推给用户）。
