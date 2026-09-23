@@ -81,11 +81,9 @@ namespace PcKvm
                 delegate(string s) { log.WriteLine(s); });
             watchers.GeometryQueried += delegate(int w, int h)
             {
-                // 与原实现等价：只有真的变了才应用。比较集中在此，Watchers 不再持第二份状态
                 if (w == _phoneW && h == _phoneH) return;
                 _phoneW = w; _phoneH = h;
                 _geometryChanged = true;
-                log.WriteLine("# 检测到几何变化 " + w + "x" + h);
             };
 
             tracker.EnterTakeover += delegate(short px, short py)

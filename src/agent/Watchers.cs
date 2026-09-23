@@ -12,8 +12,8 @@ namespace PcKvm
     /// 线程纪律（不可违反）：
     ///  - guard 与 heartbeat **必须是 WinForms Timer**（UI 线程 tick）：它们的路径会碰
     ///    host/tracker/supp。换 System.Threading.Timer 会引入跨线程调用（Task 7 审查遗留隐患）。
-    ///  - 几何轮询与重连监督是**后台线程**，它们**绝不直接碰控件或写日志**，
-    ///    一律经 Report()/BeginInvoke 回到 UI 线程。
+    ///  - 几何轮询与重连监督是**后台线程**（重连监督：任务 8 落地），它们**绝不直接碰控件或写日志**，
+    ///    一律经 Report()（任务 8 落地）/BeginInvoke 回到 UI 线程。
     /// </summary>
     // 注：非 public——MessageHost 是 internal，public 构造器会触发 CS0051；
     // 本类只在同一程序集内被 Program.cs 消费。
