@@ -194,9 +194,15 @@ namespace PcKvm
                 log.WriteLine("# 设备已断开");
                 if (tracker.Current == KvmState.Takeover)
                 {
+                    // 顺序要紧：AbortTakeover 与 Release 必须**同步**执行完（它们不碰控件），
+                    // 只有最后那次 UI 触碰需要 marshal。
                     tracker.AbortTakeover();
                     supp.Release();
-                    host.SetStatus("IDLE");
+                    // 本处理器跑在 Transport 的 accept 线程上（Transport.cs 的 AcceptLoop），
+                    // 直接改 Label.Text 是非法跨线程访问：不挂调试器时靠 SendMessage 侥幸不抛，
+                    // 挂上调试器就 InvalidOperationException；UI 线程若被阻塞还会连带卡住
+                    // accept 线程、拖慢重连。故只有这一句 marshal 回 UI 线程。
+                    host.BeginInvoke((MethodInvoker)delegate { host.SetStatus("IDLE"); });
                 }
             };
             transport.MessageReceived += delegate(byte type, byte[] payload)
