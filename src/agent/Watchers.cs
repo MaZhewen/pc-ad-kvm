@@ -34,11 +34,17 @@ namespace PcKvm
 
         // ---- 断联自愈（阶段三 #4，任务 8）----
         Config _cfg;
-        System.Diagnostics.Process _devProc;
+        // volatile：跨线程字段——重连监督线程写（TryRebuildLink/StartDevice），
+        // UI 线程读（DeviceProcess 属性、TrayUi 退出清理、Stop() 的 Kill）；_stop 同理早已是 volatile。
+        volatile System.Diagnostics.Process _devProc;
         System.Threading.Thread _reconnect;
         int _failStreak;
         int _level;                 // 已升级到的档位：0 = 只做①，1 = 做过温和，2 = 做过激进
         string _lastReport = "";
+        // 去重键必须是【状态种类】，不能是含递增计数的完整消息——
+        // 否则 `s == _lastReport` 永不成立，每轮都会写一行（掉线一小时约 720 行）。
+        // 只在 UI 线程读写（Report/ReportWaiting 的 BeginInvoke 委托体内）。
+        string _lastLoggedState = "";
 
         /// <summary>几何轮询每次**成功**查到都抛（含未变化值）。
         /// 消费方自行比较后决定是否应用——这样 Watchers 不持有第二份几何状态，
@@ -242,7 +248,7 @@ namespace PcKvm
                 }
 
                 string why = DeviceLauncher.DeviceVisible() ? "隧道/注入器未就绪" : "adb 看不到设备";
-                Report("等待设备…（已重试 " + _failStreak + " 次，" + why + "）");
+                ReportWaiting(why, _failStreak);
             }
         }
 
@@ -273,12 +279,23 @@ namespace PcKvm
 
         /// <summary>状态变化上报。**只在状态真的变了**才写日志与改状态条——
         /// 每次重试都打会把有效信息淹没（本项目既栽过 2% 采样率，也栽过刷日志）。
-        /// 本方法跑在重连监督线程上：日志与控件都必须经 BeginInvoke 回 UI 线程（R9/Ruling 28）。</summary>
+        /// 本方法跑在重连监督线程上：日志与控件都必须经 BeginInvoke 回 UI 线程（R9/Ruling 28）。
+        /// 写日志时同步更新 _lastLoggedState（与 ReportWaiting 共用同一个去重键，
+        /// 否则 `Report("adb server 重启中…")` 之后的第一轮等待会与它对不上）。</summary>
         void Report(string s)
         {
             if (s == _lastReport) return;
             _lastReport = s;
-            LogFromWorker("# " + s);
+            try
+            {
+                // _lastLoggedState 只在 BeginInvoke 委托体里读写（UI 线程），无跨线程撕裂（R9）
+                _host.BeginInvoke((MethodInvoker)delegate
+                {
+                    _lastLoggedState = s;
+                    _log("# " + s);
+                });
+            }
+            catch (System.Exception) { }
             try
             {
                 // 跨线程：必须 marshal 回 UI 线程（Task 8 审查 Ruling 28 同一条约束）
@@ -287,7 +304,29 @@ namespace PcKvm
             catch (System.Exception) { }
         }
 
-        /// <summary>后台线程写日志的唯一通道（R9）：marshal 回 UI 线程再写。
+        /// <summary>等待中的状态上报：**状态条每轮更新（含重试次数），日志只在状态种类变化时打一行**。
+        /// 与 Report 共用同一个去重键，故两者不会互相打架。</summary>
+        void ReportWaiting(string why, int attempts)
+        {
+            try
+            {
+                _host.BeginInvoke((MethodInvoker)delegate
+                {
+                    string status = "等待设备…（已重试 " + attempts + " 次，" + why + "）";
+                    _host.SetStatus(status);              // 状态条：每轮都更新
+                    if (why != _lastLoggedState)          // 日志：只在状态种类变了才写
+                    {
+                        _lastLoggedState = why;
+                        _log("# " + status);
+                    }
+                });
+            }
+            catch (System.Exception) { }
+        }
+
+        /// <summary>后台线程写【事件】日志的通道（R9）：marshal 回 UI 线程再写。
+        /// 事件类（如 jar 推送失败）每发生一次就该打一次、不去重；状态类上报走
+        /// Report/ReportWaiting 的共用去重键 _lastLoggedState，不经这里。
         /// 绝不在后台线程直接调 _log——TrayUi 的 ApplicationExit 会 Close 掉 StreamWriter，
         /// 而 Stop() 只置标志不 Join 线程；对已关闭的 writer 写字是后台线程上的未处理异常
         /// = 整个进程被杀，不是干净退出。BeginInvoke 在窗体已销毁的极端时序下自身会抛，就地吞掉。</summary>
