@@ -109,7 +109,7 @@
   - `event Action<int,int> Watchers.GeometryQueried` —— **每次成功查到几何都抛（含未变化）**
   - `TrayUi(MessageHost host, Suppressor supp, Watchers watchers, Transport transport, Action<string> log, Process devProc)`
   - `void TrayUi.Install()`
-  - `NotifyIcon TrayUi.NotifyIcon { get; }`（任务 3 往里加菜单项）
+  - `NotifyIcon TrayUi.Tray { get; }`（任务 3 往里加菜单项；**属性名是 `Tray` 不是 `NotifyIcon`**）
 
 - [ ] **Step 1: 新建 `src/agent/Watchers.cs`**
 
@@ -375,11 +375,14 @@ namespace PcKvm
                 delegate(string s) { log.WriteLine(s); });
             watchers.GeometryQueried += delegate(int w, int h)
             {
-                // 与原实现等价：只有真的变了才应用。比较集中在此，Watchers 不再持第二份状态
+                // 与原实现等价：只有真的变了才应用。比较集中在此，Watchers 不再持第二份状态。
+                // ⚠️ 此处理器跑在**几何轮询线程**上，所以里面**不许有任何 I/O**
+                //（Task 1 审查 Important 1：初稿在这里加过一行 log.WriteLine，退出时
+                // 轮询线程可能在 log.Close() 之后才抛出事件 → 后台线程未捕获异常终结进程）。
+                // 只允许字段赋值。
                 if (w == _phoneW && h == _phoneH) return;
                 _phoneW = w; _phoneH = h;
                 _geometryChanged = true;
-                log.WriteLine("# 检测到几何变化 " + w + "x" + h);
             };
 ```
 
@@ -400,9 +403,11 @@ namespace PcKvm
 ```
 
 > 注意：原实现在轮询里比较、变化时只置 `_geometryChanged`，**不打日志**；而 `MouseMoved`
-> 消费时才打 `# 几何已应用`。上面新加的那行"检测到几何变化"是**新增日志**，属**有意的行为变化**
-> （阶段二排查几何问题时就是因为不知道"是没查到还是没变化"而多花了一轮）。若审查者认为
-> 不该加，删掉那一行即可，其余逻辑不变。
+> 消费时才打 `# 几何已应用 WxH`。初稿曾在这里加一行 `# 检测到几何变化`，
+> **已在 Task 1 审查后被删除**（R8）：它跑在几何轮询线程上，而 `Stop()` 只置标志不 Join，
+> 于是退出时一个正卡在 `QueryDisplay`（adb 调用，最长 5s）里的轮询迭代可能在 `log.Close()`
+> **之后**写一个已关闭的 `StreamWriter` → 后台线程未捕获异常**终结进程**。
+> 那行的诊断价值边际很小（消费点本来就有 `# 几何已应用`），故删除而非加 marshal。
 
 - [ ] **Step 4: 编译并核实行数真的降了**
 
@@ -446,14 +451,15 @@ Expected: `TOTAL: pass=15 fail=0` 与 `TOTAL: 45/45 passed, 0 failed`，均 exit
 | `FormClosing` | 仍只调 `supp.Release()` |
 | 退出顺序 | `Release` → 写 `# 退出` → 托盘隐藏 → `transport.Stop` → `Cleanup` → `log.Close`，**顺序不变** |
 
-**有意与原文不同的地方（三处，都写在这里免得审查者当成回归）**：
+**有意与原文不同的地方（两处，都写在这里免得审查者当成回归）**：
 
-1. 几何变化时多打一行 `# 检测到几何变化 WxH`（理由见 Step 3 末尾的注）。
-2. 退出路径的**最前面**多了一步 `watchers.Stop()`。这是**必须的**：`Watchers` 现在有后台线程，
+1. 退出路径的**最前面**多了一步 `watchers.Stop()`。这是**必须的**：`Watchers` 现在有后台线程，
    不在 `log.Close()` 之前停掉它，就可能写进一个已关闭的 `StreamWriter` 而抛异常。
    原实现的后台线程只在几何轮询里（不写日志），所以以前不需要这一步。
-3. 托盘文本由 `"PC-KVM（阶段二骨架）"` 改为 `"PC-KVM"`。那个"阶段二骨架"标签已经过时
+2. 托盘文本由 `"PC-KVM（阶段二骨架）"` 改为 `"PC-KVM"`。那个"阶段二骨架"标签已经过时
    （现在做阶段三），Step 3 的意图也是 `"PC-KVM"`。**初稿漏列了这一条**，由实现者发现。
+
+> 初稿还有第三处（几何变化日志行），已在 Task 1 审查后**删除**——理由见 Step 3 末尾的注（R8）。
 
 - [ ] **Step 7: Commit**
 
@@ -2300,22 +2306,38 @@ EOF
             if (!DeviceLauncher.EnsureTunnel()) return false;
             // jar 只推一次：设备侧通常还在。推失败也不致命（可能只是设备侧被清过）
             if (!DeviceLauncher.PushJar(jar))
-                _log("# 重连：jar 推送失败（继续尝试拉起注入器）");
+                LogFromWorker("# 重连：jar 推送失败（继续尝试拉起注入器）");
             _devProc = DeviceLauncher.Start();
             return _devProc != null;
         }
 
+        /// <summary>后台线程写日志的**唯一通道**：绝不直接碰 `_log`。
+        /// 理由（Task 1 审查 Important 1 就是这个形状，R9）：`log` 的 StreamWriter 在退出时被
+        /// `TrayUi` 的 ApplicationExit `Close()`，而后台线程此刻可能仍在跑（`Stop()` 只置标志、
+        /// 不 Join）。一条写进已关闭 writer 的调用就是**后台线程上的未捕获异常 = 进程被终结**，
+        /// 而不是干净退出。消息循环结束后 BeginInvoke 要么抛异常（被这里吞掉）、要么投递后
+        /// 再也不会被泵出——两种情况都不会真的写到已关闭的 writer。</summary>
+        void LogFromWorker(string s)
+        {
+            try { _host.BeginInvoke((MethodInvoker)delegate { _log(s); }); }
+            catch (System.Exception) { }
+        }
+
         /// <summary>状态变化上报。**只在状态真的变了**才写日志与改状态条——
-        /// 每次重试都打会把有效信息淹没（本项目既栽过 2% 采样率，也栽过刷日志）。</summary>
+        /// 每次重试都打会把有效信息淹没（本项目既栽过 2% 采样率，也栽过刷日志）。
+        /// 去重比较与两处 UI 触碰全部在 UI 线程上做，故 `_lastReport` 只被 UI 线程读写，
+        /// 后台线程**不碰**它。</summary>
         void Report(string s)
         {
-            if (s == _lastReport) return;
-            _lastReport = s;
-            _log("# " + s);
             try
             {
-                // 跨线程：必须 marshal 回 UI 线程（Task 8 审查 Ruling 28 同一条约束）
-                _host.BeginInvoke((MethodInvoker)delegate { _host.SetStatus(s); });
+                _host.BeginInvoke((MethodInvoker)delegate
+                {
+                    if (s == _lastReport) return;
+                    _lastReport = s;
+                    _log("# " + s);
+                    _host.SetStatus(s);
+                });
             }
             catch (System.Exception) { }
         }
@@ -2385,8 +2407,9 @@ Expected: ≤ 360。
 |---|---|
 | 全文搜 `SetWindowsHookEx` | **零命中**（全局键盘钩子硬约束） |
 | `Watchers.cs` 里搜 `System.Threading.Timer` | **零命中**（心跳必须是 WinForms Timer） |
-| `ReconnectLoop` 里有没有直接 `_host.SetStatus` | **没有**，必须经 `Report()` 的 `BeginInvoke` |
-| `ReconnectLoop` 里有没有直接 `_log(` | 只有 `TryRebuildLink` 里那一行 jar 推送失败；其余都走 `Report()` |
+| 后台线程有没有**直接** `_host.SetStatus` | **没有**，全部在 `Report()` 的 `BeginInvoke` 内 |
+| 后台线程有没有**直接** `_log(` | **没有**。`ReconnectLoop`/`TryRebuildLink` 里一处都不许有；日志一律走 `Report()` 或 `LogFromWorker()`（R9：写已关闭的 StreamWriter 会让后台线程未捕获异常终结进程） |
+| 核实命令 | `rg -n '_log\(' src/agent/Watchers.cs` —— 允许的命中只有：构造函数里逃逸键那行、`HeartbeatTick` 里那行（两者都在 **UI 线程**上跑），以及 `LogFromWorker`/`Report` 的 `BeginInvoke` 内的两行 |
 | `Report` 的日志条件 | 有 `if (s == _lastReport) return;`（只在状态变化时打） |
 | `TryRebuildLink` 的幂等 | 起新进程前先 `Kill` 旧的 |
 

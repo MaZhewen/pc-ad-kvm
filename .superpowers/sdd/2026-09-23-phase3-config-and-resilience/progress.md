@@ -127,3 +127,66 @@ Task 1: **R7 —— 实现者自行解决的两处，均确认。**
 Task 1: 计划已就地修正（Step 1 的 Watchers 构造器补上逃逸键订阅、Step 1b 去掉"逃逸键"并写明
   为什么不在 TrayUi、Step 2 表格与 Step 6 等价表同步、Step 6 有意改动由两处改为三处、
   新增两个新类必须 internal 的说明）。
+Task 1: implementer **DONE** — commit **ccf32a7**（3 文件 +225/−95；commits 列表核对只有这 1 个）。
+  自报：`Program.cs` 359→**283**、`Watchers.cs` 140、`TrayUi.cs` 66；R6 落地（逃逸键在
+  `Watchers.cs:60`，`rg` 恰 1 处、Program.cs 零命中）；R7 两处确认；Step 6 等价表全 PASS。
+Task 1: **控制方独立复算（未采信自述）**：
+  - 自己跑 `build-agent.ps1` → `编译成功`、12 个源文件、exit 0、30.0 KB
+  - 自己跑两套 harness → `pass=15 fail=0`（exit 0）、`45/45 passed, 0 failed`（exit 0）
+  - `wc -l`：`Program.cs` **283** / `Watchers.cs` 140 / `TrayUi.cs` 66 —— 与原 359 相比腾出 76 行，
+    Ruling 33 的余量目标达成（计划末尾估约 346，距 360 有 14 行）
+  - **产物真的换了吗**（§六 的教训）：exe 里 `Watchers`/`TrayUi`/`GeometryQueried` 各命中 1
+  - 零全局钩子：`SetWindowsHookEx|WH_KEYBOARD_LL` 零命中 ✅
+Task 1: **教训 —— 我自己的 C# 5 扫描正则说谎了，查出来 6 处"违规"全是假阳性。**
+  首次用 `out (int|uint|string|bool|byte|short) ` 扫，命中 6 处：其中 4 处是**参数声明**
+  （`out uint pid`、`out string stdout`、`out int w, out int h` —— C# 1 就合法，不是内联声明），
+  2 处是**注释文字**（`Suppressor.cs:67` 正写着"本机 csc 不支持内联 out"、`RawInput.cs:141`
+  写着"C# 5 没有 ?."）。收紧为"只匹配**调用点**的内联 out"（`\.[A-Za-z_]\w*\(\s*out\s+<type>\s+<name>`）
+  与"要求 `?.` 前是标识符"（避开注释里的空格+`?.`）后重扫：**四类全 0 命中**。
+  **这正是本项目反复栽的"诊断仪器说谎"**——若照首次结果报出去，就是一次彻头彻尾的假警报。
+  已写进下面的复核清单：**C# 5 扫描必须区分"参数声明"与"调用点内联声明"，且必须能排除注释。**
+Task 1: review package 有两个版本，取后者：
+  `review-ae78fdc..ccf32a7.diff`（2 commits —— 混进了我在派发后插的纯文档提交 339115f）
+  → 按 ledger 既有做法取 `review-339115f..ccf32a7.diff`（**1 commit**，18732 B）。
+  这是簿记修正、非规格变更（阶段二 Task 6 也做过同样的事）。
+Task 1: dispatched **task reviewer（sonnet）** —— 逐字搬迁属中等风险，但它是后 7 个任务的地基。
+  除 Global Constraints 原文外，点名了"纯搬迁这一类形状"的结构性风险面（订阅被丢或重复、
+  定时器间隔/条件在转录中改变、退出路径的顺序变化、新增的 `Stop()` 在定时器仍可能 tick 时
+  从 `ApplicationExit` 被调用、以及任何"原来读捕获的局部量、现在读字段"的地方）。
+  **刻意没有**告诉它任何"这不算缺陷"——避免预判（skill 明令）。
+Task 1: **review 回来 —— Spec ✅ 合规 / Task quality Approved**，0 Critical、**1 Important**、4 Minor。
+  审查者逐行核了等价表 12 行（全 PASS）、五项点名风险（订阅无丢无重、常量逐字、退出顺序无变、
+  字段与原捕获局部量同对象、`_lastPongTicks` 无脑裂）、以及 De Morgan 等价性。
+  它还独立确认了承重声明位置（`watchers` 在 `TrayUi.Install()` 之前、`Start()` 在 `Application.Run` 之前）。
+Task 1: **Important 1（plan-mandated）= 打的是我自己加的那行日志。** 原话要点：
+  新增的 `# 检测到几何变化` 跑在**几何轮询线程**上直接 `log.WriteLine`，恰好破坏 `Stop()` 想防的风险，
+  且违背了这次改动自己写下的线程纪律（`Watchers` 类头承诺几何轮询"绝不直接碰控件或写日志"）。
+  具体后果：退出时 `Stop()` 只置 `_stop`、不 Join，于是一次已越过 `if (_stop) return;` 且正卡在
+  `QueryDisplay`（adb 调用，最长 5s）里的轮询迭代，可以在 `log.Close()` **之后**抛事件 →
+  `log.WriteLine` 抛 `ObjectDisposedException` → **后台线程未捕获异常终结进程**，而不是干净退出。
+  改动前那个线程只更新字段，所以这个"写已关闭 writer"的窗口是**本次新增的**。
+  **R8 —— 裁决：删掉那行日志，而不是改成 marshal。** 理由：它是我（控制方）自己加的、不是任何
+  用户需求；消费者侧本来就会打 `# 几何已应用 WxH`，诊断价值边际很小；删掉才让 Task 1 真正回到
+  "零行为变化"，并且让那句类头承诺变成真的。**代价（若判错）**：少一个"几何变化被检测到但用户
+  一直没动鼠标所以没应用"的诊断信号——真需要时在**消费点**（`MouseMoved`，UI 线程）补更合适。
+Task 1: **R9 —— 把同一条约束前移到 Task 8（那边必然出现第二个后台写者）。**
+  Task 8 的 `ReconnectLoop`/`TryRebuildLink` 原本也直接 `_log(...)`，形状与 Important 1 完全相同。
+  已改计划：新增 `LogFromWorker()`（后台线程写日志的**唯一通道**，内部 `BeginInvoke` + try/catch），
+  `Report()` 改成把去重比较与两处 UI 触碰**整块**放进 `BeginInvoke`（于是 `_lastReport` 只被 UI 线程
+  读写），并把静态核对表的两行改成"后台线程有没有直接 `_log(`/`_host.SetStatus` → 一处都不许有"。
+  **代价（若判错）**：日志行比直接写晚一拍出现（异步投递），退出瞬间的最后一两条状态可能不落盘
+  ——相比"进程崩溃"是可接受的取舍。
+  另说明为什么 BeginInvoke 在这里是安全的：消息循环结束后它要么抛（被吞）、要么投递后再也不会被
+  泵出，两种情况都不会真写到已关闭的 writer。
+Task 1: minor (deferred): `Watchers` 类头提到"重连监督"与 `Report()`，但本次代码里都不存在
+  （是 Task 8 的前向引用）——类头当下**高估**了该类的职责。已折进修轮 1（只动注释）。
+Task 1: minor (deferred): 计划 Interfaces 里写的是 `NotifyIcon TrayUi.NotifyIcon { get; }`，
+  而实际属性名是 `Tray`（与计划自己的代码块一致，故实现是对的）。**已改计划正文**，
+  免得 Task 3 按错误的名字编码。
+Task 1: minor (deferred): PONG 订阅注册顺序对调了（原来先注册只打日志的那个，现在 Watchers 的时间戳
+  订阅在前）——两个处理器彼此独立，无功能影响。
+Task 1: minor (deferred): `Program.cs` 里 `using System.Drawing;` 在 `NotifyIcon`/`SystemIcons`
+  搬走之后可能已无用（csc 不报未用 using，故"零警告"一致）。留待后续任务碰到该区域时顺手清。
+Task 1: fix round 1/5 dispatched（resume 原实现者，**只**带 Important 1 + 折进去的 Minor 1）；
+  已同时改计划正文（删掉那行日志、删掉对应的"有意改动"条目、修 `NotifyIcon` 笔误、
+  把 R9 落进 Task 8 的 `Report`/`LogFromWorker` 与静态核对表）。
