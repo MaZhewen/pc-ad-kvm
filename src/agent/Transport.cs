@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Threading;
 
 namespace PcKvm
@@ -9,10 +10,14 @@ namespace PcKvm
     /// <summary>TCP 服务端。单一连接，断线后自动等待重连。</summary>
     public class Transport
     {
+        const uint HandleFlagInherit = 0x00000001;
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
         readonly int _port;
         TcpListener _listener;
         TcpClient _client;
         NetworkStream _stream;
+        FrameWriter _writer;
         Thread _acceptThread;
         volatile bool _running;
         readonly object _sendLock = new object();
@@ -25,15 +30,35 @@ namespace PcKvm
 
         public Transport(int port) { _port = port; }
 
+        public int ListeningPort { get; private set; }
+        public Exception StartError { get; private set; }
+
         public bool Start()
         {
+            ListeningPort = 0;
+            StartError = null;
             try
             {
                 _listener = new TcpListener(IPAddress.Loopback, _port);
-                _listener.Start();
+                try { _listener.Start(); }
+                catch (SocketException e)
+                {
+                    if (e.SocketErrorCode != SocketError.AddressAlreadyInUse) throw;
+                    _listener.Stop();
+                    // Keep the device port fixed; adb reverse targets this allocated PC port.
+                    _listener = new TcpListener(IPAddress.Loopback, 0);
+                    _listener.Start();
+                }
+                ListeningPort = ((IPEndPoint)_listener.LocalEndpoint).Port;
+                // adb may fork its server after the listener is created. Never let
+                // that child retain this socket after the PC process exits.
+                if (!SetHandleInformation(_listener.Server.Handle, HandleFlagInherit, 0))
+                    throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
             }
-            catch (Exception)
+            catch (Exception e)
             {
+                StartError = e;
+                if (_listener != null) _listener.Stop();
                 return false;
             }
             _running = true;
@@ -51,8 +76,10 @@ namespace PcKvm
                 {
                     TcpClient c = _listener.AcceptTcpClient();
                     c.NoDelay = true;          // 输入转发对延迟敏感，禁用 Nagle
+                    c.SendTimeout = 500;
                     _client = c;
                     _stream = c.GetStream();
+                    _writer = new FrameWriter(_stream);
                     Action conn = Connected;
                     if (conn != null) conn();
                     ReadLoop();
@@ -65,6 +92,9 @@ namespace PcKvm
                 }
                 finally
                 {
+                    FrameWriter writer = _writer;
+                    _writer = null;
+                    if (writer != null) writer.Stop();
                     try { if (_stream != null) _stream.Close(); } catch (Exception) { }
                     try { if (_client != null) _client.Close(); } catch (Exception) { }
                     _stream = null;
@@ -105,13 +135,14 @@ namespace PcKvm
         /// <summary>线程安全发送。连接不存在时静默丢弃——调用方不应因对端断开而崩溃。</summary>
         public void Send(byte[] frame)
         {
-            NetworkStream s = _stream;
-            if (s == null) return;
-            lock (_sendLock)
-            {
-                try { s.Write(frame, 0, frame.Length); }
-                catch (Exception) { /* 对端已断开，下一次 Connected 会重建 */ }
-            }
+            FrameWriter writer = _writer;
+            if (writer != null) writer.Send(frame);
+        }
+
+        public void SendControl(byte[] frame)
+        {
+            FrameWriter writer = _writer;
+            if (writer != null) writer.SendControl(frame);
         }
 
         public void Stop()

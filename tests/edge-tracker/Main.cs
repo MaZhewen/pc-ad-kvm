@@ -362,6 +362,18 @@ static class EdgeTest
                 + " (expect False, Idle, 0)");
         }
 
+        // ---- L7: 旋转后接管状态保留，但旧方向的回程累积必须清除 ----
+        {
+            EdgeTracker t = NewTrackerLeft();
+            t.OnIdleMove(-5, 0, 0, 540);
+            t.OnTakeoverMove(20, 0, 3199, 1068);
+            Check("L7a", t.BackPush == 20 && t.Current == KvmState.Takeover,
+                "backPush=" + t.BackPush + " state=" + t.Current);
+            t.RebaseTakeover(1000);
+            Check("L7b", t.BackPush == 0 && t.Current == KvmState.Takeover,
+                "backPush=" + t.BackPush + " state=" + t.Current);
+        }
+
         Console.WriteLine("TOTAL: pass=" + _pass + " fail=" + _fail);
         if (_fail > 0) Environment.Exit(1);
     }

@@ -5,6 +5,21 @@ namespace PcKvm
     /// <summary>协议编解码。纯函数，不做任何 I/O，便于单独推理与测试。</summary>
     public static class Protocol
     {
+        public const byte MsgPointer = 0x0B;
+        public const byte MsgGeometry = 0x0C;
+        public const byte MsgPointerReady = 0x0D;
+        public const byte MsgPointerAck = 0x0E;
+        public static byte[] EncodeGeometry(uint epoch, ushort width, ushort height, byte rotation)
+        {
+            byte[] b = new byte[10]; b[0] = MsgGeometry;
+            PutU32(b, 1, epoch); PutU16(b, 5, width); PutU16(b, 7, height); b[9] = rotation; return b;
+        }
+        public static byte[] EncodePointer(uint epoch, uint sequence, ushort x, ushort y)
+        {
+            byte[] b = new byte[13]; b[0] = MsgPointer;
+            PutU32(b, 1, epoch); PutU32(b, 5, sequence);
+            PutU16(b, 9, x); PutU16(b, 11, y); return b;
+        }
         public const byte MsgEnter  = 0x01;   // int16 x, int16 y
         public const byte MsgMove   = 0x02;   // int16 dx, int16 dy
         public const byte MsgButton = 0x03;   // uint8 btn, uint8 down
@@ -89,6 +104,10 @@ namespace PcKvm
         {
             switch (type)
             {
+                case MsgPointer: return 12;
+                case MsgGeometry: return 9;
+                case MsgPointerReady: return 4;
+                case MsgPointerAck: return 12;
                 case MsgEnter: return 4;
                 case MsgMove: return 4;
                 case MsgButton: return 2;

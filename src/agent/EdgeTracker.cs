@@ -64,6 +64,14 @@ namespace PcKvm
             _phoneH = h;
         }
 
+        /// <summary>Screen rotation changes the takeover coordinate system without ending it.</summary>
+        public void RebaseTakeover(int x)
+        {
+            if (Current != KvmState.Takeover) return;
+            _lastVx = x;
+            _backPush = 0;
+        }
+
         /// <summary>运行时改变跨越边（阶段三 #2：手机在左/右可配置）。
         /// **刻意不重建 tracker**：EnterTakeover/LeaveTakeover 的订阅挂在对象上，
         /// 重建会丢订阅（那是"接不到事件"的静默失效）。故只改字段。

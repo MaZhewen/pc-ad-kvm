@@ -111,6 +111,7 @@ public class TestMain {
         // ---- PointerPlan：相对位移的拆分（MSG_MOVE / MSG_ENTER / MSG_HOME 共用）----
         // 不变量：各条之和必须**恰好**等于目标——少一条丢位移，多一条会多发一条空报告。
         checkd("PointerPlan 条数(355,0) = 3", PointerPlan.stepCount(355, 0), 3);
+        checkd("PointerPlan 条数(127,0) = 1（恰好一条）", PointerPlan.stepCount(127, 0), 1);
         checkd("PointerPlan 条数(0,0) = 0", PointerPlan.stepCount(0, 0), 0);
         checkd("PointerPlan 条数(254,0) = 2（整倍不许多一条）", PointerPlan.stepCount(254, 0), 2);
         checkd("PointerPlan 条数(3199,1018) = 26（取较长轴）", PointerPlan.stepCount(3199, 1018), 26);
@@ -121,17 +122,25 @@ public class TestMain {
         checkd("PointerPlan 和 x(-3199) = -3199", sumX(-3199, 0), -3199);
         checkd("PointerPlan 末条取余数 (3199 第 25 条) = 24", PointerPlan.stepX(3199, 25), 24);
         checkd("PointerPlan 越界返回 0 (3199 第 26 条) = 0", PointerPlan.stepX(3199, 26), 0);
-        // 每条都必须落在 int8 相对轴的合法范围里，否则设备侧解析器把它当别的值
-        int overstep = 0;
-        int[] samples = {3199, 1018, -3199, -5080, 127, 128, 254, 1, 0, -1};
+        // 抽样扫：每个样本都要同时满足"每条落在 int8 范围"与"两轴之和恰好等于目标"。
+        // 只查范围不查总和会漏掉"少发一条/多发空报告"这类错——那正是回程错位的成因。
+        int overstep = 0, badsum = 0;
+        int[] samples = {3199, 1018, -3199, -1018, -5080, 3200, 2136, 127, 128, 254, 1, 0, -1, -127};
         for (int s = 0; s < samples.length; s++) {
             int v = samples[s];
-            for (int i = 0; i < PointerPlan.stepCount(v, v); i++) {
+            int n = PointerPlan.stepCount(v, v);
+            int ax = 0, ay = 0;
+            for (int i = 0; i < n; i++) {
                 int a = PointerPlan.stepX(v, i), b = PointerPlan.stepY(v, i);
                 if (a > 127 || a < -127 || b > 127 || b < -127) overstep++;
+                ax += a; ay += b;
             }
+            if (ax != v || ay != v) { badsum++; System.out.println("  !! 样本 " + v + " 之和 " + ax + "/" + ay); }
+            // 纯某一轴、另一轴为 0 的情形（回程位移常是纯 x）
+            if (sumX(v, 0) != v || sumY(0, v) != v) badsum++;
         }
         checkd("PointerPlan 每条 |v| <= 127", overstep, 0);
+        checkd("PointerPlan 抽样全样本两轴之和恰好等于目标", badsum, 0);
 
         System.out.println("TOTAL: " + (total - fails) + "/" + total + " passed, " + fails + " failed");
         System.exit(fails);

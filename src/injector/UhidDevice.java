@@ -27,6 +27,10 @@ public class UhidDevice {
     private final RandomAccessFile dev;
 
     public UhidDevice(String name, int[] descriptor) throws IOException {
+        this(name, descriptor, 0x5679);
+    }
+
+    public UhidDevice(String name, int[] descriptor, int product) throws IOException {
         dev = new RandomAccessFile("/dev/uhid", "rw");
         byte[] ev = new byte[UHID_EVENT_SIZE];
         putU32(ev, 0, UHID_CREATE2);
@@ -36,7 +40,7 @@ public class UhidDevice {
         putU16(ev, OFF_RD_SIZE, descriptor.length);   // 真实描述符长度，不是缓冲容量
         putU16(ev, OFF_BUS, BUS_USB);
         putU32(ev, OFF_VENDOR, 0x1234);
-        putU32(ev, OFF_PRODUCT, 0x5679);
+        putU32(ev, OFF_PRODUCT, product);
         putU32(ev, OFF_VERSION, 1);
         putU32(ev, OFF_COUNTRY, 0);
         for (int i = 0; i < descriptor.length; i++) {
@@ -74,6 +78,14 @@ public class UhidDevice {
 
     public void close() {
         try { dev.close(); } catch (IOException e) { /* 关 fd 时内核自动销毁设备 */ }
+    }
+
+    public void sendReport(byte[] report) throws IOException {
+        byte[] ev = new byte[UHID_EVENT_SIZE];
+        putU32(ev, 0, UHID_INPUT2);
+        putU16(ev, OFF_INPUT_SIZE, report.length);
+        System.arraycopy(report, 0, ev, OFF_INPUT_DATA, report.length);
+        dev.write(ev);
     }
 
     static void putU32(byte[] b, int off, int v) {

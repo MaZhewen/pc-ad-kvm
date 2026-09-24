@@ -10,6 +10,7 @@ namespace PcKvm
     {
         static volatile int _phoneW = 0;
         static volatile int _phoneH = 0;
+        static volatile int _phoneRotation = 0;
         static volatile bool _geometryChanged = false;
 
         [DllImport("user32.dll")]
@@ -38,7 +39,8 @@ namespace PcKvm
 
             MessageHost host = new MessageHost();
             IntPtr hwnd = host.Handle;   // 触发句柄创建
-            host.Show();   // 必须真实显示，隐藏窗口无法持有前台
+            host.Show();
+            host.Hide();   // 空闲时不遮挡 PC；接管前再显示以持有前台
 
             RawInput ri = new RawInput(hwnd);
             ri.Register();
@@ -63,16 +65,26 @@ namespace PcKvm
             // transport.Disconnected 处理器与心跳定时器里调 supp.Release()，
             // C# 局部变量不能前向引用（Task 4 踩过）。它只依赖 hwnd 与 log。
             Suppressor supp = new Suppressor(hwnd, delegate(string s) { log.WriteLine(s); },
-                delegate(bool on) { host.SetCursorHidden(on); });
+                delegate(bool on) { host.SetCursorHidden(on); },
+                delegate { host.ShowForCapture(); }, delegate { host.HideAfterCapture(); });
 
             // transport 需在 MouseMoved 处理器之前就绪（C# 局部变量在声明点之后才可见）
             Transport transport = new Transport(DeviceLauncher.Port);
             if (!transport.Start())
             {
-                MessageBox.Show("TCP 端口 " + DeviceLauncher.Port + " 监听失败，程序退出。",
+                log.WriteLine("# TCP 监听失败：" + transport.StartError);
+                log.Close();
+                MessageBox.Show("TCP 端口 " + DeviceLauncher.Port + " 监听失败：\n"
+                    + transport.StartError.Message + "\n详细错误见 pc-kvm.log。",
                     "PC-KVM", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
+
+            DeviceLauncher.LocalPort = transport.ListeningPort;
+            PointerSession pointer = new PointerSession(transport.Send);
+            transport.MessageReceived += pointer.Receive;
+            log.WriteLine("# TCP 监听 127.0.0.1:" + transport.ListeningPort
+                + (transport.ListeningPort != DeviceLauncher.Port ? "（默认端口被占用，已自动切换）" : ""));
 
             // 阶段骨架：只把事件落到日志，后续任务接管这两个事件
             int mc = 0, kc = 0;
@@ -108,17 +120,73 @@ namespace PcKvm
                 edgeTop: screenY, edgeBottom: screenY + screenH,
                 phoneW: 2136, phoneH: 3200, phoneRight: !cfg.PhoneOnLeft);
 
+            bool resumeAfterRotation = false;
+            Timer rotationTimeout = new Timer();
+            rotationTimeout.Interval = 8000;
+            rotationTimeout.Tick += delegate
+            {
+                rotationTimeout.Stop();
+                if (!resumeAfterRotation) return;
+                resumeAfterRotation = false;
+                if (tracker.Current != KvmState.Takeover) return;
+                log.WriteLine("# 旋转后指针未就绪，安全退出接管");
+                transport.SendControl(Protocol.EncodeLeave());
+                tracker.AbortTakeover();
+                supp.Release();
+                host.SetStatus("IDLE");
+            };
+
             // 后台守护集中到 Watchers（Ruling 26 的抽取，见该类头注释的线程纪律）。
             // ⚠️ 必须声明在 TrayUi 的 Install() 之前（它会调 watchers.Stop()），
             // 而 C# 局部变量不能前向引用（Task 4/7/8 都栽过这一类）。
             // 但 Start() 要等最后才调——过早启动重连监督会抢在首次建隧道之前动手。
             Watchers watchers = new Watchers(transport, tracker, supp, host,
                 delegate(string s) { log.WriteLine(s); });
-            watchers.GeometryQueried += delegate(int w, int h)
+            watchers.GeometryQueried += delegate(int w, int h, int rotation)
             {
-                if (w == _phoneW && h == _phoneH) return;
-                _phoneW = w; _phoneH = h;
-                _geometryChanged = true;
+                if (w == _phoneW && h == _phoneH && rotation == _phoneRotation) return;
+                host.BeginInvoke((MethodInvoker)delegate
+                {
+                    if (w == _phoneW && h == _phoneH && rotation == _phoneRotation) return;
+                    bool keepTakeover = tracker.Current == KvmState.Takeover && supp.IsEngaged;
+                    int oldW = _phoneW, oldH = _phoneH, oldRotation = _phoneRotation;
+                    int oldX = cursor == null ? 0 : cursor.X;
+                    int oldY = cursor == null ? 0 : cursor.Y;
+                    _phoneW = w; _phoneH = h; _phoneRotation = rotation;
+                    // Geometry is a state barrier. Clear stale motion before the
+                    // new epoch so rotation cannot replay old coordinates/buttons.
+                    transport.SendControl(Protocol.EncodeLeave());
+                    if (tracker.Current == KvmState.Takeover && !keepTakeover)
+                    {
+                        tracker.AbortTakeover();
+                        supp.Release();
+                        host.SetStatus("IDLE");
+                    }
+                    if (cursor == null) cursor = new CursorModel(w, h);
+                    cursor.SetBounds(w, h);
+                    tracker.SetPhoneSize(w, h);
+                    if (keepTakeover)
+                    {
+                        int mappedX, mappedY;
+                        RotationMap.Map(oldX, oldY, oldW, oldH, oldRotation,
+                                        w, h, rotation, out mappedX, out mappedY);
+                        cursor.SetPosition(mappedX, mappedY);
+                        tracker.RebaseTakeover(mappedX);
+                        resumeAfterRotation = true;
+                        rotationTimeout.Stop();
+                        rotationTimeout.Start();
+                        host.SetStatus("TAKEOVER → 手机（旋转中）");
+                    }
+                    else
+                    {
+                        cursor.Reset();
+                        resumeAfterRotation = false;
+                        rotationTimeout.Stop();
+                    }
+                    pointer.Configure(w, h, rotation);
+                    _geometryChanged = false;
+                    log.WriteLine("# 几何已应用 " + w + "x" + h + " rotation=" + rotation);
+                });
             };
 
             tracker.EnterTakeover += delegate(short px, short py)
@@ -126,7 +194,7 @@ namespace PcKvm
                 // 安全不变量 4：未连接时绝不夺取前台/锁光标——断线后 tracker 已回 IDLE，
                 // 再推边缘会重新进 TAKEOVER，而 Task 8 的心跳恢复在未连接时直接 return，
                 // 救不了"前台被夺+光标被钳"的状态
-                if (!transport.IsConnected)
+                if (!transport.IsConnected || !pointer.Ready)
                 {
                     log.WriteLine("# 未连接设备，放弃这次跨越");
                     tracker.AbortTakeover();
@@ -140,11 +208,10 @@ namespace PcKvm
                 }
                 host.SetStatus("TAKEOVER → 手机");
                 log.WriteLine("# ENTER takeover at phone(" + px + "," + py + ")");
-                transport.Send(Protocol.EncodeHome());
                 cursor.Reset();
                 cursor.SetPosition(px, py);
                 scaler.Reset();   // 归零的同时清掉小数余量，避免带着跨越前的零头
-                transport.Send(Protocol.EncodeEnter(px, py));
+                pointer.Begin(px, py);
             };
             tracker.LeaveTakeover += delegate
             {
@@ -153,13 +220,13 @@ namespace PcKvm
                 // 回程外推累积量：正常回程应 >= 阈值(40)；若日志里出现很小的值，
                 // 说明仍有未被阈值挡住的回程路径
                 log.WriteLine("# LEAVE takeover（回程外推累积 " + tracker.BackPush + "）");
-                transport.Send(Protocol.EncodeLeave());
+                transport.SendControl(Protocol.EncodeLeave());
             };
             supp.ForegroundLost += delegate
             {
                 // 与逃逸键/心跳失联同理：放弃路径必须补发 LEAVE，清手机侧 buttonsDown
                 // 与按键槽位（若连接已断，Send 是安全 no-op）
-                transport.Send(Protocol.EncodeLeave());
+                transport.SendControl(Protocol.EncodeLeave());
                 tracker.AbortTakeover();
                 host.SetStatus("IDLE");
             };
@@ -179,10 +246,13 @@ namespace PcKvm
                     if (_geometryChanged)
                     {
                         _geometryChanged = false;
+                        transport.SendControl(Protocol.EncodeLeave());
+                        supp.Release();
+                        tracker.AbortTakeover();
                         cursor.SetBounds(_phoneW, _phoneH);
                         tracker.SetPhoneSize(_phoneW, _phoneH);
                         log.WriteLine("# 几何已应用 " + _phoneW + "x" + _phoneH);
-                        transport.Send(Protocol.EncodeHome());
+                        pointer.Configure(_phoneW, _phoneH, _phoneRotation);
                         cursor.Reset();
                     }
 
@@ -198,10 +268,11 @@ namespace PcKvm
                         short sdx = cursor.NextDx(scaler.ApplyX(e.Dx));
                         short sdy = cursor.NextDy(scaler.ApplyY(e.Dy));
                         if (sdx != 0 || sdy != 0)
-                            transport.Send(Protocol.EncodeMove(sdx, sdy));
+                            pointer.Move(cursor.X, cursor.Y);
                         // 用原始增量判定回程方向（用户意图）；钳制后的 sdx 在 x=0 处
                         // 对负增量恒为 0，会让"刚入屏就推回"永远无法离开
-                        tracker.OnTakeoverMove(e.Dx, e.Dy, cursor.X, cursor.Y);
+                        tracker.OnTakeoverMove(pointer.ConfirmedX(cursor.X) ? e.Dx : 0,
+                            e.Dy, cursor.X, cursor.Y);
                     }
                 }
 
@@ -273,25 +344,25 @@ namespace PcKvm
             // 设备侧进程的所有权交给 Watchers：重连会换进程，退出时要 Kill 它。
             // 这里只负责"第一次拉起来"。
             watchers.AttachConfig(cfg);
-            if (!watchers.StartDevice())
-                log.WriteLine("# 首次拉起注入器失败（重连监督会继续尝试）");
 
             transport.Connected += delegate
             {
+                pointer.Reset();
                 log.WriteLine("# 设备已连接");
-                int dw, dh;
-                if (DeviceLauncher.QueryDisplay(out dw, out dh))
+                int dw, dh, rotation;
+                if (DeviceLauncher.QueryDisplay(out dw, out dh, out rotation))
                 {
-                    _phoneW = dw; _phoneH = dh;
-                    log.WriteLine("# 屏幕几何 " + dw + "x" + dh);
+                    _phoneW = dw; _phoneH = dh; _phoneRotation = rotation;
+                    log.WriteLine("# 屏幕几何 " + dw + "x" + dh + " rotation=" + rotation);
                 }
                 else
                 {
-                    _phoneW = 2136; _phoneH = 3200;   // 查询失败时的保守回退
+                    _phoneW = 2136; _phoneH = 3200; _phoneRotation = 0;   // 查询失败时的保守回退
                     log.WriteLine("# 屏幕几何查询失败，回退 " + _phoneW + "x" + _phoneH);
                 }
                 cursor = new CursorModel(_phoneW, _phoneH);
-                _geometryChanged = true;   // 首次鼠标移动时消费：SetBounds + HOME 归零
+                pointer.Configure(_phoneW, _phoneH, _phoneRotation);
+                _geometryChanged = false;
                 transport.Send(Protocol.EncodePing(1));
             };
             // 掉线时必须把 tracker 从 TAKEOVER 里拉出来（Task 6 审查 Important）：
@@ -299,6 +370,7 @@ namespace PcKvm
             // 而重连时装的是全新 CursorModel，此后所有鼠标移动都会误走接管分支。
             transport.Disconnected += delegate
             {
+                pointer.Reset();
                 log.WriteLine("# 设备已断开");
                 if (tracker.Current == KvmState.Takeover)
                 {
@@ -317,6 +389,21 @@ namespace PcKvm
             {
                 if (type == Protocol.MsgPong)
                     log.WriteLine("# PONG seq=" + Protocol.GetU32(payload, 0));
+                else if (type == Protocol.MsgPointerReady)
+                {
+                    log.WriteLine("# 绝对指针已就绪 epoch=" + Protocol.GetU32(payload, 0));
+                    host.BeginInvoke((MethodInvoker)delegate
+                    {
+                        if (!resumeAfterRotation || !pointer.Ready) return;
+                        resumeAfterRotation = false;
+                        rotationTimeout.Stop();
+                        if (tracker.Current != KvmState.Takeover || !supp.IsEngaged
+                            || !transport.IsConnected) return;
+                        pointer.Begin(cursor.X, cursor.Y);
+                        host.SetStatus("TAKEOVER → 手机");
+                        log.WriteLine("# 旋转后接管已恢复 phone(" + cursor.X + "," + cursor.Y + ")");
+                    });
+                }
             };
 
             // 托盘与生命周期集中到 TrayUi（Ruling 33）。必须在 Application.Run 之前 Install。
@@ -331,7 +418,7 @@ namespace PcKvm
                 // 否则换边会让 tracker 停在 TAKEOVER 却对着新的边界判定
                 if (tracker.Current == KvmState.Takeover)
                 {
-                    transport.Send(Protocol.EncodeLeave());
+                        transport.SendControl(Protocol.EncodeLeave());
                     tracker.AbortTakeover();
                     supp.Release();
                     host.SetStatus("IDLE");
@@ -344,8 +431,12 @@ namespace PcKvm
                               + " 强杀adb=" + c.AllowKillAdb);
             };
 
+            // Subscribe all connection handlers before a fast local injector can connect.
+            if (!watchers.StartDevice())
+                log.WriteLine("# 首次拉起注入器失败（重连监督会继续尝试）");
             watchers.Start();
-            Application.Run(host);
+            host.FormClosed += delegate { Application.ExitThread(); };
+            Application.Run();
         }
 
         /// <summary>把 Windows 的 down/up 位对翻译成协议的单次按钮事件。</summary>

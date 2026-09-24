@@ -38,6 +38,8 @@ namespace PcKvm
         // 抑制状态切换回调（参数 true=抑制生效）。挂在 Engage/Release 这一对唯一入口上，
         // 于是"隐藏 PC 光标"自动覆盖全部七条释放路径，不必在 Program.cs 里逐个补调用
         readonly Action<bool> _onSuppress;
+        readonly Action _showCapture;
+        readonly Action _hideCapture;
         IntPtr _prevForeground = IntPtr.Zero;
 
         // 抑制期间光标的真实位置被搬到了状态条上，退出时必须搬回去，
@@ -48,11 +50,14 @@ namespace PcKvm
         public bool IsEngaged { get; private set; }
         public event Action ForegroundLost;
 
-        public Suppressor(IntPtr ownWindow, Action<string> log, Action<bool> onSuppress)
+        public Suppressor(IntPtr ownWindow, Action<string> log, Action<bool> onSuppress,
+                          Action showCapture, Action hideCapture)
         {
             _own = ownWindow;
             _log = log;
             _onSuppress = onSuppress;
+            _showCapture = showCapture;
+            _hideCapture = hideCapture;
         }
 
         /// <summary>尝试夺取前台并锁定光标。返回 false 表示夺取失败，此时光标未被锁。</summary>
@@ -61,6 +66,7 @@ namespace PcKvm
             if (IsEngaged) return true;
 
             _prevForeground = GetForegroundWindow();
+            _showCapture();
 
             // 必须在 UI 线程调用：AttachThreadInput 需要的是拥有窗口输入队列的那个线程
             uint myThread = GetCurrentThreadId();
@@ -85,6 +91,7 @@ namespace PcKvm
             if (now != _own)
             {
                 _log("# 夺取前台失败（前台仍是 " + TitleOf(now) + "），不锁光标");
+                _hideCapture();
                 return false;
             }
 
@@ -104,6 +111,7 @@ namespace PcKvm
                 // err 必须在任何其它 Win32 调用之前取——SetForegroundWindow 会覆盖 last-error
                 int err = Marshal.GetLastWin32Error();
                 GiveBackForeground();
+                _hideCapture();
                 _log("# 取本窗口矩形失败 err=" + err + "，不锁光标");
                 return false;
             }
@@ -112,6 +120,7 @@ namespace PcKvm
             {
                 int rw = r.Right - r.Left, rh = r.Bottom - r.Top;
                 GiveBackForeground();
+                _hideCapture();
                 _log("# 本窗口矩形过小(" + rw + "x" + rh + ")，不锁光标");
                 return false;
             }
@@ -129,12 +138,22 @@ namespace PcKvm
             RECT pin;
             pin.Left = cx; pin.Top = cy; pin.Right = cx + 1; pin.Bottom = cy + 1;
             bool clipped = ClipCursor(ref pin);
+            if (!clipped)
+            {
+                int err = Marshal.GetLastWin32Error();
+                SetCursorPos(_savedX, _savedY);
+                _hasSavedCursor = false;
+                GiveBackForeground();
+                _hideCapture();
+                _log("# ClipCursor 失败 err=" + err + "，不接管");
+                return false;
+            }
             // IsEngaged 必须在 _log 之前置位：日志写入若抛异常，光标已被钳住而
             // IsEngaged 仍为 false，守卫定时器（!IsEngaged 时提前返回）就被废掉了
             //（Task 7 审查 Minor A1，合并前必修）。
             IsEngaged = true;
             if (_onSuppress != null) _onSuppress(true);   // 隐藏 PC 光标（仅本窗口范围）
-            _log(clipped ? "# 抑制已生效" : "# ClipCursor 失败 err=" + Marshal.GetLastWin32Error());
+            _log("# 抑制已生效");
 
             return true;
         }
@@ -151,7 +170,7 @@ namespace PcKvm
                 _hasSavedCursor = false;
             }
 
-            if (!IsEngaged) return;
+            if (!IsEngaged) { _hideCapture(); return; }
             IsEngaged = false;
 
             if (_prevForeground != IntPtr.Zero)
@@ -161,6 +180,7 @@ namespace PcKvm
             // 还原 PC 光标放在**最后**：它是纯 UX，不能插在"解锁光标/还原位置/还前台"
             // 这条安全序列中间——万一它抛异常，前面几步已经做完了（Task 7 审查 C1 同一教训）
             if (_onSuppress != null) _onSuppress(false);
+            _hideCapture();
         }
 
         /// <summary>由 UI 线程的 guard 定时器（250ms）调用：前台被抢走（UAC 安全桌面、锁屏、

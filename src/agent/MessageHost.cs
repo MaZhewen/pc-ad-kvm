@@ -6,12 +6,11 @@ using System.Windows.Forms;
 namespace PcKvm
 {
     /// <summary>
-    /// 主窗体：Raw Input 的消息宿主、托盘载体，兼作状态指示窗。
-    /// 必须是可见的真实窗口——隐藏窗口无法持有前台，抑制器夺取前台依赖它。
+    /// Raw Input 的消息宿主。空闲时隐藏；接管时短暂成为前台，接收键盘并承接被钳住的 PC 光标。
     /// </summary>
     class MessageHost : Form
     {
-        Label _status;
+        int _visibilityEpoch;
 
         public MessageHost()
         {
@@ -21,23 +20,33 @@ namespace PcKvm
             TopMost = true;
             StartPosition = FormStartPosition.Manual;
             Location = new System.Drawing.Point(0, 0);
-            Size = new System.Drawing.Size(220, 28);
-            Opacity = 0.75;
-            BackColor = System.Drawing.Color.DarkSlateBlue;
-
-            _status = new Label();
-            _status.Dock = DockStyle.Fill;
-            _status.ForeColor = System.Drawing.Color.White;
-            _status.Font = new System.Drawing.Font("Consolas", 9f);
-            _status.TextAlign = System.Drawing.ContentAlignment.MiddleCenter;
-            _status.Text = "IDLE";
-            Controls.Add(_status);
+            Size = new System.Drawing.Size(8, 8);
+            Opacity = 0.01;  // nonzero alpha keeps hit testing on this window while capturing
+            BackColor = System.Drawing.Color.Black;
         }
 
-        public void SetStatus(string s) { _status.Text = s; }
+        public void SetStatus(string s) { Text = "PC-KVM " + s; }
+
+        public void ShowForCapture()
+        {
+            System.Threading.Interlocked.Increment(ref _visibilityEpoch);
+            Show();
+        }
+
+        public void HideAfterCapture()
+        {
+            int epoch = System.Threading.Interlocked.Increment(ref _visibilityEpoch);
+            if (IsDisposed || !IsHandleCreated) return;
+            if (InvokeRequired)
+            {
+                try { BeginInvoke((MethodInvoker)delegate { if (epoch == _visibilityEpoch) Hide(); }); }
+                catch (InvalidOperationException) { }
+            }
+            else if (epoch == _visibilityEpoch) Hide();
+        }
 
         // ---- 抑制期间隐藏 PC 光标 ----
-        // 抑制生效时鼠标在控制手机，而 PC 光标被 ClipCursor 钳在状态条里的一个像素上——
+        // 抑制生效时鼠标在控制手机，而 PC 光标被 ClipCursor 钳在输入宿主的一个像素上——
         // 留着它只是个让人困惑的箭头。做法是给**本窗口**挂一张全透明光标：Windows 按
         // "光标下面那个窗口"决定画什么，所以只有压在我们窗口上时不可见，光标一离开
         // （或本进程死掉、系统释放裁剪）就自动恢复成正常箭头。
@@ -62,7 +71,6 @@ namespace PcKvm
             }
             System.Windows.Forms.Cursor c = hidden ? _blank : Cursors.Default;
             this.Cursor = c;
-            _status.Cursor = c;
             // 显式施加一次：光标此刻已被钳进本窗口且不再移动，未必还会收到 WM_SETCURSOR
             SetCursor(c.Handle);
         }

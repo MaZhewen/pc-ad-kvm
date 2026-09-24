@@ -7,12 +7,18 @@ namespace PcKvm
     public static class DeviceLauncher
     {
         public const int Port = 27183;
+        // Shared by initial setup and reconnects; the Android endpoint stays fixed.
+        public static int LocalPort = Port;
+        public static string TunnelArguments
+        {
+            get { return "reverse tcp:" + Port + " tcp:" + LocalPort; }
+        }
         const string RemoteJar = "/data/local/tmp/pckvm.jar";
 
         /// <summary>只建反向隧道。重连时用这个——不重推 jar（设备侧那份还在）。</summary>
         public static bool EnsureTunnel()
         {
-            return RunAdb("reverse tcp:" + Port + " tcp:" + Port) == 0;
+            return RunAdb(TunnelArguments) == 0;
         }
 
         /// <summary>推 jar。首次启动、或设备侧被清过之后才需要。</summary>
@@ -176,18 +182,31 @@ namespace PcKvm
         /// <summary>读取手机当前逻辑屏幕尺寸（已按旋转换算）。失败返回 false，且不改动 out。</summary>
         public static bool QueryDisplay(out int w, out int h)
         {
-            w = 0; h = 0;
+            int rotation;
+            return QueryDisplay(out w, out h, out rotation);
+        }
+
+        /// <summary>读取逻辑尺寸与当前显示旋转（0/90/180/270）。</summary>
+        public static bool QueryDisplay(out int w, out int h, out int rotation)
+        {
+            w = 0; h = 0; rotation = -1;
             string outp;
             if (RunAdbCapture("shell \"wm size; dumpsys window displays 2>/dev/null"
                               + " | grep -o mRotation=[A-Z0-9_]* | head -1\"", out outp) != 0)
                 return false;
-            return ParseDisplaySize(outp, out w, out h);
+            return ParseDisplaySize(outp, out w, out h, out rotation);
         }
 
         /// <summary>纯函数：把 adb 输出解析成逻辑尺寸。旋转 90/270 时宽高互换。</summary>
         public static bool ParseDisplaySize(string adbOutput, out int w, out int h)
         {
-            w = 0; h = 0;
+            int rotation;
+            return ParseDisplaySize(adbOutput, out w, out h, out rotation);
+        }
+
+        public static bool ParseDisplaySize(string adbOutput, out int w, out int h, out int rotation)
+        {
+            w = 0; h = 0; rotation = -1;
             if (adbOutput == null) return false;
 
             int ow = 0, oh = 0;      // Override size 优先
@@ -211,6 +230,7 @@ namespace PcKvm
             if (baseW <= 0 || baseH <= 0 || rot < 0) return false;
             if (rot == 90 || rot == 270) { w = baseH; h = baseW; }
             else { w = baseW; h = baseH; }
+            rotation = rot;
             return true;
         }
 

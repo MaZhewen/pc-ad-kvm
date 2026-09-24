@@ -51,7 +51,7 @@ namespace PcKvm
         /// <summary>几何轮询每次**成功**查到都抛（含未变化值）。
         /// 消费方自行比较后决定是否应用——这样 Watchers 不持有第二份几何状态，
         /// 不会与 Program.cs 的副本漂移（那正是 Task 5B 踩过的"窄撕裂窗口"同类问题）。</summary>
-        public event Action<int, int> GeometryQueried;
+        public event Action<int, int, int> GeometryQueried;
 
         public Watchers(Transport transport, EdgeTracker tracker, Suppressor supp,
                         MessageHost host, Action<string> log)
@@ -80,7 +80,7 @@ namespace PcKvm
                 // 放弃路径也必须通知设备侧清状态：接管期间若按着鼠标键/修饰键再逃逸，
                 // 不补发 LEAVE 会让手机侧 buttonsDown 与按键槽位永久残留（leave 才会清）。
                 // 设备侧处理 MSG_LEAVE 时会 buttonsDown=0 并 KeyState.releaseAll。
-                _transport.Send(Protocol.EncodeLeave());
+                _transport.SendControl(Protocol.EncodeLeave());
                 _tracker.AbortTakeover();
                 _supp.Release();
                 _host.SetStatus("IDLE");
@@ -109,10 +109,10 @@ namespace PcKvm
                     System.Threading.Thread.Sleep(2000);
                     if (_stop) return;
                     if (!_transport.IsConnected) continue;   // 掉线时静默跳过，不刷日志
-                    int w, h;
-                    if (!DeviceLauncher.QueryDisplay(out w, out h)) continue;
-                    Action<int, int> g = GeometryQueried;
-                    if (g != null) g(w, h);
+                    int w, h, rotation;
+                    if (!DeviceLauncher.QueryDisplay(out w, out h, out rotation)) continue;
+                    Action<int, int, int> g = GeometryQueried;
+                    if (g != null) g(w, h, rotation);
                 }
             });
             _geoPoll.IsBackground = true;
@@ -166,7 +166,7 @@ namespace PcKvm
                     _log("# 心跳失联（" + age.ToString("F1") + "s, connected="
                          + _transport.IsConnected + "），强制解除抑制");
                     // 放弃路径要通知设备侧清 buttonsDown/按键槽位（Ruling 25）；连接已断时 Send 是安全 no-op
-                    _transport.Send(Protocol.EncodeLeave());
+                    _transport.SendControl(Protocol.EncodeLeave());
                     _tracker.AbortTakeover();
                     _supp.Release();
                     _host.SetStatus("IDLE");

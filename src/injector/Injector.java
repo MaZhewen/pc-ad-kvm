@@ -25,7 +25,7 @@ public class Injector {
         System.out.println("INJECTOR start");
         UhidDevice dev;
         try {
-            dev = new UhidDevice("PC-KVM Virtual Input", HidDescriptor.MOUSE_KEYBOARD);
+            dev = new UhidDevice("PC-KVM Keyboard", HidDescriptor.keyboardOnly());
         } catch (Exception e) {
             System.out.println("INJECTOR FAIL open /dev/uhid: " + e);
             return;
@@ -51,6 +51,16 @@ public class Injector {
         }
         System.out.println("INJECTOR connected");
 
+        AbsoluteSession pointer;
+        try {
+            pointer = new AbsoluteSession();
+        } catch (Exception e) {
+            System.out.println("INJECTOR FAIL absolute mouse setup: " + e);
+            e.printStackTrace(System.out);
+            dev.close();
+            sock.close();
+            return;
+        }
         InputStream in = sock.getInputStream();
         OutputStream out = sock.getOutputStream();
 
@@ -62,12 +72,13 @@ public class Injector {
                 if (plen < 0) break;
                 byte[] p = new byte[plen];
                 if (plen > 0 && !readExact(in, p, plen)) break;
-                handle(dev, out, (byte) type, p);
+                if (!pointer.handle(type, p, out)) handle(dev, out, (byte) type, p);
             }
         } catch (Exception e) {
             System.out.println("INJECTOR loop end: " + e);
         }
 
+        pointer.close();
         dev.close();
         sock.close();
         System.out.println("INJECTOR exit");
@@ -116,7 +127,6 @@ public class Injector {
             // 防修饰键/鼠标键卡在按下态（遥控类软件经典 bug）：接管期间按着 Ctrl 或鼠标键
             // 退出，不清理的话手机上会一直"按住"。PC 侧所有放弃路径都会补发 LEAVE。
             buttonsDown = 0;
-            dev.sendMouse((byte) 0, (byte) 0, (byte) 0, (byte) 0);
             KeyState.releaseAll(dev);
         }
         // MSG_CONFIG 由后续任务接管（MSG_ENTER 已实现，见 MSG_ENTER 分支）
@@ -147,6 +157,8 @@ public class Injector {
 
     static int payloadLength(int type) {
         switch (type) {
+            case 0x0b: return 12; // epoch, sequence, x, y
+            case 0x0c: return 9;  // epoch, width, height, display rotation
             case MSG_ENTER:  return 4;
             case MSG_MOVE:   return 4;
             case MSG_BUTTON: return 2;
