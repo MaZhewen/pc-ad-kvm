@@ -1,0 +1,25 @@
+L14 indent=12 | FormBorderStyle = FormBorderStyle.None;
+L15 indent=20 | + "\n程序将退出。", "PC-KVM", MessageBoxButtons.OK, MessageBoxIcon
+L16 indent=16 | return;
+L17 indent=12 | }
+L18 indent=0 | 
+L19 indent=12 | StreamWriter log = new StreamWriter(
+L20 indent=16 | Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "pc-kvm.
+L40 indent=12 | // 目标机几何：手机挂在 DISPLAY1（1920,0,1920x1080）的右侧。
+L41 indent=12 | // edgeX 约定 = 触发侧最外侧有效像素列：3840x1080 桌面上光标最远只能到 3839
+L42 indent=12 | //（Windows 钳制），传 3840 会让入口条件永远不可达。
+L43 indent=12 | EdgeTracker tracker = new EdgeTracker(
+L44 indent=16 | edgeX: 3839, edgeTop: 0, edgeBottom: 1080,
+L70 indent=16 | // RawInput 的 catch{} 吞掉，表现为状态机卡死在 TAKEOVER 且无任何报错）
+L71 indent=16 | if (cursor != null)
+L72 indent=16 | {
+L116 indent=12 | };
+L117 indent=0 | 
+L118 indent=12 | string jar = Path.Combine(AppDomain.CurrentDomain.BaseDirect
+L163 indent=24 | _geometryChanged = true;
+L164 indent=20 | }
+L165 indent=16 | }
+L166 indent=12 | });
+L173 indent=12 | tray.Visible = true;
+L174 indent=12 | MenuItem quit = new MenuItem("退出");
+L175 indent=12 | quit.Click += delegate { Application.Exit(); };

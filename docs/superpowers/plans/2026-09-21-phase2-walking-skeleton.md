@@ -1338,9 +1338,19 @@ public class KeyState {
 
     /** scancode 是 Windows 形式（低字节 MakeCode，E0 置 0xE000），此处先只处理非 E0 的普通键。 */
     public static void apply(UhidDevice dev, int scancode, boolean down, int mods) throws Exception {
-        modifiers = mods & 0xFF;
+        int newMods = mods & 0xFF;
+        boolean modsChanged = (newMods != modifiers);
+        modifiers = newMods;
+
         int usage = ScancodeMap.toHidUsage(scancode);
-        if (usage < 0) return;   // 未映射的键直接忽略，不破坏报告
+        if (usage < 0) {
+            // 修饰键（或未映射键）。**修饰态一变就必须立刻发一条键盘报告**：
+            // 鼠标报文里不带 mods 字节，若等到下一次按键才发，像"按住 Ctrl 再点击"
+            // 这类操作在手机上永远看不到修饰键（Task 9 审查 Important #2，
+            // 且这正是计划自己注明的意图「修饰键变化也要发一条报告」）。
+            if (modsChanged) dev.sendKeyboard((byte) modifiers, slotsToBytes());
+            return;
+        }
 
         if (down) {
             if (!contains(usage)) {
@@ -1350,9 +1360,14 @@ public class KeyState {
         } else {
             for (int i = 0; i < 6; i++) if (slots[i] == usage) slots[i] = 0;
         }
+        dev.sendKeyboard((byte) modifiers, slotsToBytes());
+    }
+
+    /** 把 6 个槽位打包成一条键盘报告的载荷。 */
+    static byte[] slotsToBytes() {
         byte[] keys = new byte[6];
         for (int i = 0; i < 6; i++) keys[i] = (byte) slots[i];
-        dev.sendKeyboard((byte) modifiers, keys);
+        return keys;
     }
 
     static boolean contains(int usage) {
@@ -1735,6 +1750,274 @@ git commit -m "feat: 推角落归零 —— 修复 UHID 光标位置跨设备重
 
 ---
 
+### Task 5B: 手机显示几何 —— 运行时读取 + 轮询检测旋转（插队，必须先于 Task 6）
+
+**为什么插队**：Task 5 把手机分辨率硬编码成 `2136×3200`（竖屏），本计划自审记录里也把「`CONFIG` 不接线、分辨率硬编码」记为刻意 YAGNI。**2026-09-21 实测推翻了这条 YAGNI**：
+
+- `dumpsys input` 里我们设备的 `Cursor Input Mapper` 实测 `Motion Ranges: X 0–3199 / Y 0–2135`，即手机当时是**横屏**（`mRotation=ROTATION_90`，逻辑尺寸 3200×2136），而模型是竖屏。
+- 同一份 dump 里 `XScale: 1.000 / YScale: 1.000`，且**没有** `PointerVelocityControlParameters`（而滚轮参数 `WheelYVelocityControlParameters` 打印了）→ 指针加速不作用于本设备，**增量与像素是 1:1**。所以漂移不是加速造成的，就是几何量错。
+- 后果：模型 X 上限 2135 < 真实 3199 → 向右推时模型先撞上限**停发包**，真光标冻在屏幕 2/3 处的**"虚拟边界"**；模型 Y 上限 3199 > 真实 2135 → 向下推时真光标顶住下边缘、模型继续空走，记账错位，之后左/上的停点就随错位量漂移。
+- 用户实测症状「向左/上推到某个位置就不再移动，像有虚拟边界，且边界不固定」与上述机制吻合。
+
+**产出**：几何不再硬编码。连接时从手机读**真实逻辑尺寸**；接管期间每 2 秒轮询一次，一旦发现尺寸/旋转变化就把模型与真光标**重新 HOME 归零对齐**。
+
+**Files:**
+- Modify: `src/agent/DeviceLauncher.cs`（加 `RunAdbCapture` + `QueryDisplay` + 纯解析 `ParseDisplaySize`）
+- Modify: `src/agent/CursorModel.cs`（加 `SetBounds`）
+- Modify: `src/agent/Program.cs`（接线 + 轮询线程 + 在 MouseMoved 里消费几何变化）
+
+**Interfaces:**
+- `DeviceLauncher.QueryDisplay(out int w, out int h)` → `bool`：跑一次 adb 取回"物理尺寸 + 旋转"，算出**逻辑尺寸**（旋转 90/270 时 W/H 互换）。失败返回 false，且**不改动** out。
+- `DeviceLauncher.ParseDisplaySize(string adbOutput, out int w, out int h)` → `bool`：**纯函数，无任何 I/O**。用真实 adb 输出直接离线测（见验证步骤）。
+- `CursorModel.SetBounds(int w, int h)` → `void`：更新边界并把 X/Y 钳进新边界。
+
+**采样到的真实 adb 输出（直接当测试向量）**：
+
+```
+$ adb shell "wm size; dumpsys window displays 2>/dev/null | grep -o mRotation=[A-Z0-9_]* | head -1"
+Physical size: 2136x3200
+mRotation=ROTATION_90
+```
+横屏 → 期望 `3200x2136`。
+
+- [ ] **Step 1: DeviceLauncher 加取几何**
+
+在 `src/agent/DeviceLauncher.cs` 里**追加**（不要改动已有的 `RunAdb` 与 `Prepare`）：
+
+```csharp
+        /// <summary>跑 adb 并把 stdout 取回。返回退出码；失败返回 -1。</summary>
+        static int RunAdbCapture(string args, out string stdout)
+        {
+            stdout = "";
+            ProcessStartInfo psi = new ProcessStartInfo();
+            psi.FileName = "adb";
+            psi.Arguments = args;
+            psi.UseShellExecute = false;
+            psi.RedirectStandardOutput = true;
+            psi.RedirectStandardError = true;
+            psi.CreateNoWindow = true;
+            try
+            {
+                Process p = Process.Start(psi);
+                stdout = p.StandardOutput.ReadToEnd();
+                p.StandardError.ReadToEnd();
+                p.WaitForExit(5000);
+                return p.ExitCode;
+            }
+            catch (System.Exception)
+            {
+                return -1;
+            }
+        }
+
+        /// <summary>读取手机当前逻辑屏幕尺寸（已按旋转换算）。失败返回 false，且不改动 out。</summary>
+        public static bool QueryDisplay(out int w, out int h)
+        {
+            w = 0; h = 0;
+            string outp;
+            if (RunAdbCapture("shell \"wm size; dumpsys window displays 2>/dev/null"
+                              + " | grep -o mRotation=[A-Z0-9_]* | head -1\"", out outp) != 0)
+                return false;
+            return ParseDisplaySize(outp, out w, out h);
+        }
+
+        /// <summary>纯函数：把 adb 输出解析成逻辑尺寸。旋转 90/270 时宽高互换。</summary>
+        public static bool ParseDisplaySize(string adbOutput, out int w, out int h)
+        {
+            w = 0; h = 0;
+            if (adbOutput == null) return false;
+
+            int ow = 0, oh = 0;      // Override size 优先
+            int pw = 0, ph = 0;      // Physical size 兜底
+            int rot = -1;
+
+            string[] lines = adbOutput.Replace("\r", "").Split('\n');
+            for (int i = 0; i < lines.Length; i++)
+            {
+                string s = lines[i].Trim();
+                if (s.StartsWith("Override size:"))
+                    ParseWxH(s.Substring(14), ref ow, ref oh);
+                else if (s.StartsWith("Physical size:"))
+                    ParseWxH(s.Substring(14), ref pw, ref ph);
+                else if (s.StartsWith("mRotation="))
+                    rot = ParseRotation(s.Substring(10));
+            }
+
+            int baseW = ow > 0 ? ow : pw;
+            int baseH = ow > 0 ? oh : ph;
+            if (baseW <= 0 || baseH <= 0 || rot < 0) return false;
+            if (rot == 90 || rot == 270) { w = baseH; h = baseW; }
+            else { w = baseW; h = baseH; }
+            return true;
+        }
+
+        static void ParseWxH(string s, ref int w, ref int h)
+        {
+            int i = s.IndexOf('x');
+            if (i <= 0) return;
+            int a, b;
+            if (!int.TryParse(s.Substring(0, i).Trim(), out a)) return;
+            if (!int.TryParse(s.Substring(i + 1).Trim(), out b)) return;
+            if (a <= 0 || b <= 0) return;
+            w = a; h = b;
+        }
+
+        static int ParseRotation(string s)
+        {
+            if (s == "ROTATION_0") return 0;
+            if (s == "ROTATION_90") return 90;
+            if (s == "ROTATION_180") return 180;
+            if (s == "ROTATION_270") return 270;
+            return -1;
+        }
+```
+
+- [ ] **Step 2: CursorModel 支持改边界**
+
+`src/agent/CursorModel.cs`：把 `readonly int _w;` / `readonly int _h;` **去掉 `readonly`**（改成 `int _w; int _h;`），并追加：
+
+```csharp
+        /// <summary>屏幕旋转/尺寸变化时更新边界，并把当前位置钳进新边界。</summary>
+        public void SetBounds(int w, int h)
+        {
+            if (w <= 0 || h <= 0) return;
+            _w = w;
+            _h = h;
+            if (X > _w - 1) X = _w - 1;
+            if (Y > _h - 1) Y = _h - 1;
+        }
+```
+
+- [ ] **Step 3: Program.cs 接线 + 轮询线程**
+
+**(a)** 在 `Program` 类里加三个**静态字段**（必须是字段：`volatile` 不能修饰局部变量，而这三个量要被轮询线程写、UI 线程读）：
+
+```csharp
+        static volatile int _phoneW = 0;
+        static volatile int _phoneH = 0;
+        static volatile bool _geometryChanged = false;
+```
+
+**(b)** 把 `transport.Connected` 处理器里的 `cursor = new CursorModel(2136, 3200);` 换成：
+
+```csharp
+            transport.Connected += delegate
+            {
+                log.WriteLine("# 设备已连接");
+                int dw, dh;
+                if (DeviceLauncher.QueryDisplay(out dw, out dh))
+                {
+                    _phoneW = dw; _phoneH = dh;
+                    log.WriteLine("# 屏幕几何 " + dw + "x" + dh);
+                }
+                else
+                {
+                    _phoneW = 2136; _phoneH = 3200;   // 查询失败时的保守回退
+                    log.WriteLine("# 屏幕几何查询失败，回退 " + _phoneW + "x" + _phoneH);
+                }
+                cursor = new CursorModel(_phoneW, _phoneH);
+                _geometryChanged = true;   // 首次鼠标移动时消费：SetBounds + HOME 归零
+                transport.Send(Protocol.EncodePing(1));
+            };
+```
+
+**同时删除 `cursorResetPending`**：把 `CursorModel cursor = null;` 旁边的 `bool cursorResetPending = false;` 字段与它在 `MouseMoved` 里的分支一并删掉。理由：它要表达的语义（"连接后第一次移动时归零对齐"）已被 `_geometryChanged` 完全覆盖，而且原字段是**跨线程未同步**的普通 bool（Task 5 的审查已把它挂为 deferred minor），现在换成 `volatile` 的 `_geometryChanged` 顺带修掉。这是 Ruling 4（"T6 替换处理器时删掉 cursorResetPending"）的**提前执行**——机制更好，时机提前一个任务。
+
+**(c)** 在 `MessageHost`/托盘装配**之前**启动轮询线程：
+
+```csharp
+            System.Threading.Thread rotPoll = new System.Threading.Thread(delegate()
+            {
+                while (true)
+                {
+                    System.Threading.Thread.Sleep(2000);
+                    if (!transport.IsConnected) continue;
+                    int w, h;
+                    if (!DeviceLauncher.QueryDisplay(out w, out h)) continue;   // 掉线时静默跳过，不刷日志
+                    if (w != _phoneW || h != _phoneH)
+                    {
+                        _phoneW = w; _phoneH = h;
+                        _geometryChanged = true;
+                    }
+                }
+            });
+            rotPoll.IsBackground = true;
+            rotPoll.Start();
+```
+
+**(d)** 在 `MouseMoved` 里消费几何变化——把现有的 `if (cursorResetPending) {...}` 那一小段**整体替换**为（注意：`cursorResetPending` 已在 (b) 里删除，这里不再出现）：
+
+```csharp
+                    if (_geometryChanged)
+                    {
+                        _geometryChanged = false;
+                        cursor.SetBounds(_phoneW, _phoneH);
+                        log.WriteLine("# 几何已应用 " + _phoneW + "x" + _phoneH);
+                        transport.Send(Protocol.EncodeHome());
+                        cursor.Reset();
+                    }
+```
+
+**实现者必读（本任务特有的坑）**：
+
+1. **C# 5**：`out` 变量必须先声明再传（`int a; Foo(out a);`），**不要**写 `out int a`（C# 7 内联声明，本机 csc 编不过——本计划 Task 7 就踩过）。禁用 `?.`、`$""`、表达式体成员。
+2. **`volatile` 只能修饰字段**，所以 `_phoneW/_phoneH/_geometryChanged` 必须是 `Program` 的**静态字段**，不能是 `Main` 的局部变量。
+3. **轮询必须无条件运行**（只判 `IsConnected`）：Task 6 才有 IDLE/TAKEOVER 状态机，本任务**不要**自己造状态机。
+4. **轮询在后台线程做 I/O，UI 线程只消费标志位**。绝不要在 `Timer.Tick`（UI 线程）里跑 adb——那会阻塞 Raw Input 消息泵。
+5. 掉线时 `QueryDisplay` 会失败：**静默 `continue`，不要打日志**，否则每 2 秒一条会把日志刷爆。
+6. `Program.cs` 体量红线 **360 行**（Ruling 26；由 250→320→360，其中 320 那一步基于错误测量口径，理由与实测数据见 Task 7 Step 2）：改完若超线，报 `DONE_WITH_CONCERNS`，不要自行拆分。
+7. **不要动 `RunAdb`**：它已被 3 处调用且有已评审的行为，只新增 `RunAdbCapture`。
+8. 本任务**不涉及输入路径**，所以 GameViewer.exe 开不开都不影响本任务的验证。
+
+- [ ] **Step 4: 编译**
+
+Run: `powershell -ExecutionPolicy Bypass -File build/build-agent.ps1`
+Expected: `编译成功`，`$LASTEXITCODE` 为 0，**零警告**。
+
+- [ ] **Step 5: 离线测试纯解析（本任务可在无手机时完成的验证）**
+
+`ParseDisplaySize` 是无 I/O 纯函数，**不需要手机**即可测。在 `%TEMP%` 下建一个一次性测试程序（**不要放进 `src/agent/`**，那个目录的 `*.cs` 会被构建脚本全部编进 exe）：
+
+测试向量（第 1 条是我本次实测抓到的真实输出）：
+
+| 输入 | 期望 |
+|---|---|
+| `"Physical size: 2136x3200\nmRotation=ROTATION_90\n"` | `true, 3200x2136` |
+| `"Physical size: 2136x3200\nmRotation=ROTATION_0\n"` | `true, 2136x3200` |
+| `"Physical size: 2136x3200\nmRotation=ROTATION_270\n"` | `true, 3200x2136` |
+| `"Physical size: 2136x3200\nOverride size: 1080x1920\nmRotation=ROTATION_0\n"` | `true, 1080x1920`（Override 优先） |
+| `"Override size: 1080x1920\nPhysical size: 2136x3200\nmRotation=ROTATION_90\n"` | `true, 1920x1080`（顺序颠倒也成立） |
+| `"Physical size: 2136x3200\r\nmRotation=ROTATION_90\r\n"` | `true, 3200x2136`（CRLF） |
+| `""` | `false` |
+| `"Physical size: 2136x3200\n"`（无旋转行） | `false` |
+| `"error: no devices/emulators found\n"` | `false` |
+| `"Physical size: 2136x3200\nmRotation=ROTATION_LEFT\n"` | `false`（未知旋转值） |
+
+编译方式（把 `DeviceLauncher.cs` 与测试的 Main 一起编，`DeviceLauncher` 只依赖 `System.Diagnostics`/`System.IO`，可独立编译）：
+
+```powershell
+& "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe" -nologo -target:exe `
+    -out:"$env:TEMP\geotest\geotest.exe" `
+    "$env:TEMP\geotest\Main.cs" "$root\src\agent\DeviceLauncher.cs"
+```
+
+判定：10 条向量全部符合期望 → 通过。
+
+- [ ] **Step 6: 提交**
+
+```bash
+cd /g/pc-kvm
+git add src/agent/DeviceLauncher.cs src/agent/CursorModel.cs src/agent/Program.cs
+git commit -m "fix(agent): 显示几何改为运行时读取 + 轮询检测旋转，修复硬编码竖屏导致的虚拟边界"
+```
+
+**本任务**不做**的事（等手机回线后另行验收，不属于本任务范围）**：
+
+- 真机上横屏/竖屏下的实际光标行为（Task 5 的复验）
+- 旋转时 `# 旋转变化 → 重新归零对齐` 的实机验证
+
+---
+
 ### Task 6: 边缘状态机与坐标映射
 
 **产出**：光标推到配置的外侧边缘时进入 `TAKEOVER`，虚拟光标映射到手机屏；在手机屏上把光标推回邻接边缘时退出 `TAKEOVER`。**此任务仍不做抑制**（PC 键盘鼠标照常工作），先把状态机与几何跑通。
@@ -1772,7 +2055,7 @@ namespace PcKvm
     /// </summary>
     public class EdgeTracker
     {
-        readonly int _edgeX;            // 触发边界的 x（屏幕像素）
+        readonly int _edgeX;            // 触发侧「最外侧像素列」的 x —— 注意不是边界坐标，见下方注释
         readonly int _edgeTop;
         readonly int _edgeBottom;
         readonly int _phoneW;
@@ -1785,6 +2068,12 @@ namespace PcKvm
         public event Action<short, short> EnterTakeover;
         public event Action LeaveTakeover;
 
+        /// <summary>
+        /// edgeX 的约定：**触发侧最外侧那一列有效像素的 x**（不是"边界坐标"）。
+        /// 手机挂在 PC 右侧时为 3839（虚拟桌面 x∈[0,3839]，Windows 把光标钳在最右像素上，
+        /// 实测 SetCursorPos(3840/3841) 都会回落到 3839）；挂在左侧时为 0。
+        /// 这个约定让左右两侧的 `atEdge` 与安全带判定写法对称，无需各自的 ±1。
+        /// </summary>
         public EdgeTracker(int edgeX, int edgeTop, int edgeBottom,
                            int phoneW, int phoneH, bool phoneRight)
         {
@@ -1841,8 +2130,15 @@ namespace PcKvm
             if (h != null) h((short)phoneX, (short)phoneY);
         }
 
-        /// <summary>TAKEOVER 态下、每次鼠标事件调用，传入游标模型算出的实际增量。</summary>
-        public void OnTakeoverMove(int actualDx, int actualDy, int vx, int vy)
+        /// <summary>
+        /// TAKEOVER 态下、每次鼠标事件调用。
+        /// **rawDx/rawDy 必须是 Raw Input 的原始增量，不能是 CursorModel 钳制后的增量。**
+        /// 原因（Task 6 审查抓到的真缺陷）：进入接管时虚拟光标被 SetPosition 落在 x=0，
+        /// 此时 CursorModel.NextDx(负值) 恒返回 0 —— 若用钳制后的增量判"是否在往外推"，
+        /// 「跨进去后立刻推回」这个手势永远无法触发 LEAVE，用户被困在接管态。
+        /// 原始增量表达的是用户意图，钳制后的增量表达的是实际位移，回程判定要的是前者。
+        /// </summary>
+        public void OnTakeoverMove(int rawDx, int rawDy, int vx, int vy)
         {
             if (Current != KvmState.Takeover) return;
 
@@ -1851,7 +2147,7 @@ namespace PcKvm
             if (!backAtEdge) return;
 
             // 必须仍在继续往外推，否则光标停在边上就会立刻回程
-            bool pushingBack = _phoneRight ? actualDx < 0 : actualDx > 0;
+            bool pushingBack = _phoneRight ? rawDx < 0 : rawDx > 0;
             if (!pushingBack) return;
 
             Current = KvmState.Idle;
@@ -1863,26 +2159,67 @@ namespace PcKvm
 }
 ```
 
+**Task 5B 带来的修正（必须实现）**：
+
+(a) 手机尺寸必须能跟随旋转变化。把 `readonly int _phoneW;` / `readonly int _phoneH;` **去掉 `readonly`**，并追加：
+
+```csharp
+        /// <summary>屏幕旋转/尺寸变化时更新手机逻辑尺寸。</summary>
+        public void SetPhoneSize(int w, int h)
+        {
+            if (w <= 0 || h <= 0) return;
+            _phoneW = w;
+            _phoneH = h;
+        }
+```
+
+(b) 构造时 `phoneW: 2136, phoneH: 3200` 只是**占位初值**（Task 5B 之后真值来自运行时读取）。真值会在连接后首次鼠标移动、以及之后每次旋转变化时通过 `SetPhoneSize` 灌进来。**必须在构造处写注释说明这是占位值**，以免后人以为它是权威常量。
+
 - [ ] **Step 2: 在 Program.cs 里接入状态机**
 
-把 `MouseMoved` 处理器整体替换为：
+**Task 5B 带来的修正（必须实现，否则会静默丢掉旋转恢复与连接守卫）**：
+
+下面这个版本已经把 Task 5B 引入的几何变化消费、以及连接守卫一并整合好了。**照抄，不要退回上面那种写法**：
 
 ```csharp
             ri.MouseMoved += delegate(RawMouseEvent e)
             {
-                if (tracker.Current == KvmState.Idle)
+                mc++;
+                if (mc % 50 == 0)
+                    log.WriteLine("MOUSE dx=" + e.Dx + " dy=" + e.Dy
+                        + " btn=0x" + e.ButtonFlags.ToString("X4") + " wheel=" + e.WheelDelta);
+
+                // 未连接时 cursor 为 null：此时绝不能让状态机跑起来，
+                // 否则推到边缘会触发 EnterTakeover → cursor.Reset() 空引用（异常被
+                // RawInput 的 catch{} 吞掉，表现为状态机卡死在 TAKEOVER 且无任何报错）
+                if (cursor != null)
                 {
-                    POINT p;
-                    GetCursorPos(out p);
-                    tracker.OnIdleMove(e.Dx, e.Dy, p.X, p.Y);
-                }
-                else
-                {
-                    short sdx = cursor.NextDx((int)(e.Dx * sensitivity));
-                    short sdy = cursor.NextDy((int)(e.Dy * sensitivity));
-                    if (sdx != 0 || sdy != 0)
-                        transport.Send(Protocol.EncodeMove(sdx, sdy));
-                    tracker.OnTakeoverMove(sdx, sdy, cursor.X, cursor.Y);
+                    if (_geometryChanged)
+                    {
+                        _geometryChanged = false;
+                        cursor.SetBounds(_phoneW, _phoneH);
+                        tracker.SetPhoneSize(_phoneW, _phoneH);
+                        log.WriteLine("# 几何已应用 " + _phoneW + "x" + _phoneH);
+                        transport.Send(Protocol.EncodeHome());
+                        cursor.Reset();
+                    }
+
+                    if (tracker.Current == KvmState.Idle)
+                    {
+                        POINT p;
+                        GetCursorPos(out p);
+                        tracker.OnIdleMove(e.Dx, e.Dy, p.X, p.Y);
+                    }
+                    else
+                    {
+                        short sdx = cursor.NextDx((int)(e.Dx * sensitivity));
+                        short sdy = cursor.NextDy((int)(e.Dy * sensitivity));
+                        if (sdx != 0 || sdy != 0)
+                            transport.Send(Protocol.EncodeMove(sdx, sdy));
+                        // 回程判定用**原始**增量（用户意图），不是钳制后的 sdx/sdy：
+                        // 接管入口处 vx=0，钳制后 sdx 恒为 0，用它会让"跨进去再推回"失灵
+                        tracker.OnTakeoverMove(e.Dx, e.Dy, cursor.X, cursor.Y);
+                    }
                 }
 
                 short wheel = (short)(e.WheelDelta / 120);
@@ -1897,13 +2234,19 @@ namespace PcKvm
             };
 ```
 
+**声明顺序**：`EdgeTracker tracker = ...` 必须**在** `transport.Connected` 订阅之前声明（C# 局部变量不能前向引用——Task 4 已踩过这个坑）。本任务的处理器在 `if (cursor != null)` 之后才用 `tracker`，所以只要 tracker 的声明早于 `ri.MouseMoved +=` 这一行即可。
+
 在 `Main` 里加字段与装配（**放在 transport 装配之后**）：
 
 ```csharp
             double sensitivity = 1.0;
-            // 目标机几何：手机挂在 DISPLAY1（1920,0,1920x1080）的右侧，故边界 x = 3840
+            // 目标机几何：手机挂在 DISPLAY1（1920,0,1920x1080）的右侧。
+            // edgeX 传 **3839** 而非 3840 —— 虚拟桌面 x∈[0,3839]，Windows 把光标钳在最右
+            // 像素上，`cursorX >= 3840` 永远不成立（实测 SetCursorPos(3840)/(3841) 均回落到
+            // 3839）。传 3840 会让 TAKEOVER 永远进不去 —— Task 6 审查抓到的真缺陷。
+            // 注意 phoneW/phoneH 只是占位初值，真值由 Task 5B 的几何消费点经 SetPhoneSize 灌入。
             EdgeTracker tracker = new EdgeTracker(
-                edgeX: 3840, edgeTop: 0, edgeBottom: 1080,
+                edgeX: 3839, edgeTop: 0, edgeBottom: 1080,
                 phoneW: 2136, phoneH: 3200, phoneRight: true);
 
             tracker.EnterTakeover += delegate(short px, short py)
@@ -1976,6 +2319,7 @@ git commit -m "feat: 边缘状态机与坐标映射 —— 比例入屏、回程
 1. `ClipCursor(IntPtr.Zero)` 必须是 `Release()` 的**第一条语句**，在任何条件判断之前。
 2. `Release()` 必须在 `OnFormClosing` / `ApplicationExit` / 心跳超时 / 前台丢失 **四条路径**上都可达。
 3. **夺取失败时绝不调 `ClipCursor`**——此时前台仍在别的程序，锁光标会让用户够不到本程序的窗口，只能 taskkill。
+4. **未连接时绝不夺取前台**（第二轮跨任务扫描新增）。失效路径：手机掉线后 `tracker` 已回 IDLE，用户**再**把鼠标推到边缘会重新触发 `EnterTakeover` → 若此时 `Engage()` 成功，前台被夺 + 光标被钳在一个像素上，而 Task 8 的心跳恢复里有 `if (!transport.IsConnected) return;`，**救不了这个状态**——用户只剩 `Ctrl+Alt+Esc` 一条退路。故 `EnterTakeover` 的第一件事就是连接检查。
 
 - [ ] **Step 1: 编写抑制器**
 
@@ -2034,7 +2378,10 @@ namespace PcKvm
 
             // 必须在 UI 线程调用：AttachThreadInput 需要的是拥有窗口输入队列的那个线程
             uint myThread = GetCurrentThreadId();
-            uint fgThread = GetWindowThreadProcessId(_prevForeground, out uint _);
+            // 注意：C# 5 不支持内联 out 声明（`out uint _` 是 C# 7 语法，本机 csc 4.0.30319
+            // 直接编不过）。必须先声明再传——本计划 Ruling 2 就是在这一行上抓到的。
+            uint fgPid;
+            uint fgThread = GetWindowThreadProcessId(_prevForeground, out fgPid);
 
             bool attached = false;
             if (fgThread != 0)
@@ -2103,9 +2450,31 @@ namespace PcKvm
 }
 ```
 
-- [ ] **Step 2: 在 Program.cs 接入**
+- [ ] **Step 2: 接入（分两个 commit：先纯搬迁，再改写）**
 
-把 `MessageHost` 改成**可见但极小的置顶窗口**（夺取前台需要有真实窗口，且用户要能看见当前状态）：
+**(a) 先做纯搬迁：把 `MessageHost` 类从 `src/agent/Program.cs` 整体剪到新文件 `src/agent/MessageHost.cs`，一个字都不改，单独一个 commit。**
+
+理由（控制方 Ruling 20）：①一个 `Form` 子类不是装配代码，本就该独立成文件——这与"按风险域分文件"的设计初衷一致；②不搬的话 `Program.cs` 会撞破体量红线（见下方"体量预算"）。搬迁单独成 commit，审查者才能干净地确认"纯移动、零行为变化"。
+
+**(b) 再在 `MessageHost.cs` 里把它改成可见但极小的置顶窗口**（夺取前台需要有真实窗口，且用户要能看见当前状态）：
+
+**体量预算（控制方按实测重算，必读）**：**Ruling 20 原先的预算建立在一个错误的测量口径上**——当时用 PowerShell `Measure-Object -Line` 量 `Program.cs`（该文件是 CRLF + BOM），得到 225；而权威口径 `wc -l` 实测是 250。Task 8 的实现者独立发现并报告了这个偏差（它量到 249/315），控制方复核确认 **`wc -l` 为准**。
+
+按权威口径的真实值：
+
+| 时点 | `Program.cs` 行数（`wc -l`） |
+|---|---|
+| Task 6 结束 | 234 |
+| Task 7 结束 | **250** |
+| Task 8 结束 | **315**（+65，比原估的 +36 多出近一倍，主要是心跳与逃逸键的实际写法比计划样例更长） |
+
+因此 Task 9 之后会落在约 **345** 行，**原定的 320 红线必破**。处置（Ruling 26）：
+1. **红线由 320 上调为 360** —— 这是**修正一个基于错误测量的预算**，不是"因为不方便而放宽"。
+2. **Task 9 的 `ModifierBit` 不再放进 `Program.cs`**，改为新建 `src/agent/KeyMap.cs` 存放（纯静态映射，与 `Protocol.cs` 的"纯函数"惯例一致，且可离线测试）。
+3. **此后任何功能若把 `Program.cs` 推过 360，必须做抽取而不是再上调。** 下一步唯一还有独立理由的抽取是三个 watcher（几何轮询线程 + 心跳定时器 + 前台守卫定时器）→ `Watchers.cs`——它隔离"后台存活性检查 + adb 进程 churn"，正是审查者两次点名的风险区。
+
+本任务结束时若 `Program.cs` 超过 360 行，报 `DONE_WITH_CONCERNS`，不要自行拆分。
+
 
 ```csharp
     class MessageHost : Form
@@ -2145,11 +2514,18 @@ namespace PcKvm
             host.Show();   // 必须真实显示，隐藏窗口无法持有前台
 ```
 
-```csharp
-            Suppressor supp = new Suppressor(hwnd, delegate(string s) { log.WriteLine(s); });
+**声明位置（第三轮跨任务扫描修正，必读）**：`Suppressor supp = new Suppressor(hwnd, delegate(string s) { log.WriteLine(s); });` 这一行**不能**留在"transport 装配之后"。Task 8 会在 `transport.Disconnected` 处理器与心跳定时器里调 `supp.Release()`，而那两个订阅位于 `Main` **前段**的 transport 装配块内——**C# 局部变量不支持前向引用**（Task 4 正是因为这个把装配块整体上移过）。故 `supp` 必须声明在 `log` 这个 `StreamWriter` 创建**之后、transport 装配块之前**；它只依赖 `hwnd` 与 `log`，放在那里没有任何障碍。下面的处理器订阅仍按原位（transport 装配之后）放置。
 
+```csharp
             tracker.EnterTakeover += delegate(short px, short py)
             {
+                // 安全不变量 4：未连接时绝不夺取前台/锁光标（见上方不变量清单）
+                if (!transport.IsConnected)
+                {
+                    log.WriteLine("# 未连接设备，放弃这次跨越");
+                    tracker.AbortTakeover();
+                    return;
+                }
                 if (!supp.Engage())
                 {
                     // 夺取失败就放弃这次跨越，保持 IDLE，绝不能让用户被困在锁死光标的状态里
@@ -2251,18 +2627,29 @@ PC 侧每 1 秒发一次 PING，记录最后收到 PONG 的时间；超过 2 秒
             heartbeat.Interval = 1000;
             heartbeat.Tick += delegate
             {
+                // 先做安全网：处于 TAKEOVER 时，「没连接」与「PONG 超时」都要立刻解除抑制。
+                // 原写法把 `if (!transport.IsConnected) return;` 放在最前，会在掉线后让
+                // 安全网整体短路——用户此时再推到边缘会重新进入 TAKEOVER 并夺取前台，
+                // 而没有任何东西能把他救出来（见 Task 7 安全不变量 4，第二轮跨任务扫描发现）。
+                if (tracker.Current == KvmState.Takeover)
+                {
+                    double age = (DateTime.UtcNow - new DateTime(lastPongTicks)).TotalSeconds;
+                    if (!transport.IsConnected || age > 2.0)
+                    {
+                        log.WriteLine("# 心跳失联（" + age.ToString("F1") + "s, connected="
+                                      + transport.IsConnected + "），强制解除抑制");
+                        // 与逃逸键同理：放弃路径要通知设备侧清 buttonsDown/按键槽位。
+                        // 若连接已断，Send 是安全 no-op（Transport.Send 在 _stream 为 null 时直接返回）。
+                        transport.Send(Protocol.EncodeLeave());
+                        tracker.AbortTakeover();
+                        supp.Release();
+                        host.SetStatus("IDLE");
+                    }
+                }
+
                 if (!transport.IsConnected) return;
                 pingSeq++;
                 transport.Send(Protocol.EncodePing(pingSeq));
-
-                double sincePong = (DateTime.UtcNow - new DateTime(lastPongTicks)).TotalSeconds;
-                if (sincePong > 2.0 && tracker.Current == KvmState.Takeover)
-                {
-                    log.WriteLine("# 心跳超时（" + sincePong.ToString("F1") + "s），强制解除抑制");
-                    tracker.AbortTakeover();
-                    supp.Release();
-                    host.SetStatus("IDLE");
-                }
             };
             heartbeat.Start();
 ```
@@ -2275,12 +2662,20 @@ PC 侧每 1 秒发一次 PING，记录最后收到 PONG 的时间；超过 2 秒
                 log.WriteLine("# 设备已断开");
                 if (tracker.Current == KvmState.Takeover)
                 {
+                    // 顺序要紧：AbortTakeover 与 Release 必须**同步**执行完（它们不碰控件），
+                    // 只有最后那次 UI 触碰需要 marshal。
                     tracker.AbortTakeover();
                     supp.Release();
-                    host.SetStatus("IDLE");
+                    // 本处理器跑在 Transport 的 accept 线程上（Transport.cs 的 AcceptLoop），
+                    // 直接改 Label.Text 是非法跨线程访问：不挂调试器时靠 SendMessage 侥幸不抛，
+                    // 挂上调试器就 InvalidOperationException；UI 线程若被阻塞还会连带卡住
+                    // accept 线程、拖慢重连。故只有这一句 marshal 回 UI 线程。
+                    host.BeginInvoke((MethodInvoker)delegate { host.SetStatus("IDLE"); });
                 }
             };
 ```
+
+**这一段不是可选的**：Task 6 的审查把它列为 Important —— 掉线时 `tracker` 会**卡在 TAKEOVER**（`Disconnected` 只打日志、`cursor` 保持非 null、`Armed` 也不复位），而重连时 `Connected` 会装一个**全新的 `CursorModel`**，两者状态不再配套；此后所有 PC 鼠标移动都会走接管分支并镜像给手机。控制方裁决此条**在 Task 8 关闭**（ledger Ruling 22）：Task 8 本就是"边界情况"，且它的 `AbortTakeover()` 正好把 `Current` 与 `Armed` 一起复位。**Task 8 实现者不得省略这一段。**
 
 - [ ] **Step 2: 加紧急逃逸键**
 
@@ -2320,6 +2715,10 @@ PC 侧每 1 秒发一次 PING，记录最后收到 PONG 的时间；超过 2 秒
             host.Escape += delegate
             {
                 log.WriteLine("# 逃逸键触发");
+                // 放弃路径也必须通知设备侧清状态：接管期间若按着鼠标键/修饰键再逃逸，
+                // 不补发 LEAVE 会让手机侧 buttonsDown 与按键槽位永久残留（leave 才会清）。
+                // 设备侧处理 MSG_LEAVE 时会 buttonsDown=0 并 KeyState.releaseAll。
+                transport.Send(Protocol.EncodeLeave());
                 tracker.AbortTakeover();
                 supp.Release();
                 host.SetStatus("IDLE");
@@ -2355,8 +2754,11 @@ git commit -m "feat: 边界情况 —— 心跳超时、断线解锁、紧急逃
 **产出**：`TAKEOVER` 期间按 PC 键盘，字符出现在**手机上**（而不是 PC 上）。
 
 **Files:**
+- Create: `src/agent/KeyMap.cs`（Ruling 26：`ModifierBit` 放这里，不塞进已 315 行的 `Program.cs`）
 - Modify: `src/agent/Program.cs`
 - Modify: `src/injector/ScancodeMap.java`
+- Modify: `src/injector/KeyState.java`
+- Modify: `src/injector/Injector.java`（Step 3 要补设备侧的 `MSG_LEAVE` 分支——**目前它还是空的**，见下方注意）
 
 **Interfaces:**
 - Consumes: Task 3 的 `Protocol.EncodeKey`、Task 2 的 `UhidDevice.sendKeyboard`
@@ -2376,10 +2778,15 @@ E0 前缀键的写法（示例，按同样方式补齐其余）：
         if (e0) {
             switch (mk) {
                 case 0x1C: return 0x58;   // 小键盘 Enter
-                case 0x1D: return 0xE4;   // 右 Ctrl
+                // ↓ 四个 E0 修饰键必须返回 -1（Task 9 审查 Important #1/#2 + Minor #1 修正）：
+                // 它们是修饰字节里的位，不是按键槽。原表把它们映射成槽位 usage
+                // 0xE4/0xE6/0xE3/0xE7，而那些值**超过了 HID 描述符按键数组的
+                // Usage Maximum（0x65）**，解析器直接丢弃 → 既进不了修饰字节、
+                // 又白占一个槽位（按住右 Ctrl+右 Alt 再按 5 个键，第 6 个会被静默丢）。
+                case 0x1D: return -1;     // 右 Ctrl（修饰位 0x10，由 PC 侧折算）
                 case 0x35: return 0x54;   // 小键盘 /
                 case 0x37: return 0x46;   // PrintScreen
-                case 0x38: return 0xE6;   // 右 Alt
+                case 0x38: return -1;     // 右 Alt（修饰位 0x40，由 PC 侧折算）
                 case 0x47: return 0x4A;   // Home
                 case 0x48: return 0x52;   // Up
                 case 0x49: return 0x4B;   // PgUp
@@ -2390,9 +2797,9 @@ E0 前缀键的写法（示例，按同样方式补齐其余）：
                 case 0x51: return 0x4E;   // PgDn
                 case 0x52: return 0x49;   // Insert
                 case 0x53: return 0x4C;   // Delete
-                case 0x5B: return 0xE3;   // 左 Win
-                case 0x5C: return 0xE7;   // 右 Win
-                case 0x5D: return 0x65;   // Menu
+                case 0x5B: return -1;     // 左 Win（真机左 Win 就是 E0 0x5B！修饰位 0x08）
+                case 0x5C: return -1;     // 右 Win（修饰位 0x80）
+                case 0x5D: return 0x65;   // Menu（0x65 恰在 Usage Max 上，合法）
                 default:   return -1;
             }
         }
@@ -2426,11 +2833,11 @@ E0 前缀键的写法（示例，按同样方式补齐其余）：
 
 - [ ] **Step 2: PC 侧维护修饰键状态**
 
-在 `src/agent/Program.cs` 加：
+**新建 `src/agent/KeyMap.cs`，把下面的 `ModifierBit` 放进这个新文件的 `public static class KeyMap` 里**（Ruling 26：`Program.cs` 已 315 行、红线 360，纯映射不该再往里堆；放独立文件也便于离线测试）。调用点相应写成 `KeyMap.ModifierBit(e.Scancode, e.IsE0)`。新文件需自带 `using`（本方法只用内建类型，`namespace PcKvm` 即可）。
 
 ```csharp
         /// <summary>把 Windows scancode 映射为 HID 修饰位（不是普通键）。返回 0 表示不是修饰键。</summary>
-        static byte ModifierBit(int scancode, bool isE0)
+        public static byte ModifierBit(int scancode, bool isE0)
         {
             int mk = scancode & 0xFF;
             if (!isE0)
@@ -2439,10 +2846,14 @@ E0 前缀键的写法（示例，按同样方式补齐其余）：
                 if (mk == 0x36) return 0x20;   // 右 Shift
                 if (mk == 0x1D) return 0x01;   // 左 Ctrl
                 if (mk == 0x38) return 0x04;   // 左 Alt
-                if (mk == 0x5B) return 0x08;   // 左 Win
+                if (mk == 0x5B) return 0x08;   // 左 Win（历史形态；现代键盘走下面的 E0 分支）
             }
             else
             {
+                // Task 9 审查 Important #1 修正：**真机的左 Win 就是 E0 0x5B**，
+                // 原表只写了非 E0 的 0x5B（死条目）、E0 分支又漏了 0x5B，导致
+                // 按左 Win 时 LGUI 位永不置位 → 手机上左 Win 完全无效。
+                if (mk == 0x5B) return 0x08;   // 左 Win（真机形态 E0 0x5B）
                 if (mk == 0x1D) return 0x10;   // 右 Ctrl
                 if (mk == 0x38) return 0x40;   // 右 Alt
                 if (mk == 0x5C) return 0x80;   // 右 Win
@@ -2477,9 +2888,44 @@ E0 前缀键的写法（示例，按同样方式补齐其余）：
             byte modifiers = 0;
 ```
 
+**声明位置**：必须放在 `int mc = 0, kc = 0;` 那一组旁边（即 `ri.KeyChanged += ...` 订阅**之前**）。`KeyChanged` 处理器会捕获并修改它，而 C# 局部变量不支持前向引用（Task 4 与 Task 7 的 `supp` 都栽在这上面）。
+
+- [ ] **Step 2b: 把滚轮与鼠标键的转发也门控在 TAKEOVER 上（控制方 Ruling 27，必做）**
+
+**这是一个既有缺陷，不是本任务新增的。** Task 4 写 `MouseMoved` 时把滚轮与三个鼠标键的转发放在**状态判定之外**，Task 6 引入状态机时也没有把它们收进去。结果：**在 IDLE 态（也就是用户正常使用 PC 的全部时间）里，每一次点击与每一格滚轮都会被转发到手机**，作用在手机光标停留的位置——用户可能因此误开手机 App、误触按钮，而且完全无法"正常用 PC 而不影响手机"。
+
+键盘那侧 Task 9 已经写对了（`if (tracker.Current != KvmState.Takeover) return;`），鼠标这侧要补齐，让"IDLE 态一个字节都不发给设备"这条不变量对**所有**输入类型成立。
+
+把 `MouseMoved` 处理器末尾那段改为整体包在状态门控里：
+
+```csharp
+                // 滚轮与鼠标键只在接管期转发：IDLE 态用户是在操作 PC，
+                // 此时转发会在手机光标停留处产生误点击/误滚动（既有缺陷，Ruling 27）
+                if (cursor != null && tracker.Current == KvmState.Takeover)
+                {
+                    short wheel = (short)(e.WheelDelta / 120);   // Windows 一格 = 120，HID 一格 = 1
+                    if (wheel != 0) transport.Send(Protocol.EncodeScroll((short)0, wheel));
+
+                    if (e.ButtonFlags != 0)
+                    {
+                        EmitButton(transport, e.ButtonFlags, 0x0001, 1);   // 左
+                        EmitButton(transport, e.ButtonFlags, 0x0004, 2);   // 右
+                        EmitButton(transport, e.ButtonFlags, 0x0010, 3);   // 中
+                    }
+                }
+```
+
+注意：`cursor != null && tracker.Current == KvmState.Takeover` 里的 `cursor != null` 是必需的（未连接时 `cursor` 为 null，`tracker` 的状态机本就不该跑）。改完后 `MouseMoved` 里应当**没有任何**在 IDLE 态发包的路径——请在报告里逐条确认。
+
 **注意**：`modifiers` 被 lambda 捕获并修改，C# 5 下需要它是**局部变量而非字段**（lambda 捕获局部变量是 C# 3 特性，可以）。若编译器报错，改为用一个 `byte[] modifiersBox = new byte[1];` 包装。
 
 - [ ] **Step 3: 设备侧在退出接管时清空按键**
+
+**注意（Task 8 实现者发现，控制方确认）**：这个 `MSG_LEAVE` 分支**目前还不存在**——`Injector.java` 的 `handle()` 结尾仍是注释"`MSG_ENTER` / `MSG_LEAVE` / `MSG_CONFIG` 由后续任务接管"。因此：
+
+- Task 8 在两处**放弃**路径（逃逸键、心跳超时）里补发的 `Protocol.EncodeLeave()` 目前是**空操作**，Ruling 25 的"防手机侧按键残留"意图要**等你这一步落地才真正生效**；
+- 更重要的是：**在那之前，手机侧的 `buttonsDown` 从来没有被清零过**——用户按着鼠标键时无论走哪条路径退出，手机上都会留下一个"按住的键"。所以本步骤不是可选的锦上添花，而是补上一个既有的功能缺口。
+- 协议侧无风险：`payloadLength(MSG_LEAVE)` 早已是 0，PC 发送的 LEAVE 帧能被正确解析、只是被忽略。
 
 在 `Injector.java` 的 `handle` 里给 `MSG_LEAVE` 加分支——**防止修饰键卡在按下态**（这是遥控类软件的经典 bug：接管期间按下 Ctrl，退出时没抬起，之后手机上一直是 Ctrl 生效）：
 
@@ -2550,7 +2996,7 @@ git commit -m "feat: 键盘支持 —— scancode 映射、修饰键状态、退
 
 **未覆盖项（明确留给后续，非遗漏）**：
 
-- **`CONFIG` 消息未接线**：Task 3 定义了它，但 DeviceLauncher/Program 里手机分辨率与边缘配置目前是**硬编码常量**（`2136`/`3200`/`3840`）。这是刻意的——单机单人场景下先跑通，多配置支持属 YAGNI。若后续要支持"手机挂在左侧"或换手机，需接线 `CONFIG`。
+- **`CONFIG` 消息仍未接线（但手机几何不再硬编码）**：Task 3 定义了 `CONFIG`，`DeviceLauncher`/`Program` 里仍不发送它。原本此处写的是"手机分辨率硬编码（2136/3200），属刻意 YAGNI"——**该理由已于 2026-09-21 被实测推翻并由用户裁决撤销**：手机逻辑尺寸随旋转变（实测横屏 3200×2136 与硬编码竖屏 2136×3200 冲突，直接造成"虚拟边界"症状）。现由 **Task 5B** 在运行时从手机读取真实逻辑尺寸并每 2 秒轮询旋转变化。`CONFIG` 消息本身仍不接线（PC 侧边缘几何 `3840/0/1080` 仍是配置常量，PC 显示器不会变），这与"换手机/手机挂左侧"仍属 YAGNI 并不矛盾。
 - **上/下边缘未实现**：Spec 第 3 节的实测几何决定了手机只能挂在双屏的最外侧左右，`EdgeTracker` 只实现 left/right。上下边缘留待有实际需求时再加。
 - **无线（Wi-Fi）传输**：Spec 第 7 节说"先用 USB 跑通，网络问题留到最后"。本计划全程走 adb，无线不在范围内。
 - **`UHID_START` 事件未读取**：阶段一发现不读也能工作。读取它能让设备侧感知就绪/销毁，但非必需。

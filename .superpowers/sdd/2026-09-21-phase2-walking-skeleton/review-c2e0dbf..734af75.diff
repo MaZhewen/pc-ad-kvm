@@ -1,0 +1,380 @@
+# Review package: c2e0dbf..734af75
+
+## Commits
+734af75 feat: 抑制器 —— AttachThreadInput 夺前台 + ClipCursor，零全局钩子
+
+## Files changed
+ src/agent/EdgeTracker.cs |   7 +++
+ src/agent/MessageHost.cs |  38 +++++++++++++++
+ src/agent/Program.cs     |  50 ++++++++++++-------
+ src/agent/Suppressor.cs  | 122 +++++++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 200 insertions(+), 17 deletions(-)
+
+## Diff
+diff --git a/src/agent/EdgeTracker.cs b/src/agent/EdgeTracker.cs
+index dd0aa17..792cfe4 100644
+--- a/src/agent/EdgeTracker.cs
++++ b/src/agent/EdgeTracker.cs
+@@ -44,20 +44,27 @@ namespace PcKvm
+         }
+ 
+         /// <summary>屏幕旋转/尺寸变化时更新手机逻辑尺寸。</summary>
+         public void SetPhoneSize(int w, int h)
+         {
+             if (w <= 0 || h <= 0) return;
+             _phoneW = w;
+             _phoneH = h;
+         }
+ 
++        /// <summary>放弃跨越：回到 IDLE 并解除武装，等待用户把光标移离边缘。</summary>
++        public void AbortTakeover()
++        {
++            Current = KvmState.Idle;
++            Armed = false;
++        }
++
+         /// <summary>IDLE 态下、每次鼠标事件调用。cursorX/Y 为真实光标位置。</summary>
+         public void OnIdleMove(int dx, int dy, int cursorX, int cursorY)
+         {
+             const int SAFE = 12;   // 安全带宽度，防止回来瞬间被弹回去
+ 
+             if (!Armed)
+             {
+                 bool away = _phoneRight
+                     ? cursorX < _edgeX - SAFE
+                     : cursorX > _edgeX + SAFE;
+diff --git a/src/agent/MessageHost.cs b/src/agent/MessageHost.cs
+new file mode 100644
+index 0000000..533aa79
+--- /dev/null
++++ b/src/agent/MessageHost.cs
+@@ -0,0 +1,38 @@
++﻿using System;
++using System.Drawing;
++using System.Windows.Forms;
++
++namespace PcKvm
++{
++    /// <summary>
++    /// 主窗体：Raw Input 的消息宿主、托盘载体，兼作状态指示窗。
++    /// 必须是可见的真实窗口——隐藏窗口无法持有前台，抑制器夺取前台依赖它。
++    /// </summary>
++    class MessageHost : Form
++    {
++        Label _status;
++
++        public MessageHost()
++        {
++            Text = "PC-KVM";
++            FormBorderStyle = FormBorderStyle.None;
++            ShowInTaskbar = false;
++            TopMost = true;
++            StartPosition = FormStartPosition.Manual;
++            Location = new System.Drawing.Point(0, 0);
++            Size = new System.Drawing.Size(220, 28);
++            Opacity = 0.75;
++            BackColor = System.Drawing.Color.DarkSlateBlue;
++
++            _status = new Label();
++            _status.Dock = DockStyle.Fill;
++            _status.ForeColor = System.Drawing.Color.White;
++            _status.Font = new System.Drawing.Font("Consolas", 9f);
++            _status.TextAlign = System.Drawing.ContentAlignment.MiddleCenter;
++            _status.Text = "IDLE";
++            Controls.Add(_status);
++        }
++
++        public void SetStatus(string s) { _status.Text = s; }
++    }
++}
+diff --git a/src/agent/Program.cs b/src/agent/Program.cs
+index 568fa9f..4b88238 100644
+--- a/src/agent/Program.cs
++++ b/src/agent/Program.cs
+@@ -1,70 +1,59 @@
+ ﻿using System;
+ using System.Drawing;
+ using System.IO;
+ using System.Runtime.InteropServices;
+ using System.Windows.Forms;
+ 
+ namespace PcKvm
+ {
+-    /// <summary>隐藏主窗体：只作为 Raw Input 的消息宿主与托盘载体，不显示任何 UI。</summary>
+-    class MessageHost : Form
+-    {
+-        public MessageHost()
+-        {
+-            FormBorderStyle = FormBorderStyle.None;
+-            ShowInTaskbar = false;
+-            WindowState = FormWindowState.Minimized;
+-            Opacity = 0;
+-        }
+-
+-        protected override void SetVisibleCore(bool value)
+-        {
+-            base.SetVisibleCore(false);   // 永不显示
+-        }
+-    }
+-
+     static class Program
+     {
+         static volatile int _phoneW = 0;
+         static volatile int _phoneH = 0;
+         static volatile bool _geometryChanged = false;
+ 
+         [DllImport("user32.dll")]
+         static extern bool GetCursorPos(out POINT p);
+ 
+         [StructLayout(LayoutKind.Sequential)]
+         struct POINT { public int X; public int Y; }
+ 
+         [STAThread]
+         static void Main()
+         {
+             Application.EnableVisualStyles();
+ 
+             MessageHost host = new MessageHost();
+             IntPtr hwnd = host.Handle;   // 触发句柄创建
++            host.Show();   // 必须真实显示，隐藏窗口无法持有前台
+ 
+             RawInput ri = new RawInput(hwnd);
+             ri.Register();
+             if (!RawInput.LastRegisterOk)
+             {
+                 MessageBox.Show("RegisterRawInputDevices 失败, err=" + RawInput.RegisterError
+                     + "\n程序将退出。", "PC-KVM", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                 return;
+             }
+ 
+             StreamWriter log = new StreamWriter(
+                 Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "pc-kvm.log"),
+                 true, System.Text.Encoding.UTF8);
+             log.AutoFlush = true;
+             log.WriteLine("# 启动 " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+ 
++            // supp 必须声明在 log 之后、transport 装配块之前：Task 8 会在
++            // transport.Disconnected 处理器与心跳定时器里调 supp.Release()，
++            // C# 局部变量不能前向引用（Task 4 踩过）。它只依赖 hwnd 与 log。
++            Suppressor supp = new Suppressor(hwnd, delegate(string s) { log.WriteLine(s); });
++
+             // transport 需在 MouseMoved 处理器之前就绪（C# 局部变量在声明点之后才可见）
+             Transport transport = new Transport(DeviceLauncher.Port);
+             if (!transport.Start())
+             {
+                 MessageBox.Show("TCP 端口 " + DeviceLauncher.Port + " 监听失败，程序退出。",
+                     "PC-KVM", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                 return;
+             }
+ 
+             // 阶段骨架：只把事件落到日志，后续任务接管这两个事件
+@@ -75,31 +64,50 @@ namespace PcKvm
+             double sensitivity = 1.0;
+             // 目标机几何：手机挂在 DISPLAY1（1920,0,1920x1080）的右侧。
+             // edgeX 约定 = 触发侧最外侧有效像素列：3840x1080 桌面上光标最远只能到 3839
+             //（Windows 钳制），传 3840 会让入口条件永远不可达。
+             EdgeTracker tracker = new EdgeTracker(
+                 edgeX: 3839, edgeTop: 0, edgeBottom: 1080,
+                 phoneW: 2136, phoneH: 3200, phoneRight: true);   // 占位初值，真值经 SetPhoneSize 灌入
+ 
+             tracker.EnterTakeover += delegate(short px, short py)
+             {
++                // 安全不变量 4：未连接时绝不夺取前台/锁光标——断线后 tracker 已回 IDLE，
++                // 再推边缘会重新进 TAKEOVER，而 Task 8 的心跳恢复在未连接时直接 return，
++                // 救不了"前台被夺+光标被钳"的状态
++                if (!transport.IsConnected)
++                {
++                    log.WriteLine("# 未连接设备，放弃这次跨越");
++                    tracker.AbortTakeover();
++                    return;
++                }
++                if (!supp.Engage())
++                {
++                    // 夺取失败就放弃这次跨越，保持 IDLE，绝不能让用户被困在锁死光标的状态里
++                    tracker.AbortTakeover();
++                    return;
++                }
++                host.SetStatus("TAKEOVER → 手机");
+                 log.WriteLine("# ENTER takeover at phone(" + px + "," + py + ")");
+                 transport.Send(Protocol.EncodeHome());
+                 cursor.Reset();
+                 cursor.SetPosition(px, py);
+                 transport.Send(Protocol.EncodeEnter(px, py));
+             };
+             tracker.LeaveTakeover += delegate
+             {
++                supp.Release();
++                host.SetStatus("IDLE");
+                 log.WriteLine("# LEAVE takeover");
+                 transport.Send(Protocol.EncodeLeave());
+             };
++            supp.ForegroundLost += delegate { tracker.AbortTakeover(); host.SetStatus("IDLE"); };
+ 
+             ri.MouseMoved += delegate(RawMouseEvent e)
+             {
+                 mc++;
+                 if (mc % 50 == 0)
+                     log.WriteLine("MOUSE dx=" + e.Dx + " dy=" + e.Dy
+                         + " btn=0x" + e.ButtonFlags.ToString("X4") + " wheel=" + e.WheelDelta);
+ 
+                 // 未连接时 cursor 为 null：此时绝不能让状态机跑起来，
+                 // 否则推到边缘会触发 EnterTakeover → cursor.Reset() 空引用（异常被
+@@ -204,22 +212,30 @@ namespace PcKvm
+             rotPoll.Start();
+ 
+             NotifyIcon tray = new NotifyIcon();
+             tray.Icon = SystemIcons.Application;
+             tray.Text = "PC-KVM（阶段二骨架）";
+             tray.Visible = true;
+             MenuItem quit = new MenuItem("退出");
+             quit.Click += delegate { Application.Exit(); };
+             tray.ContextMenu = new ContextMenu(new MenuItem[] { quit });
+ 
++            // 前台守卫：前台被抢走（UAC 安全桌面、锁屏等）时立即放弃抑制
++            Timer guard = new Timer();
++            guard.Interval = 250;
++            guard.Tick += delegate { supp.CheckForeground(); };
++            guard.Start();
++
++            host.FormClosing += delegate { supp.Release(); };
+             Application.ApplicationExit += delegate
+             {
++                supp.Release();
+                 log.WriteLine("# 退出");
+                 tray.Visible = false;
+                 transport.Stop();
+                 DeviceLauncher.Cleanup(devProc);
+                 log.Close();
+             };
+ 
+             Application.Run(host);
+         }
+ 
+diff --git a/src/agent/Suppressor.cs b/src/agent/Suppressor.cs
+new file mode 100644
+index 0000000..519e517
+--- /dev/null
++++ b/src/agent/Suppressor.cs
+@@ -0,0 +1,122 @@
++﻿using System;
++using System.Runtime.InteropServices;
++using System.Text;
++using System.Windows.Forms;
++
++namespace PcKvm
++{
++    /// <summary>
++    /// 用"夺取前台"代替全局键盘钩子：Windows 只把键盘发给前台窗口，
++    /// 因此只要本程序的窗口在前台，其它程序就收不到按键。
++    /// 必须用 AttachThreadInput 绕行——朴素 SetForegroundWindow 从后台进程会失败（阶段一实测）。
++    /// </summary>
++    public class Suppressor
++    {
++        [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
++        [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hWnd);
++        [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
++        [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
++        [DllImport("user32.dll")] static extern bool AttachThreadInput(uint attach, uint attachTo, bool fAttach);
++        [DllImport("user32.dll")] static extern bool ClipCursor(ref RECT r);
++        [DllImport("user32.dll")] static extern bool ClipCursor(IntPtr none);
++        [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
++        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
++        static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
++
++        [StructLayout(LayoutKind.Sequential)]
++        struct RECT { public int Left, Top, Right, Bottom; }
++        [StructLayout(LayoutKind.Sequential)]
++        struct POINT { public int X, Y; }
++
++        readonly IntPtr _own;
++        readonly Action<string> _log;
++        IntPtr _prevForeground = IntPtr.Zero;
++
++        public bool IsEngaged { get; private set; }
++        public event Action ForegroundLost;
++
++        public Suppressor(IntPtr ownWindow, Action<string> log)
++        {
++            _own = ownWindow;
++            _log = log;
++        }
++
++        /// <summary>尝试夺取前台并锁定光标。返回 false 表示夺取失败，此时光标未被锁。</summary>
++        public bool Engage()
++        {
++            if (IsEngaged) return true;
++
++            _prevForeground = GetForegroundWindow();
++
++            // 必须在 UI 线程调用：AttachThreadInput 需要的是拥有窗口输入队列的那个线程
++            uint myThread = GetCurrentThreadId();
++            // 注意：C# 5 不支持内联 out 声明（`out uint _` 是 C# 7 语法，本机 csc 4.0.30319
++            // 直接编不过）。必须先声明再传——本计划 Ruling 2 就是在这一行上抓到的。
++            uint fgPid;
++            uint fgThread = GetWindowThreadProcessId(_prevForeground, out fgPid);
++
++            bool attached = false;
++            if (fgThread != 0)
++                attached = AttachThreadInput(myThread, fgThread, true);
++            try
++            {
++                SetForegroundWindow(_own);
++            }
++            finally
++            {
++                if (attached) AttachThreadInput(myThread, fgThread, false);   // 无条件 detach
++            }
++
++            IntPtr now = GetForegroundWindow();
++            if (now != _own)
++            {
++                _log("# 夺取前台失败（前台仍是 " + TitleOf(now) + "），不锁光标");
++                return false;
++            }
++
++            POINT c;
++            GetCursorPos(out c);
++            RECT r;
++            r.Left = c.X; r.Top = c.Y; r.Right = c.X + 1; r.Bottom = c.Y + 1;
++            bool clipped = ClipCursor(ref r);
++            _log(clipped ? "# 抑制已生效" : "# ClipCursor 失败 err=" + Marshal.GetLastWin32Error());
++
++            IsEngaged = true;
++            return true;
++        }
++
++        /// <summary>恢复。ClipCursor 的解除必须在最前面，任何情况下都不能让光标留在锁死状态。</summary>
++        public void Release()
++        {
++            ClipCursor(IntPtr.Zero);
++
++            if (!IsEngaged) return;
++            IsEngaged = false;
++
++            if (_prevForeground != IntPtr.Zero)
++                SetForegroundWindow(_prevForeground);
++            _prevForeground = IntPtr.Zero;
++        }
++
++        /// <summary>由心跳线程定时调用：前台被抢走（UAC 安全桌面、锁屏等）时立即放弃抑制。</summary>
++        public void CheckForeground()
++        {
++            if (!IsEngaged) return;
++            if (GetForegroundWindow() == _own) return;
++
++            _log("# 前台被抢走，强制解除抑制");
++            Release();
++            Action h = ForegroundLost;
++            if (h != null) h();
++        }
++
++        static string TitleOf(IntPtr h)
++        {
++            if (h == IntPtr.Zero) return "(none)";
++            StringBuilder sb = new StringBuilder(256);
++            GetWindowText(h, sb, sb.Capacity);
++            string s = sb.ToString();
++            return s.Length == 0 ? "(untitled)" : s;
++        }
++    }
++}
