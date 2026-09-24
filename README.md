@@ -1,6 +1,7 @@
 # PC-AD-KVM
 
 在 Windows PC 和 Android 手机之间共享鼠标与键盘。鼠标移动到屏幕边缘后进入 Android，向边缘外继续推动即可返回 PC。
+在 Windows 11 和 小米pad 7s pro 上实测可用
 
 ## 特性
 
