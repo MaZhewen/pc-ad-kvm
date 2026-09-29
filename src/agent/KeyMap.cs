@@ -69,4 +69,39 @@
             }
         }
     }
+
+    /// <summary>热键触发后丢弃组合键本身的 Raw Input，直到主键与修饰键都松开。</summary>
+    public sealed class ShortcutKeyGate
+    {
+        bool _active;
+        bool _mainKeyReleased;
+        bool _forwardedOtherKey;
+        int _mainVirtualKey;
+
+        public void Begin(int mainVirtualKey)
+        {
+            _active = true;
+            _mainKeyReleased = false;
+            _forwardedOtherKey = false;
+            _mainVirtualKey = mainVirtualKey;
+        }
+
+        public bool ShouldSuppress(int virtualKey, bool isUp, byte modifiers)
+        {
+            if (!_active) return false;
+            if (isUp && virtualKey == _mainVirtualKey) _mainKeyReleased = true;
+            bool mainKey = virtualKey == _mainVirtualKey;
+            bool modifier = IsModifier(virtualKey);
+            if (!mainKey && !modifier) _forwardedOtherKey = true;
+            bool suppress = mainKey || (modifier && !_forwardedOtherKey);
+            if (_mainKeyReleased && modifiers == 0) _active = false;
+            return suppress;
+        }
+
+        static bool IsModifier(int virtualKey)
+        {
+            return virtualKey == 0x10 || virtualKey == 0x11 || virtualKey == 0x12
+                || (virtualKey >= 0xA0 && virtualKey <= 0xA5);
+        }
+    }
 }

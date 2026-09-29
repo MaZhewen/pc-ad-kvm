@@ -28,6 +28,12 @@ namespace PcKvm
         // 上一次事件后的虚拟光标 x。用来区分「从屏内滑到边界」与「在边界上继续外推」：
         // 前者是到达边界，不应计入外推；后者才是"越过边界"的回程意图。
         int _lastVx;
+        bool _firstPush;
+        bool _movedInward;
+        int _firstPushAt;
+
+        const int RepeatWindowMs = 1200;
+        const int InwardDistance = 12;
 
         /// <summary>回程外推阈值（mickeys）。一格的物理位移约 1 像素，
         /// 40 相当于鼠标移动约 1 厘米——远大于抖动（实测抖动｜增量｜≤ 8），
@@ -36,6 +42,7 @@ namespace PcKvm
 
         public KvmState Current { get; private set; }
         public bool Armed { get; private set; }   // 回程冷却：离开边缘安全带后才重新武装
+        public bool EdgeSwitchEnabled { get; private set; }
 
         public event Action<short, short> EnterTakeover;
         public event Action LeaveTakeover;
@@ -54,6 +61,16 @@ namespace PcKvm
             _phoneRight = phoneRight;
             Current = KvmState.Idle;
             Armed = true;
+            EdgeSwitchEnabled = true;
+        }
+
+        public void SetEdgeSwitchEnabled(bool enabled)
+        {
+            if (EdgeSwitchEnabled == enabled) return;
+            EdgeSwitchEnabled = enabled;
+            Armed = false;
+            _backPush = 0;
+            ResetAttempt();
         }
 
         /// <summary>屏幕旋转/尺寸变化时更新手机逻辑尺寸。</summary>
@@ -62,6 +79,7 @@ namespace PcKvm
             if (w <= 0 || h <= 0) return;
             _phoneW = w;
             _phoneH = h;
+            ResetAttempt();
         }
 
         /// <summary>Screen rotation changes the takeover coordinate system without ending it.</summary>
@@ -70,6 +88,7 @@ namespace PcKvm
             if (Current != KvmState.Takeover) return;
             _lastVx = x;
             _backPush = 0;
+            ResetAttempt();
         }
 
         /// <summary>运行时改变跨越边（阶段三 #2：手机在左/右可配置）。
@@ -85,6 +104,7 @@ namespace PcKvm
             _phoneRight = phoneRight;
             Armed = false;
             _backPush = 0;
+            ResetAttempt();
         }
 
         /// <summary>放弃跨越：回到 IDLE 并解除武装，等待用户把光标移离边缘。</summary>
@@ -93,6 +113,39 @@ namespace PcKvm
             Current = KvmState.Idle;
             Armed = false;
             _backPush = 0;
+            ResetAttempt();
+        }
+
+        void ResetAttempt()
+        {
+            _firstPush = false;
+            _movedInward = false;
+        }
+
+        void ExpireAttempt(int nowMs)
+        {
+            if (_firstPush && unchecked((uint)(nowMs - _firstPushAt)) > RepeatWindowMs)
+            {
+                ResetAttempt();
+                if (Current == KvmState.Takeover) _backPush = 0;
+            }
+        }
+
+        bool CompleteAttempt(int nowMs)
+        {
+            ExpireAttempt(nowMs);
+            if (_firstPush && _movedInward)
+            {
+                ResetAttempt();
+                return true;
+            }
+            if (!_firstPush)
+            {
+                _firstPush = true;
+                _movedInward = false;
+                _firstPushAt = nowMs;
+            }
+            return false;
         }
 
         /// <summary>上一次回程判定所累积的外推量（mickeys），供日志记录。</summary>
@@ -101,7 +154,18 @@ namespace PcKvm
         /// <summary>IDLE 态下、每次鼠标事件调用。cursorX/Y 为真实光标位置。</summary>
         public void OnIdleMove(int dx, int dy, int cursorX, int cursorY)
         {
+            OnIdleMove(dx, dy, cursorX, cursorY, Environment.TickCount);
+        }
+
+        public void OnIdleMove(int dx, int dy, int cursorX, int cursorY, int nowMs)
+        {
+            if (!EdgeSwitchEnabled) return;
             const int SAFE = 12;   // 安全带宽度，防止回来瞬间被弹回去
+
+            ExpireAttempt(nowMs);
+            if (_firstPush && (_phoneRight ? cursorX <= _edgeX - InwardDistance
+                                            : cursorX >= _edgeX + InwardDistance))
+                _movedInward = true;
 
             if (!Armed)
             {
@@ -128,7 +192,18 @@ namespace PcKvm
             }
             if (!atEdge || !pushingOut) return;
 
+            if (!CompleteAttempt(nowMs)) return;
+
+            EnterAt(cursorY);
+        }
+
+        void EnterAt(int cursorY)
+        {
+            ResetAttempt();
+
             // 入屏点用比例映射，保证 PC 边缘顶端 → 手机顶端
+            if (cursorY < _edgeTop) cursorY = _edgeTop;
+            if (cursorY >= _edgeBottom) cursorY = _edgeBottom - 1;
             int span = _edgeBottom - _edgeTop;
             int phoneY = (int)((long)(cursorY - _edgeTop) * _phoneH / span);
             if (phoneY < 0) phoneY = 0;
@@ -152,7 +227,18 @@ namespace PcKvm
         /// 单次增量的符号不足以判定意图，否则入屏瞬间的 -1 抖动就会把用户踢回 PC。</summary>
         public void OnTakeoverMove(int rawDx, int rawDy, int vx, int vy)
         {
+            OnTakeoverMove(rawDx, rawDy, vx, vy, Environment.TickCount);
+        }
+
+        public void OnTakeoverMove(int rawDx, int rawDy, int vx, int vy, int nowMs)
+        {
             if (Current != KvmState.Takeover) return;
+            if (!EdgeSwitchEnabled) return;
+
+            ExpireAttempt(nowMs);
+            if (_firstPush && (_phoneRight ? vx >= InwardDistance
+                                            : vx <= _phoneW - 1 - InwardDistance))
+                _movedInward = true;
 
             bool atEdge = _phoneRight ? vx <= 0 : vx >= _phoneW - 1;
             bool wasAtEdge = _phoneRight ? _lastVx <= 0 : _lastVx >= _phoneW - 1;
@@ -174,10 +260,29 @@ namespace PcKvm
             _backPush += outward;
             if (_backPush < BackPushThreshold) return;
 
+            int completedPush = _backPush;
+            _backPush = 0;
+            if (!CompleteAttempt(nowMs)) return;
+
+            Leave(completedPush);
+        }
+
+        void Leave(int completedPush)
+        {
+            ResetAttempt();
+            _backPush = completedPush;
+
             Current = KvmState.Idle;
             Armed = false;          // 回到 IDLE 后先解除武装，等光标离开安全带
             Action h = LeaveTakeover;
             if (h != null) h();
+        }
+
+        public void ToggleByShortcut(int pcCursorY)
+        {
+            ResetAttempt();
+            if (Current == KvmState.Takeover) Leave(0);
+            else EnterAt(pcCursorY);
         }
     }
 }

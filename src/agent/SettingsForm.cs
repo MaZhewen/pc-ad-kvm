@@ -23,19 +23,28 @@ namespace PcKvm
         readonly RadioButton _left;
         readonly RadioButton _right;
         readonly CheckBox _killAdb;
+        readonly CheckBox _enableEdgeSwitch;
+        readonly TextBox _hotkeyInput;
+        readonly Label _hotkeyError;
+        readonly Func<HotkeyBinding, bool> _trySwitchHotkey;
+        HotkeyBinding _selectedHotkey;
 
         public double MouseSensitivity { get; private set; }
         public bool PhoneOnLeft { get; private set; }
         public bool AllowKillAdb { get; private set; }
+        public bool EnableEdgeSwitch { get; private set; }
+        public HotkeyBinding SwitchHotkey { get; private set; }
 
-        public SettingsForm(Config current)
+        public SettingsForm(Config current, Func<HotkeyBinding, bool> trySwitchHotkey)
         {
+            _trySwitchHotkey = trySwitchHotkey;
+            _selectedHotkey = current.SwitchHotkey;
             Text = "PC-KVM 设置";
             FormBorderStyle = FormBorderStyle.FixedDialog;
             StartPosition = FormStartPosition.CenterScreen;
             MaximizeBox = false;
             MinimizeBox = false;
-            ClientSize = new Size(360, 230);
+            ClientSize = new Size(360, 382);
 
             Label l1 = new Label();
             l1.Text = "手机上的鼠标速度";
@@ -96,23 +105,92 @@ namespace PcKvm
             l3.AutoSize = true;
             Controls.Add(l3);
 
+            _enableEdgeSwitch = new CheckBox();
+            _enableEdgeSwitch.Text = "启用双次贴边切换";
+            _enableEdgeSwitch.Location = new Point(16, 190);
+            _enableEdgeSwitch.AutoSize = true;
+            _enableEdgeSwitch.Checked = current.EnableEdgeSwitch;
+            Controls.Add(_enableEdgeSwitch);
+
+            Label hotkeyLabel = new Label();
+            hotkeyLabel.Text = "切换快捷键（点击输入框后按组合键）";
+            hotkeyLabel.Location = new Point(16, 222);
+            hotkeyLabel.AutoSize = true;
+            Controls.Add(hotkeyLabel);
+
+            _hotkeyInput = new TextBox();
+            _hotkeyInput.ReadOnly = true;
+            _hotkeyInput.Location = new Point(16, 250);
+            _hotkeyInput.Width = 220;
+            _hotkeyInput.Text = _selectedHotkey.ToString();
+            _hotkeyInput.KeyDown += delegate(object sender, KeyEventArgs e)
+            {
+                CaptureShortcut(e.KeyData);
+                e.SuppressKeyPress = true;
+            };
+            _hotkeyInput.PreviewKeyDown += delegate(object sender, PreviewKeyDownEventArgs e)
+            {
+                e.IsInputKey = true;
+            };
+            Controls.Add(_hotkeyInput);
+
+            Label hotkeyHint = new Label();
+            hotkeyHint.Text = "需包含 Ctrl 或 Alt；Esc 保留为紧急退出。";
+            hotkeyHint.ForeColor = SystemColors.GrayText;
+            hotkeyHint.Location = new Point(16, 280);
+            hotkeyHint.AutoSize = true;
+            Controls.Add(hotkeyHint);
+
+            _hotkeyError = new Label();
+            _hotkeyError.ForeColor = Color.Firebrick;
+            _hotkeyError.Location = new Point(16, 306);
+            _hotkeyError.Size = new Size(330, 30);
+            Controls.Add(_hotkeyError);
+
             Button ok = new Button();
             ok.Text = "确定";
-            ok.DialogResult = DialogResult.OK;
-            ok.Location = new Point(180, 190);
-            ok.Click += delegate { ReadBack(); };
+            ok.Location = new Point(180, 342);
+            ok.Click += delegate { if (ReadBack()) DialogResult = DialogResult.OK; };
             Controls.Add(ok);
 
             Button cancel = new Button();
             cancel.Text = "取消";
             cancel.DialogResult = DialogResult.Cancel;
-            cancel.Location = new Point(266, 190);
+            cancel.Location = new Point(266, 342);
             Controls.Add(cancel);
 
             AcceptButton = ok;
             CancelButton = cancel;
 
             OnSpeedChanged();   // 初始显示数值
+        }
+
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            if (_hotkeyInput != null && _hotkeyInput.Focused
+                && (keyData & (Keys.Control | Keys.Alt)) != 0)
+            {
+                CaptureShortcut(keyData);
+                return true;
+            }
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+
+        void CaptureShortcut(Keys keyData)
+        {
+            HotkeyBinding binding;
+            if (HotkeyBinding.TryFromKeyData(keyData, out binding))
+            {
+                _selectedHotkey = binding;
+                _hotkeyInput.Text = binding.ToString();
+                _hotkeyError.Text = "";
+            }
+            else
+            {
+                Keys key = keyData & Keys.KeyCode;
+                if (key != Keys.ControlKey && key != Keys.ShiftKey && key != Keys.Menu)
+                    _hotkeyError.Text = "需包含 Ctrl 或 Alt，且不能使用 Esc。";
+            }
         }
 
         void OnSpeedChanged()
@@ -127,11 +205,20 @@ namespace PcKvm
             _speedValue.Text = ((double)v / 100.0).ToString("F2");
         }
 
-        void ReadBack()
+        bool ReadBack()
         {
+            if (_trySwitchHotkey != null && !_trySwitchHotkey(_selectedHotkey))
+            {
+                _hotkeyError.Text = "快捷键已被占用，请换一个组合。";
+                return false;
+            }
+            _hotkeyError.Text = "";
             MouseSensitivity = (double)_speed.Value / 100.0;
             PhoneOnLeft = _left.Checked;
             AllowKillAdb = _killAdb.Checked;
+            EnableEdgeSwitch = _enableEdgeSwitch.Checked;
+            SwitchHotkey = _selectedHotkey;
+            return true;
         }
     }
 }

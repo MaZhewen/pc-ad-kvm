@@ -33,7 +33,7 @@ namespace PcKvm
         [StructLayout(LayoutKind.Sequential)]
         struct POINT { public int X, Y; }
 
-        readonly IntPtr _own;
+        IntPtr _own;
         readonly Action<string> _log;
         // 抑制状态切换回调（参数 true=抑制生效）。挂在 Engage/Release 这一对唯一入口上，
         // 于是"隐藏 PC 光标"自动覆盖全部七条释放路径，不必在 Program.cs 里逐个补调用
@@ -49,6 +49,7 @@ namespace PcKvm
 
         public bool IsEngaged { get; private set; }
         public event Action ForegroundLost;
+        public IntPtr OwnWindow { get { return _own; } }
 
         public Suppressor(IntPtr ownWindow, Action<string> log, Action<bool> onSuppress,
                           Action showCapture, Action hideCapture)
@@ -58,6 +59,12 @@ namespace PcKvm
             _onSuppress = onSuppress;
             _showCapture = showCapture;
             _hideCapture = hideCapture;
+        }
+
+        public void SetOwnWindow(IntPtr hwnd)
+        {
+            if (IsEngaged) throw new InvalidOperationException("先释放接管才能更换窗口句柄");
+            _own = hwnd;
         }
 
         /// <summary>尝试夺取前台并锁定光标。返回 false 表示夺取失败，此时光标未被锁。</summary>

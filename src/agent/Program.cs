@@ -91,6 +91,7 @@ namespace PcKvm
             // 修饰键位图（HID 键盘报告的 modifier 字节）。必须声明在 KeyChanged 订阅之前：
             // 处理器会捕获并修改它，而 C# 局部变量不支持前向引用（Task 4 与 Task 7 都栽过）
             byte modifiers = 0;
+            ShortcutKeyGate shortcutGate = new ShortcutKeyGate();
             CursorModel cursor = null;
 
             // 速度缩放器（含小数余量累积）。必须声明在 ri.MouseMoved 订阅之前：
@@ -120,6 +121,25 @@ namespace PcKvm
                 edgeX: cfg.PhoneOnLeft ? screenX : screenX + screenW - 1,
                 edgeTop: screenY, edgeBottom: screenY + screenH,
                 phoneW: 2136, phoneH: 3200, phoneRight: !cfg.PhoneOnLeft);
+            tracker.SetEdgeSwitchEnabled(cfg.EnableEdgeSwitch);
+
+            host.HandleDestroying += delegate
+            {
+                if (tracker.Current == KvmState.Takeover)
+                    transport.SendControl(Protocol.EncodeLeave());
+                tracker.AbortTakeover();
+                supp.Release();
+            };
+            host.HandleRecreated += delegate(IntPtr newHandle)
+            {
+                ri.Rebind(newHandle);
+                supp.SetOwnWindow(newHandle);
+                host.InputReady = RawInput.LastRegisterOk;
+                host.SetStatus("IDLE");
+                log.WriteLine(RawInput.LastRegisterOk
+                    ? "# 窗口句柄重建，原始输入与接管窗口已重绑"
+                    : "# 窗口句柄重建后原始输入注册失败，快捷键已停用");
+            };
 
             bool resumeAfterRotation = false;
             Timer rotationTimeout = new Timer();
@@ -220,8 +240,7 @@ namespace PcKvm
                 supp.Release();
                 host.SetStatus("IDLE");
                 transport.SendControl(Protocol.EncodeLeave());
-                // 回程外推累积量：正常回程应 >= 阈值(40)；若日志里出现很小的值，
-                // 说明仍有未被阈值挡住的回程路径
+                // 快捷键回程记 0；贴边回程记第二次外推的实际累积量。
                 log.WriteLine("# LEAVE takeover（回程外推累积 " + tracker.BackPush + "）");
             };
             supp.ForegroundLost += delegate
@@ -306,11 +325,17 @@ namespace PcKvm
                 if (bit != 0)
                 {
                     if (e.IsUp) modifiers &= (byte)~bit; else modifiers |= bit;
+                    if (shortcutGate.ShouldSuppress(e.VirtualKey, e.IsUp, modifiers)) return;
                     // 修饰键变化也要发一条报告，否则手机侧修饰态不更新
                     if (tracker.Current == KvmState.Takeover)
                         transport.Send(Protocol.EncodeKey((ushort)e.Scancode, (byte)(e.IsUp ? 0 : 1), modifiers));
                     return;
                 }
+
+                if (!e.IsUp && host.IsSwitchHotkeyActive
+                    && cfg.SwitchHotkey.MatchesRawKey(e.VirtualKey, modifiers))
+                    shortcutGate.Begin(cfg.SwitchHotkey.VirtualKey);
+                if (shortcutGate.ShouldSuppress(e.VirtualKey, e.IsUp, modifiers)) return;
 
                 if (tracker.Current != KvmState.Takeover) return;   // IDLE 态不转发，PC 正常用
 
@@ -318,6 +343,21 @@ namespace PcKvm
                     (GetKeyState(VK_NUMLOCK) & 1) != 0);
                 if (sendSc == 0) return;
                 transport.Send(Protocol.EncodeKey((ushort)sendSc, (byte)(e.IsUp ? 0 : 1), modifiers));
+            };
+
+            host.ToggleRequested += delegate
+            {
+                if (tracker.Current == KvmState.Idle
+                    && (cursor == null || !transport.IsConnected || !pointer.Ready))
+                {
+                    log.WriteLine("# 快捷键切换跳过：设备尚未就绪");
+                    return;
+                }
+                shortcutGate.Begin(cfg.SwitchHotkey.VirtualKey);
+                POINT p;
+                GetCursorPos(out p);
+                tracker.ToggleByShortcut(p.Y);
+                log.WriteLine("# 快捷键切换至 " + tracker.Current);
             };
 
             string jar = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "pckvm.jar");
@@ -394,8 +434,17 @@ namespace PcKvm
             };
 
             // 托盘与生命周期集中到 TrayUi（Ruling 33）。必须在 Application.Run 之前 Install。
-            TrayUi trayUi = new TrayUi(host, supp, watchers, transport, log, cfg);
+            TrayUi trayUi = new TrayUi(host, supp, watchers, transport, log, cfg,
+                host.TrySetSwitchHotkey);
             trayUi.Install();
+            if (!host.TrySetSwitchHotkey(cfg.SwitchHotkey))
+            {
+                log.WriteLine("# 全局快捷键注册失败：" + cfg.SwitchHotkey);
+                trayUi.Tray.BalloonTipTitle = "PC-KVM 快捷键不可用";
+                trayUi.Tray.BalloonTipText = "快捷键 " + cfg.SwitchHotkey
+                    + " 已被占用。请在设置中选择其他组合。";
+                trayUi.Tray.ShowBalloonTip(5000);
+            }
 
             // 应用设置由组合根订阅处理（TrayUi 只弹对话框+写盘，见其 SettingsApplied 注释）。
             trayUi.SettingsApplied += delegate(Config c)
@@ -412,9 +461,11 @@ namespace PcKvm
                 }
                 tracker.SetEdge(c.PhoneOnLeft ? screenX : screenX + screenW - 1,
                                 screenY, screenY + screenH, !c.PhoneOnLeft);
+                tracker.SetEdgeSwitchEnabled(c.EnableEdgeSwitch);
                 log.WriteLine("# 设置已应用：手机在" + (c.PhoneOnLeft ? "左" : "右")
                               + "侧（edgeX=" + (c.PhoneOnLeft ? screenX : screenX + screenW - 1) + "）"
                               + " 速度=" + c.MouseSensitivity.ToString("F2")
+                              + " 贴边切换=" + c.EnableEdgeSwitch
                               + " 强杀adb=" + c.AllowKillAdb);
             };
 

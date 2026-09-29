@@ -29,7 +29,7 @@ pwsh -File tests\agent-logic\run.ps1
 
 ## `edge-tracker/` — `EdgeTracker` 边缘状态机
 
-编译 `Main.cs` + `src\agent\EdgeTracker.cs` + `src\agent\CursorModel.cs`，**24 条用例**。
+编译 `Main.cs` + `src\agent\EdgeTracker.cs` + `src\agent\CursorModel.cs`，覆盖原有边缘行为及双次贴边切换。
 
 喂事件的方式是刻意还原 `Program.cs` 的接线顺序（先 `CursorModel.NextDx` 更新虚拟光标，
 再把**原始**增量与更新后的坐标交给 tracker），而不是让用例凭空造虚拟光标坐标。
@@ -56,6 +56,8 @@ pwsh -File tests\agent-logic\run.ps1
 | **L4** | 左挂镜像 T11：入口处微小【右】向抖动（`+1`）不得回程——阈值 40 在左挂下同样生效 |
 | **L5a–L5c** | 左挂镜像 T12/T13：「走到边界」不算外推；边界上外推 ≥40 才回程；纯纵向不清零 |
 | **L6a–L6b** | `SetEdge` 换边后立刻解除武装（`armed=false`），防止换边瞬间光标恰在新边缘被弹过去 |
+| **D1–D14** | 双向双次贴边、12 像素离边、1.2 秒窗口、超时清除残余外推、快捷键切换，以及放弃/换边时清除等待状态 |
+| **D15–D20** | 关闭贴边切换后双向均不触发，快捷键仍可进出；重新开启后旧的首次贴边不生效 |
 
 > **为什么没有 `Suppressor`（`ClipCursor`）的 harness**：这是刻意的。一个真去调
 > `ClipCursor` 的测试若中途卡住或崩掉，会让用户面对"鼠标被锁死且找不到原因"——
