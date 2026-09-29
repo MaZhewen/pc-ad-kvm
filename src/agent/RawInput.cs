@@ -15,6 +15,7 @@ namespace PcKvm
     public struct RawKeyEvent
     {
         public int Scancode;   // MakeCode | (E0 ? 0xE000 : 0)
+        public int VirtualKey;
         public bool IsUp;
         public bool IsE0;
     }
@@ -90,6 +91,13 @@ namespace PcKvm
             AssignHandle(hwnd);
         }
 
+        public void Rebind(IntPtr hwnd)
+        {
+            ReleaseHandle();
+            AssignHandle(hwnd);
+            Register();
+        }
+
         /// <summary>注册鼠标与键盘，RIDEV_INPUTSINK 使窗口非焦点时也能收到事件。</summary>
         public void Register()
         {
@@ -147,6 +155,7 @@ namespace PcKvm
                     e.IsUp = (kb.Flags & 0x01) != 0;
                     e.IsE0 = (kb.Flags & 0x02) != 0;
                     e.Scancode = kb.MakeCode | (e.IsE0 ? 0xE000 : 0);
+                    e.VirtualKey = kb.VKey;
                     Action<RawKeyEvent> h = KeyChanged;
                     if (h != null) h(e);
                 }

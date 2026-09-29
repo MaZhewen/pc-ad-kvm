@@ -23,7 +23,7 @@ $sources = $sources | Where-Object { Test-Path $_ }
 if ($sources.Count -lt 2) { throw "待编译的源文件不足" }
 
 Write-Host "编译 PC 侧纯逻辑 harness（$($sources.Count) 个文件）..." -ForegroundColor Cyan
-& $csc -nologo -target:exe -platform:x64 -out:"$out\agent-logic.exe" $sources
+& $csc -nologo -target:exe -platform:x64 -out:"$out\agent-logic.exe" -r:System.Windows.Forms.dll $sources
 if ($LASTEXITCODE -ne 0) { throw "编译失败" }
 
 & "$out\agent-logic.exe"

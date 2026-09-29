@@ -21,6 +21,7 @@ namespace PcKvm
         readonly Transport _transport;
         readonly StreamWriter _log;
         readonly Config _cfg;
+        readonly Func<HotkeyBinding, bool> _trySwitchHotkey;
 
         public NotifyIcon Tray { get; private set; }
 
@@ -30,7 +31,8 @@ namespace PcKvm
         public event Action<Config> SettingsApplied;
 
         public TrayUi(MessageHost host, Suppressor supp, Watchers watchers,
-                      Transport transport, StreamWriter log, Config cfg)
+                      Transport transport, StreamWriter log, Config cfg,
+                      Func<HotkeyBinding, bool> trySwitchHotkey)
         {
             _host = host;
             _supp = supp;
@@ -38,6 +40,7 @@ namespace PcKvm
             _transport = transport;
             _log = log;
             _cfg = cfg;
+            _trySwitchHotkey = trySwitchHotkey;
         }
 
         /// <summary>建托盘、装菜单、订阅生命周期事件。必须在 Application.Run 之前调用。</summary>
@@ -61,15 +64,22 @@ namespace PcKvm
             MenuItem settings = new MenuItem("设置…");
             settings.Click += delegate
             {
-                using (SettingsForm f = new SettingsForm(_cfg))
+                _host.SwitchingEnabled = false;
+                try
                 {
-                    if (f.ShowDialog(_host) != DialogResult.OK) return;
-                    _cfg.MouseSensitivity = f.MouseSensitivity;
-                    _cfg.AllowKillAdb = f.AllowKillAdb;
-                    _cfg.PhoneOnLeft = f.PhoneOnLeft;
-                    if (!_cfg.Save())
-                        _log.WriteLine("# 配置写盘失败（设置本次仍生效，只是下次启动会丢）");
+                    using (SettingsForm f = new SettingsForm(_cfg, _trySwitchHotkey))
+                    {
+                        if (f.ShowDialog(_host) != DialogResult.OK) return;
+                        _cfg.MouseSensitivity = f.MouseSensitivity;
+                        _cfg.AllowKillAdb = f.AllowKillAdb;
+                        _cfg.PhoneOnLeft = f.PhoneOnLeft;
+                        _cfg.EnableEdgeSwitch = f.EnableEdgeSwitch;
+                        _cfg.SwitchHotkey = f.SwitchHotkey;
+                        if (!_cfg.Save())
+                            _log.WriteLine("# 配置写盘失败（设置本次仍生效，只是下次启动会丢）");
+                    }
                 }
+                finally { _host.SwitchingEnabled = true; }
                 Action<Config> h = SettingsApplied;
                 if (h != null) h(_cfg);
             };

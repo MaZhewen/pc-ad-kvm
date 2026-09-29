@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Threading;
+using System.Windows.Forms;
 using PcKvm;
 
 static class AgentLogicTest
@@ -26,7 +27,9 @@ static class AgentLogicTest
         // ---- C1: 空文本 / null → 全默认 ----
         Config c = P("");
         Check("C1 空文本=默认", c.MouseSensitivity == 0.50 && !c.PhoneOnLeft
-            && !c.AllowKillAdb && c.ReconnectSeconds == 5,
+            && !c.AllowKillAdb && c.ReconnectSeconds == 5
+            && c.EnableEdgeSwitch
+            && c.SwitchHotkey.ToString() == "Ctrl+Alt+Space",
             "sens=" + c.MouseSensitivity + " left=" + c.PhoneOnLeft
             + " kill=" + c.AllowKillAdb + " rec=" + c.ReconnectSeconds);
 
@@ -68,6 +71,65 @@ static class AgentLogicTest
         Check("C6 未知键忽略", c.MouseSensitivity == 2.00 && w6.Count == 1,
             "sens=" + c.MouseSensitivity + " warnings=" + w6.Count);
 
+        List<string> shortcutWarnings = new List<string>();
+        Config.Parse("SwitchHotkey=Ctrl+Shift+F12\n", shortcutWarnings);
+        Check("C6b valid shortcut is recognized", shortcutWarnings.Count == 0,
+            "warnings=" + shortcutWarnings.Count);
+        Check("C6c custom shortcut parsed", P("SwitchHotkey=Ctrl+Shift+F12\n")
+            .SwitchHotkey.ToString() == "Ctrl+Shift+F12", "Ctrl+Shift+F12");
+        List<string> invalidShortcutWarnings = new List<string>();
+        Config invalidShortcut = Config.Parse("SwitchHotkey=Shift+F12\n", invalidShortcutWarnings);
+        Check("C6d modifier required", invalidShortcut.SwitchHotkey.ToString() == "Ctrl+Alt+Space"
+            && invalidShortcutWarnings.Count == 1, "warnings=" + invalidShortcutWarnings.Count);
+        Check("C6e emergency shortcut reserved", P("SwitchHotkey=Ctrl+Alt+Escape\n")
+            .SwitchHotkey.ToString() == "Ctrl+Alt+Space", "fallback to default");
+        Check("C6e2 Enter is a valid custom key", P("SwitchHotkey=Ctrl+Alt+Enter\n")
+            .SwitchHotkey.ToString() == "Ctrl+Alt+Enter", "Ctrl+Alt+Enter");
+        HotkeyBinding recorded;
+        bool canRecord = HotkeyBinding.TryFromKeyData(Keys.Control | Keys.Alt | Keys.Enter,
+            out recorded);
+        Check("C6e3 shortcut recorded from key press", canRecord
+            && recorded.ToString() == "Ctrl+Alt+Enter", "recorded=" + (canRecord ? recorded.ToString() : "invalid"));
+
+        Check("C6h edge switch can be disabled", !P("EnableEdgeSwitch=false\n").EnableEdgeSwitch,
+            "disabled in INI");
+        Check("C6i edge switch can be enabled", P("EnableEdgeSwitch=true\n").EnableEdgeSwitch,
+            "enabled in INI");
+        List<string> edgeWarnings = new List<string>();
+        Config invalidEdge = Config.Parse("EnableEdgeSwitch=maybe\n", edgeWarnings);
+        Check("C6j invalid edge option retains enabled default",
+            invalidEdge.EnableEdgeSwitch && edgeWarnings.Count == 1,
+            "warnings=" + edgeWarnings.Count);
+
+        ShortcutKeyGate gate = new ShortcutKeyGate();
+        gate.Begin(0x20);
+        bool heldGate = gate.ShouldSuppress(0x12, true, 0x01)
+            && gate.ShouldSuppress(0x11, true, 0)
+            && gate.ShouldSuppress(0x20, false, 0)
+            && !gate.ShouldSuppress(0x41, false, 0);
+        bool releasedGate = gate.ShouldSuppress(0x20, true, 0)
+            && !gate.ShouldSuppress(0x41, false, 0);
+        Check("C6f shortcut key remains suppressed until main key release",
+            heldGate && releasedGate, "held=" + heldGate + " released=" + releasedGate);
+        ShortcutKeyGate mixedGate = new ShortcutKeyGate();
+        mixedGate.Begin(0x20);
+        bool otherKeyForwarded = !mixedGate.ShouldSuppress(0x41, false, 0x05)
+            && !mixedGate.ShouldSuppress(0x41, true, 0x05);
+        bool modifierReleasesForwarded = mixedGate.ShouldSuppress(0x20, true, 0x05)
+            && !mixedGate.ShouldSuppress(0x11, true, 0x04)
+            && !mixedGate.ShouldSuppress(0x12, true, 0);
+        Check("C6f2 modifiers release after another key uses them",
+            otherKeyForwarded && modifierReleasesForwarded,
+            "other=" + otherKeyForwarded + " releases=" + modifierReleasesForwarded);
+        HotkeyBinding defaultHotkey = HotkeyBinding.Default;
+        Check("C6g hotkey trigger matches exact modifiers",
+            defaultHotkey.MatchesRawKey(0x20, 0x05)
+            && !defaultHotkey.MatchesRawKey(0x20, 0x01)
+            && !defaultHotkey.MatchesRawKey(0x20, 0x07)
+            && !defaultHotkey.MatchesRawKey(0x20, 0x0D)
+            && !defaultHotkey.MatchesRawKey(0x41, 0x05),
+            "Ctrl+Alt+Space only");
+
         // ---- C7: 边界值恰好合法 ----
         Check("C7 边界合法", P("MouseSensitivity=0.10\n").MouseSensitivity == 0.10
             && P("MouseSensitivity=3.00\n").MouseSensitivity == 3.00
@@ -89,12 +151,18 @@ static class AgentLogicTest
         c9.MouseSensitivity = 1.25;
         c9.PhoneOnLeft = true;
         c9.AllowKillAdb = true;
+        c9.EnableEdgeSwitch = false;
         c9.ReconnectSeconds = 12;
+        HotkeyBinding custom;
+        HotkeyBinding.TryParse("Ctrl+Shift+F12", out custom);
+        c9.SwitchHotkey = custom;
         bool saved9 = c9.Save();
         Config c9b = Config.Load(null);
         Check("C9 Save/Load 写回往返", saved9
             && c9b.MouseSensitivity == 1.25 && c9b.PhoneOnLeft
-            && c9b.AllowKillAdb && c9b.ReconnectSeconds == 12,
+            && c9b.AllowKillAdb && c9b.ReconnectSeconds == 12
+            && !c9b.EnableEdgeSwitch
+            && c9b.SwitchHotkey.ToString() == "Ctrl+Shift+F12",
             "saved=" + saved9 + " sens=" + c9b.MouseSensitivity + " left=" + c9b.PhoneOnLeft
             + " kill=" + c9b.AllowKillAdb + " rec=" + c9b.ReconnectSeconds);
 
@@ -110,7 +178,9 @@ static class AgentLogicTest
                 bom10 = n == 3 && head[0] == 0xEF && head[1] == 0xBB && head[2] == 0xBF;
             }
             string text10 = File.ReadAllText(iniPath);
-            keys10 = text10.Contains("MouseSensitivity=1.25") && text10.Contains("PhoneSide=Left");
+            keys10 = text10.Contains("MouseSensitivity=1.25") && text10.Contains("PhoneSide=Left")
+                && text10.Contains("EnableEdgeSwitch=false")
+                && text10.Contains("SwitchHotkey=Ctrl+Shift+F12");
         }
         catch (Exception) { }
         Check("C10 写盘 UTF-8 BOM + 预期键", bom10 && keys10,

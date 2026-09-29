@@ -37,6 +37,34 @@ static class EdgeTest
         t.OnTakeoverMove(dx, dy, c.X, c.Y);
     }
 
+    static void EnterRight(EdgeTracker t, int y)
+    {
+        t.OnIdleMove(5, 0, 3839, y);
+        t.OnIdleMove(-20, 0, 3819, y);
+        t.OnIdleMove(20, 0, 3839, y);
+    }
+
+    static void EnterLeft(EdgeTracker t, int y)
+    {
+        t.OnIdleMove(-5, 0, 0, y);
+        t.OnIdleMove(20, 0, 20, y);
+        t.OnIdleMove(-20, 0, 0, y);
+    }
+
+    static void SecondReturnRight(EdgeTracker t, CursorModel c)
+    {
+        Feed(t, c, 12, 0);
+        Feed(t, c, -12, 0);
+        Feed(t, c, -40, 0);
+    }
+
+    static void SecondReturnLeft(EdgeTracker t, CursorModel c)
+    {
+        Feed(t, c, -12, 0);
+        Feed(t, c, 12, 0);
+        Feed(t, c, 40, 0);
+    }
+
     static void Main()
     {
         // ---- T1: enter + proportional mapping (540 * 2136 / 1080 = 1068); cursorX=3839 为真实可达最大值 ----
@@ -44,7 +72,7 @@ static class EdgeTest
             EdgeTracker t = NewTracker();
             int enterCount = 0; short px = -1, py = -1;
             t.EnterTakeover += delegate(short x, short y) { enterCount++; px = x; py = y; };
-            t.OnIdleMove(5, 0, 3839, 540);
+            EnterRight(t, 540);
             Check("T1", t.Current == KvmState.Takeover && enterCount == 1
                 && px == 0 && py == 1068,
                 "state=" + t.Current + " enterCount=" + enterCount
@@ -56,7 +84,7 @@ static class EdgeTest
             EdgeTracker t = NewTracker();
             short px = -1, py = -1;
             t.EnterTakeover += delegate(short x, short y) { px = x; py = y; };
-            t.OnIdleMove(5, 0, 3839, 0);
+            EnterRight(t, 0);
             Check("T2", t.Current == KvmState.Takeover && px == 0 && py == 0,
                 "state=" + t.Current + " px=" + px + " py=" + py + " (expect Takeover,0,0)");
         }
@@ -66,7 +94,7 @@ static class EdgeTest
             EdgeTracker t = NewTracker();
             short py = -1;
             t.EnterTakeover += delegate(short x, short y) { py = y; };
-            t.OnIdleMove(5, 0, 3839, 1079);
+            EnterRight(t, 1079);
             Check("T3", t.Current == KvmState.Takeover && py >= 2130 && py <= 2135,
                 "state=" + t.Current + " py=" + py + " (expect Takeover, py in [2130,2135])");
         }
@@ -112,14 +140,15 @@ static class EdgeTest
             int enterCount = 0, leaveCount = 0;
             t.EnterTakeover += delegate(short x, short y) { enterCount++; };
             t.LeaveTakeover += delegate { leaveCount++; };
-            t.OnIdleMove(5, 0, 3839, 540);                    // enter at (0,1068)
+            EnterRight(t, 540);                               // enter at (0,1068)
             Feed(t, c, -50, 0);                               // 在边界上决定性地往外推
+            SecondReturnRight(t, c);
             bool leftOk = (t.Current == KvmState.Idle) && leaveCount == 1;
             t.OnIdleMove(5, 0, 3839, 540);                    // still inside 12px safe band [3827,3839]
             bool noReenterOk = (t.Current == KvmState.Idle) && enterCount == 1;
             t.OnIdleMove(5, 0, 3800, 540);                    // leave the band -> re-armed
             bool armedOk = (t.Current == KvmState.Idle) && t.Armed;
-            t.OnIdleMove(5, 0, 3839, 540);                    // re-enter
+            EnterRight(t, 540);                               // re-enter
             bool reenterOk = (t.Current == KvmState.Takeover) && enterCount == 2;
             Check("T7", leftOk && noReenterOk && armedOk && reenterOk,
                 "leave:" + leftOk + " noReenter:" + noReenterOk
@@ -135,7 +164,7 @@ static class EdgeTest
             int leaveCount = 0;
             t.EnterTakeover += delegate(short x, short y) { };
             t.LeaveTakeover += delegate { leaveCount++; };
-            t.OnIdleMove(5, 0, 3839, 540);                    // enter
+            EnterRight(t, 540);                               // enter
             c.SetPosition(100, 1068);
             Feed(t, c, -3, 0);                                // not at adjacent edge
             bool midOk = (t.Current == KvmState.Takeover) && leaveCount == 0;
@@ -156,10 +185,11 @@ static class EdgeTest
             int leaveCount = 0;
             t.EnterTakeover += delegate(short x, short y) { };
             t.LeaveTakeover += delegate { leaveCount++; };
-            t.OnIdleMove(5, 0, 3839, 540);                    // enter, virtual cursor at (0,1068)
+            EnterRight(t, 540);                               // enter, virtual cursor at (0,1068)
             Feed(t, c, -20, 0);                               // 累积 20，未达阈值
             bool notYet = (t.Current == KvmState.Takeover) && leaveCount == 0;
             Feed(t, c, -25, 0);                               // 累积 45 >= 阈值 40
+            SecondReturnRight(t, c);
             Check("T9", notYet && t.Current == KvmState.Idle && leaveCount == 1,
                 "notYet:" + notYet + " state=" + t.Current + " leaveCount=" + leaveCount
                 + " (expect True, Idle, 1)");
@@ -172,7 +202,7 @@ static class EdgeTest
             int leaveCount = 0;
             t.EnterTakeover += delegate(short x, short y) { };
             t.LeaveTakeover += delegate { leaveCount++; };
-            t.OnIdleMove(5, 0, 3839, 540);                    // enter, virtual cursor at (0,1068)
+            EnterRight(t, 540);                               // enter, virtual cursor at (0,1068)
             Feed(t, c, 0, 0);                                 // no pushing intent
             Check("T10", t.Current == KvmState.Takeover && leaveCount == 0,
                 "state=" + t.Current + " leaveCount=" + leaveCount + " (expect Takeover,0)");
@@ -187,7 +217,7 @@ static class EdgeTest
             int leaveCount = 0;
             t.EnterTakeover += delegate(short x, short y) { };
             t.LeaveTakeover += delegate { leaveCount++; };
-            t.OnIdleMove(5, 0, 3839, 540);                    // enter at (0,1068)
+            EnterRight(t, 540);                               // enter at (0,1068)
             Feed(t, c, -1, 0);                                // 抖动
             Feed(t, c, -2, 0);
             Feed(t, c, 1, 0);                                 // 反向 → 光标离开边界
@@ -208,7 +238,7 @@ static class EdgeTest
             int leaveCount = 0;
             t.EnterTakeover += delegate(short x, short y) { };
             t.LeaveTakeover += delegate { leaveCount++; };
-            t.OnIdleMove(5, 0, 3839, 540);
+            EnterRight(t, 540);
             Feed(t, c, 200, 0);                               // 推到 vx=200
             bool movedOk = (t.Current == KvmState.Takeover) && c.X == 200;
             Feed(t, c, -260, 0);                              // 一记大扫把光标直接扫到 0（并越过）
@@ -226,12 +256,13 @@ static class EdgeTest
             int leaveCount = 0;
             t.EnterTakeover += delegate(short x, short y) { };
             t.LeaveTakeover += delegate { leaveCount++; };
-            t.OnIdleMove(5, 0, 3839, 540);
+            EnterRight(t, 540);
             Feed(t, c, 200, 0);                               // vx=200
             Feed(t, c, -260, 0);                              // 扫到 0（不算外推）
             Feed(t, c, -20, 0);                               // 在边界上外推 20
             bool notYet = (t.Current == KvmState.Takeover) && leaveCount == 0;
             Feed(t, c, -25, 0);                               // 累积 45 >= 40
+            SecondReturnRight(t, c);
             Check("T13", notYet && t.Current == KvmState.Idle && leaveCount == 1,
                 "notYet:" + notYet + " state=" + t.Current + " leaveCount=" + leaveCount
                 + " (expect True, Idle, 1)");
@@ -244,7 +275,7 @@ static class EdgeTest
             int leaveCount = 0;
             t.EnterTakeover += delegate(short x, short y) { };
             t.LeaveTakeover += delegate { leaveCount++; };
-            t.OnIdleMove(5, 0, 3839, 540);
+            EnterRight(t, 540);
             Feed(t, c, -30, 0);                               // 边界上累积 30
             Feed(t, c, 5, 0);                                 // 反向：光标离开边界
             Feed(t, c, -5, 0);                                // 走回边界（本事件不算外推）
@@ -262,11 +293,12 @@ static class EdgeTest
             int leaveCount = 0;
             t.EnterTakeover += delegate(short x, short y) { };
             t.LeaveTakeover += delegate { leaveCount++; };
-            t.OnIdleMove(5, 0, 3839, 540);                    // enter at (0,1068)
+            EnterRight(t, 540);                               // enter at (0,1068)
             Feed(t, c, -20, 0);                               // 边界上累积 20
             Feed(t, c, 0, 3);                                 // 纯纵向事件：不得清零
             Feed(t, c, 0, 2);
             Feed(t, c, -25, 0);                               // 20 + 25 = 45 >= 40
+            SecondReturnRight(t, c);
             Check("T15", t.Current == KvmState.Idle && leaveCount == 1,
                 "state=" + t.Current + " leaveCount=" + leaveCount + " (expect Idle,1)");
         }
@@ -277,7 +309,7 @@ static class EdgeTest
             EdgeTracker t = NewTrackerLeft();
             int en = 0; short px = -1, py = -1;
             t.EnterTakeover += delegate(short x, short y) { en++; px = x; py = y; };
-            t.OnIdleMove(-5, 0, 0, 540);          // 在左缘、继续向左推
+            EnterLeft(t, 540);                   // 在左缘、继续向左推
             Check("L1", t.Current == KvmState.Takeover && en == 1 && px == 3199 && py == 1068,
                 "state=" + t.Current + " en=" + en + " px=" + px + " py=" + py
                 + " (expect Takeover,1,3199,1068)");
@@ -312,7 +344,7 @@ static class EdgeTest
             CursorModel c = new CursorModel(3200, 2136);
             int lv = 0;
             t.LeaveTakeover += delegate { lv++; };
-            t.OnIdleMove(-5, 0, 0, 540);            // 进接管，_lastVx = 3199
+            EnterLeft(t, 540);                     // 进接管，_lastVx = 3199
             c.SetPosition(3199, 1068);              // 对齐真实接线：Program.cs 入屏即
                                                     // cursor.Reset()+SetPosition(入屏点)。
                                                     // 右挂用例没显式调它是因为入屏点 x=0
@@ -330,7 +362,7 @@ static class EdgeTest
             CursorModel c = new CursorModel(3200, 2136);
             int lv = 0;
             t.LeaveTakeover += delegate { lv++; };
-            t.OnIdleMove(-5, 0, 0, 540);            // 进接管，vx=3199
+            EnterLeft(t, 540);                     // 进接管，vx=3199
             c.SetPosition(3199, 1068);              // 同 L4：对齐真实接线（入屏即定位到入屏点）
             Feed(t, c, -120, 0);                    // 往屏内走
             Check("L5a", t.Current == KvmState.Takeover && c.X == 3079,
@@ -342,6 +374,7 @@ static class EdgeTest
             Feed(t, c, 20, 0);                      // 在边界上外推 20
             Feed(t, c, 0, 3);                       // 纯纵向事件：既不累积也不清零
             Feed(t, c, 25, 0);                      // 20 + 25 = 45 >= 40
+            SecondReturnLeft(t, c);
             Check("L5c", t.Current == KvmState.Idle && lv == 1,
                 "state=" + t.Current + " leave=" + lv + " (expect Idle,1)");
         }
@@ -349,7 +382,7 @@ static class EdgeTest
         // ---- L6（左挂）: SetEdge 切换后立刻解除武装（防止换边瞬间被弹过去） ----
         {
             EdgeTracker t = NewTracker();
-            t.OnIdleMove(5, 0, 3839, 540);         // 右挂下先进入接管
+            EnterRight(t, 540);                    // 右挂下先进入接管
             Check("L6a", t.Current == KvmState.Takeover, "state=" + t.Current);
             t.AbortTakeover();
             t.SetEdge(0, 0, 1080, false);           // 切成左挂
@@ -365,7 +398,7 @@ static class EdgeTest
         // ---- L7: 旋转后接管状态保留，但旧方向的回程累积必须清除 ----
         {
             EdgeTracker t = NewTrackerLeft();
-            t.OnIdleMove(-5, 0, 0, 540);
+            EnterLeft(t, 540);
             t.OnTakeoverMove(20, 0, 3199, 1068);
             Check("L7a", t.BackPush == 20 && t.Current == KvmState.Takeover,
                 "backPush=" + t.BackPush + " state=" + t.Current);
@@ -382,10 +415,11 @@ static class EdgeTest
             CursorModel c = new CursorModel(1080, 2400);
             int px = -1, py = -1;
             t.EnterTakeover += delegate(short x, short y) { px = x; py = y; c.SetPosition(x, y); };
-            t.OnIdleMove(-5, 0, 0, 540);
+            EnterLeft(t, 540);
             Check("L8a", px == 1079 && py == 1200 && c.X == 1079,
                 "entry=" + px + "," + py + " cursorX=" + c.X);
             t.OnTakeoverMove(40, 0, c.X, c.Y);
+            SecondReturnLeft(t, c);
             Check("L8b", t.Current == KvmState.Idle,
                 "return from real right edge=" + t.Current);
         }
@@ -398,7 +432,7 @@ static class EdgeTest
             CursorModel c = new CursorModel(3200, 2136);
             int entryX = -1;
             t.EnterTakeover += delegate(short x, short y) { entryX = x; c.SetPosition(x, y); };
-            t.OnIdleMove(-5, 0, 0, 540);
+            EnterLeft(t, 540);
             Check("L9a", entryX == 3199 && c.X == 3199,
                 "landscape entry x=" + entryX);
             c.NextDx(-2500);
@@ -407,8 +441,180 @@ static class EdgeTest
             t.OnTakeoverMove(2500, 0, c.X, c.Y);
             c.NextDx(40);
             t.OnTakeoverMove(40, 0, c.X, c.Y);
+            SecondReturnLeft(t, c);
             Check("L9b", t.Current == KvmState.Idle,
                 "landscape return from x=" + c.X + " state=" + t.Current);
+        }
+
+        {
+            EdgeTracker t = NewTracker();
+            int entries = 0;
+            t.EnterTakeover += delegate(short x, short y) { entries++; };
+            t.OnIdleMove(5, 0, 3839, 540);
+            Check("D1 first PC edge push only arms", t.Current == KvmState.Idle && entries == 0,
+                "state=" + t.Current + " entries=" + entries);
+        }
+
+        {
+            EdgeTracker t = NewTracker();
+            t.OnIdleMove(5, 0, 3839, 540, 100);
+            t.OnIdleMove(5, 0, 3839, 540, 200);
+            t.OnIdleMove(-11, 0, 3828, 540, 300);
+            t.OnIdleMove(11, 0, 3839, 540, 400);
+            Check("D2 less than 12 pixels does not rearm", t.Current == KvmState.Idle,
+                "state=" + t.Current);
+            t.OnIdleMove(-12, 0, 3827, 540, 500);
+            t.OnIdleMove(12, 0, 3839, 540, 600);
+            Check("D3 second PC push enters", t.Current == KvmState.Takeover,
+                "state=" + t.Current);
+        }
+
+        {
+            EdgeTracker t = NewTrackerLeft();
+            t.OnIdleMove(-5, 0, 0, 540, 100);
+            t.OnIdleMove(12, 0, 12, 540, 200);
+            t.OnIdleMove(-12, 0, 0, 540, 1301);
+            Check("D4 expired left attempt stays idle", t.Current == KvmState.Idle,
+                "state=" + t.Current);
+            t.OnIdleMove(12, 0, 12, 540, 1400);
+            t.OnIdleMove(-12, 0, 0, 540, 1500);
+            Check("D5 fresh left attempt enters", t.Current == KvmState.Takeover,
+                "state=" + t.Current);
+        }
+
+        {
+            EdgeTracker t = NewTracker();
+            CursorModel c = new CursorModel(3200, 2136);
+            int leaves = 0;
+            t.LeaveTakeover += delegate { leaves++; };
+            EnterRight(t, 540);
+            t.OnTakeoverMove(-40, 0, 0, 1068, 100);
+            Check("D6 first phone push stays", t.Current == KvmState.Takeover && leaves == 0,
+                "state=" + t.Current + " leaves=" + leaves);
+            c.SetPosition(0, 1068);
+            c.NextDx(12); t.OnTakeoverMove(12, 0, c.X, c.Y, 200);
+            c.NextDx(-12); t.OnTakeoverMove(-12, 0, c.X, c.Y, 300);
+            t.OnTakeoverMove(-40, 0, c.X, c.Y, 400);
+            Check("D7 second phone push returns", t.Current == KvmState.Idle && leaves == 1,
+                "state=" + t.Current + " leaves=" + leaves);
+        }
+
+        {
+            EdgeTracker t = NewTrackerLeft();
+            int leaves = 0;
+            t.LeaveTakeover += delegate { leaves++; };
+            EnterLeft(t, 540);
+            t.OnTakeoverMove(40, 0, 3199, 1068, 100);
+            Check("D8 first left phone push stays", t.Current == KvmState.Takeover && leaves == 0,
+                "state=" + t.Current + " leaves=" + leaves);
+            t.OnTakeoverMove(-12, 0, 3187, 1068, 200);
+            t.OnTakeoverMove(12, 0, 3199, 1068, 300);
+            t.OnTakeoverMove(40, 0, 3199, 1068, 400);
+            Check("D9 second left phone push returns", t.Current == KvmState.Idle && leaves == 1,
+                "state=" + t.Current + " leaves=" + leaves);
+        }
+
+        {
+            EdgeTracker t = NewTracker();
+            EnterRight(t, 540);
+            t.OnTakeoverMove(-40, 0, 0, 1068, 100);
+            t.OnTakeoverMove(12, 0, 12, 1068, 200);
+            t.OnTakeoverMove(-12, 0, 0, 1068, 300);
+            t.OnTakeoverMove(-20, 0, 0, 1068, 400);
+            t.OnTakeoverMove(-20, 0, 0, 1068, 1601);
+            t.OnTakeoverMove(12, 0, 12, 1068, 1700);
+            t.OnTakeoverMove(-12, 0, 0, 1068, 1800);
+            t.OnTakeoverMove(-40, 0, 0, 1068, 1900);
+            Check("D9b expired phone attempt discards partial push",
+                t.Current == KvmState.Takeover, "state=" + t.Current);
+        }
+
+        {
+            EdgeTracker t = NewTracker();
+            int entries = 0, leaves = 0;
+            t.EnterTakeover += delegate(short x, short y) { entries++; };
+            t.LeaveTakeover += delegate { leaves++; };
+            t.OnIdleMove(5, 0, 3839, 540);
+            t.ToggleByShortcut(270);
+            Check("D10 shortcut enters without edge sequence", t.Current == KvmState.Takeover && entries == 1,
+                "state=" + t.Current + " entries=" + entries);
+            t.ToggleByShortcut(270);
+            Check("D11 shortcut returns", t.Current == KvmState.Idle && leaves == 1,
+                "state=" + t.Current + " leaves=" + leaves);
+            t.OnIdleMove(-20, 0, 3819, 270);
+            t.OnIdleMove(20, 0, 3839, 270);
+            Check("D12 shortcut clears earlier edge attempt", t.Current == KvmState.Idle,
+                "state=" + t.Current);
+        }
+
+        {
+            EdgeTracker t = NewTracker();
+            t.OnIdleMove(5, 0, 3839, 540, 100);
+            t.AbortTakeover();
+            t.OnIdleMove(-20, 0, 3819, 540, 200);
+            t.OnIdleMove(20, 0, 3839, 540, 300);
+            Check("D13 abort clears pending attempt", t.Current == KvmState.Idle,
+                "state=" + t.Current);
+        }
+
+        {
+            EdgeTracker t = NewTracker();
+            t.OnIdleMove(5, 0, 3839, 540, 100);
+            t.SetEdge(0, 0, 1080, false);
+            t.OnIdleMove(20, 0, 20, 540, 200);
+            t.OnIdleMove(-20, 0, 0, 540, 300);
+            Check("D14 side change clears pending attempt", t.Current == KvmState.Idle,
+                "state=" + t.Current);
+        }
+
+        {
+            EdgeTracker t = NewTracker();
+            t.SetEdgeSwitchEnabled(false);
+            EnterRight(t, 540);
+            Check("D15 disabled PC edge cannot enter", t.Current == KvmState.Idle,
+                "state=" + t.Current);
+            t.ToggleByShortcut(540);
+            Check("D16 shortcut still enters with edge disabled", t.Current == KvmState.Takeover,
+                "state=" + t.Current);
+            t.OnTakeoverMove(-40, 0, 0, 1068, 100);
+            t.OnTakeoverMove(12, 0, 12, 1068, 200);
+            t.OnTakeoverMove(-12, 0, 0, 1068, 300);
+            t.OnTakeoverMove(-40, 0, 0, 1068, 400);
+            Check("D17 disabled phone edge cannot return", t.Current == KvmState.Takeover,
+                "state=" + t.Current);
+            t.ToggleByShortcut(540);
+            Check("D18 shortcut still returns with edge disabled", t.Current == KvmState.Idle,
+                "state=" + t.Current);
+        }
+
+        {
+            EdgeTracker t = NewTrackerLeft();
+            t.SetEdgeSwitchEnabled(false);
+            EnterLeft(t, 540);
+            Check("D18a disabled left PC edge cannot enter", t.Current == KvmState.Idle,
+                "state=" + t.Current);
+            t.ToggleByShortcut(540);
+            t.OnTakeoverMove(40, 0, 3199, 1068, 100);
+            t.OnTakeoverMove(-12, 0, 3187, 1068, 200);
+            t.OnTakeoverMove(12, 0, 3199, 1068, 300);
+            t.OnTakeoverMove(40, 0, 3199, 1068, 400);
+            Check("D18b disabled left phone edge cannot return", t.Current == KvmState.Takeover,
+                "state=" + t.Current);
+        }
+
+        {
+            EdgeTracker t = NewTracker();
+            t.OnIdleMove(5, 0, 3839, 540, 100);
+            t.SetEdgeSwitchEnabled(false);
+            t.SetEdgeSwitchEnabled(true);
+            t.OnIdleMove(-20, 0, 3819, 540, 200);
+            t.OnIdleMove(20, 0, 3839, 540, 300);
+            Check("D19 enabling clears pending edge push", t.Current == KvmState.Idle,
+                "state=" + t.Current);
+            t.OnIdleMove(-20, 0, 3819, 540, 400);
+            t.OnIdleMove(20, 0, 3839, 540, 500);
+            Check("D20 fresh double edge works after enabling", t.Current == KvmState.Takeover,
+                "state=" + t.Current);
         }
 
         Console.WriteLine("TOTAL: pass=" + _pass + " fail=" + _fail);

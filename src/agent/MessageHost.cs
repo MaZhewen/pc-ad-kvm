@@ -11,9 +11,86 @@ namespace PcKvm
     class MessageHost : Form
     {
         int _visibilityEpoch;
+        const int WM_HOTKEY = 0x0312;
+        const uint MOD_NOREPEAT = 0x4000;
+        const int HotkeyIdA = 0x4B56;
+        const int HotkeyIdB = 0x4B57;
+        int _activeHotkeyId;
+        HotkeyBinding _activeHotkey;
+        bool _handleCreatedOnce;
+
+        [DllImport("user32.dll", SetLastError = true)]
+        static extern bool RegisterHotKey(IntPtr hwnd, int id, uint modifiers, uint virtualKey);
+        [DllImport("user32.dll", SetLastError = true)]
+        static extern bool UnregisterHotKey(IntPtr hwnd, int id);
+
+        public event Action ToggleRequested;
+        public event Action HandleDestroying;
+        public event Action<IntPtr> HandleRecreated;
+        public bool IsSwitchHotkeyActive { get { return _activeHotkeyId != 0; } }
+        public bool SwitchingEnabled { get; set; }
+        public bool InputReady { get; set; }
+
+        public bool TrySetSwitchHotkey(HotkeyBinding binding)
+        {
+            if (binding == null) return false;
+            if (_activeHotkeyId != 0 && binding.SameAs(_activeHotkey)) return true;
+            int nextId = _activeHotkeyId == HotkeyIdA ? HotkeyIdB : HotkeyIdA;
+            if (!RegisterHotKey(Handle, nextId, binding.Modifiers | MOD_NOREPEAT,
+                (uint)binding.VirtualKey)) return false;
+            if (_activeHotkeyId != 0) UnregisterHotKey(Handle, _activeHotkeyId);
+            _activeHotkeyId = nextId;
+            _activeHotkey = binding;
+            return true;
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == WM_HOTKEY && m.WParam.ToInt32() == _activeHotkeyId
+                && _activeHotkeyId != 0)
+            {
+                if (SwitchingEnabled && InputReady)
+                {
+                    Action h = ToggleRequested;
+                    if (h != null) h();
+                }
+                return;
+            }
+            base.WndProc(ref m);
+        }
+
+        protected override void OnHandleDestroyed(EventArgs e)
+        {
+            if (!Disposing)
+            {
+                Action h = HandleDestroying;
+                if (h != null) h();
+            }
+            if (_activeHotkeyId != 0)
+            {
+                UnregisterHotKey(Handle, _activeHotkeyId);
+                _activeHotkeyId = 0;
+            }
+            base.OnHandleDestroyed(e);
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            bool recreated = _handleCreatedOnce;
+            _handleCreatedOnce = true;
+            base.OnHandleCreated(e);
+            if (_activeHotkey != null) TrySetSwitchHotkey(_activeHotkey);
+            if (recreated)
+            {
+                Action<IntPtr> h = HandleRecreated;
+                if (h != null) h(Handle);
+            }
+        }
 
         public MessageHost()
         {
+            SwitchingEnabled = true;
+            InputReady = true;
             Text = "PC-KVM";
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
