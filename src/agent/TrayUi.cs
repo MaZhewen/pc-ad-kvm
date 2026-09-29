@@ -18,11 +18,13 @@ namespace PcKvm
         readonly MessageHost _host;
         readonly Suppressor _supp;
         readonly Watchers _watchers;
+        readonly ConnectionCoordinator _connection;
         readonly Transport _transport;
-        readonly StreamWriter _log;
+        readonly TextWriter _log;
         readonly Config _cfg;
         readonly Func<HotkeyBinding, bool> _trySwitchHotkey;
         SettingsForm _settingsDialog;
+        ConnectionForm _connectionDialog;
 
         public NotifyIcon Tray { get; private set; }
 
@@ -31,13 +33,14 @@ namespace PcKvm
         /// 本类只做界面与持久化，不碰运行时状态。</summary>
         public event Action<Config> SettingsApplied;
 
-        public TrayUi(MessageHost host, Suppressor supp, Watchers watchers,
-                      Transport transport, StreamWriter log, Config cfg,
+        public TrayUi(MessageHost host, Suppressor supp, Watchers watchers, ConnectionCoordinator connection,
+                      Transport transport, TextWriter log, Config cfg,
                       Func<HotkeyBinding, bool> trySwitchHotkey)
         {
             _host = host;
             _supp = supp;
             _watchers = watchers;
+            _connection = connection;
             _transport = transport;
             _log = log;
             _cfg = cfg;
@@ -64,25 +67,41 @@ namespace PcKvm
 
             MenuItem settings = new MenuItem("设置…");
             settings.Click += delegate { OpenSettings(); };
-            Tray.DoubleClick += delegate { OpenSettings(); };
+            MenuItem connect = new MenuItem("连接设备…");
+            connect.Click += delegate { OpenConnection(); };
+            Tray.DoubleClick += delegate { OpenConnection(); };
 
             MenuItem quit = new MenuItem("退出");
             quit.Click += delegate { Application.Exit(); };
-            Tray.ContextMenu = new ContextMenu(new MenuItem[] { settings, quit });
+            Tray.ContextMenu = new ContextMenu(new MenuItem[] { connect, settings, quit });
 
             _host.FormClosing += delegate { _supp.Release(); };
             Application.ApplicationExit += delegate
             {
                 // 顺序要紧：先停后台监督（否则它会与 _log.Close() 抢），再释放抑制、收设备。
                 _watchers.Stop();
+                _connection.Stop();
                 _supp.Release();
                 _log.WriteLine("# 退出");
                 Tray.Visible = false;
                 _transport.Stop();
-                // 设备侧进程的所有权在 Watchers（任务 8 起重连会换进程），这里取它当前持有的那个
-                DeviceLauncher.Cleanup(_watchers.DeviceProcess);   // Kill + rm jar + 拆 reverse
                 _log.Close();
             };
+        }
+
+        public void OpenConnection()
+        {
+            ConnectionForm existing = _connectionDialog;
+            if (existing != null && !existing.IsDisposed)
+            {
+                if (existing.WindowState == FormWindowState.Minimized)
+                    existing.WindowState = FormWindowState.Normal;
+                existing.BringToFront(); existing.Activate(); return;
+            }
+            _connectionDialog = new ConnectionForm(_connection, _cfg);
+            _connectionDialog.FormClosed += delegate { _connectionDialog = null; };
+            _connectionDialog.Show();
+            _connectionDialog.BringToFront();
         }
         /// <summary>统一处理托盘菜单、托盘双击、启动与第二次启动发来的设置请求。</summary>
         public void OpenSettings()

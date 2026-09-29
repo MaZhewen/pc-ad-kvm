@@ -35,7 +35,8 @@ public final class AbsoluteSession {
    active=true; send(0);
    // Acknowledge UHID submission, not display presentation. PC also requires
    // sustained outward movement, and never trusts an acknowledgement from an old epoch.
-   out.write(0x0e); out.write(p); out.flush(); return true;
+   byte[] ack=new byte[13]; ack[0]=0x0e; System.arraycopy(p,0,ack,1,12);
+   out.write(ack); out.flush(); return true;
   }
   if(type==0x03) {
    if(active) { int bit=Injector.btnToBit(p[0]&255); if(p[1]!=0) buttons|=bit; else buttons&=~bit; send(0); }

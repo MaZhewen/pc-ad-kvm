@@ -95,10 +95,11 @@ namespace PcKvm
                 return;
             }
 
-            StreamWriter log = new StreamWriter(
+            StreamWriter logFile = new StreamWriter(
                 Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "pc-kvm.log"),
                 true, System.Text.Encoding.UTF8);
-            log.AutoFlush = true;
+            logFile.AutoFlush = true;
+            TextWriter log = TextWriter.Synchronized(logFile);
             log.WriteLine("# 启动 " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
 
             // cfg 必须声明得足够早：后续的 scaler（Task 4）、EdgeTracker 构造（Task 5，
@@ -207,12 +208,31 @@ namespace PcKvm
             // 但 Start() 要等最后才调——过早启动重连监督会抢在首次建隧道之前动手。
             Watchers watchers = new Watchers(transport, tracker, supp, host,
                 delegate(string s) { log.WriteLine(s); });
-            watchers.GeometryQueried += delegate(int w, int h, int rotation)
+            ConnectionCoordinator coordinator = new ConnectionCoordinator(cfg,
+                new AdbClient(cfg.AdbPath.Length > 0 ? cfg.AdbPath : AdbClient.ResolvePath()), transport, pointer,
+                delegate
+                {
+                    transport.SendControl(Protocol.EncodeLeave());
+                    tracker.AbortTakeover();
+                    supp.Release();
+                    modifiers = 0;
+                    numpad.Reset();
+                    shortcutGate.Reset();
+                    try { host.BeginInvoke((MethodInvoker)delegate { host.SetStatus("IDLE"); }); }
+                    catch (Exception) { }
+                }, delegate(string s) { log.WriteLine(s); });
+            watchers.AttachConnection(coordinator);
+            coordinator.SetHealthProbe(delegate { return watchers.HeartbeatHealthy; });
+            long geometryGeneration = -1;
+            watchers.GeometryQueried += delegate(long generation, int w, int h, int rotation)
             {
-                if (w == _phoneW && h == _phoneH && rotation == _phoneRotation) return;
+                if (generation != coordinator.Generation) return;
+                if (generation == geometryGeneration && w == _phoneW && h == _phoneH && rotation == _phoneRotation) return;
                 host.BeginInvoke((MethodInvoker)delegate
                 {
-                    if (w == _phoneW && h == _phoneH && rotation == _phoneRotation) return;
+                    if (generation != coordinator.Generation || !transport.IsConnected) return;
+                    if (generation == geometryGeneration && w == _phoneW && h == _phoneH && rotation == _phoneRotation) return;
+                    geometryGeneration = generation;
                     bool keepTakeover = tracker.Current == KvmState.Takeover && supp.IsEngaged;
                     int oldW = _phoneW, oldH = _phoneH, oldRotation = _phoneRotation;
                     int oldX = cursor == null ? 0 : cursor.X;
@@ -259,7 +279,7 @@ namespace PcKvm
                 // 安全不变量 4：未连接时绝不夺取前台/锁光标——断线后 tracker 已回 IDLE，
                 // 再推边缘会重新进 TAKEOVER，而 Task 8 的心跳恢复在未连接时直接 return，
                 // 救不了"前台被夺+光标被钳"的状态
-                if (!transport.IsConnected || !pointer.Ready)
+                if (!coordinator.IsReady || !transport.IsConnected || !pointer.Ready)
                 {
                     log.WriteLine("# 未连接设备，放弃这次跨越");
                     tracker.AbortTakeover();
@@ -392,7 +412,7 @@ namespace PcKvm
             host.ToggleRequested += delegate
             {
                 if (tracker.Current == KvmState.Idle
-                    && (cursor == null || !transport.IsConnected || !pointer.Ready))
+                    && (cursor == null || !coordinator.IsReady || !transport.IsConnected || !pointer.Ready))
                 {
                     log.WriteLine("# 快捷键切换跳过：设备尚未就绪");
                     return;
@@ -404,37 +424,11 @@ namespace PcKvm
                 log.WriteLine("# 快捷键切换至 " + tracker.Current);
             };
 
-            string jar = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "pckvm.jar");
-            if (!DeviceLauncher.Prepare(jar))
-            {
-                MessageBox.Show("adb 隧道/推送失败。确认手机已连接且 USB 调试已开。",
-                    "PC-KVM", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return;
-            }
-            // 设备侧进程的所有权交给 Watchers：重连会换进程，退出时要 Kill 它。
-            // 这里只负责"第一次拉起来"。
-            watchers.AttachConfig(cfg);
-
             transport.Connected += delegate
             {
                 pointer.Reset();
                 log.WriteLine("# 设备已连接");
-                int dw, dh, rotation;
-                if (DeviceLauncher.QueryDisplay(out dw, out dh, out rotation))
-                {
-                    _phoneW = dw; _phoneH = dh; _phoneRotation = rotation;
-                    log.WriteLine("# 屏幕几何 " + dw + "x" + dh + " rotation=" + rotation);
-                }
-                else
-                {
-                    _phoneW = 2136; _phoneH = 3200; _phoneRotation = 0;   // 查询失败时的保守回退
-                    log.WriteLine("# 屏幕几何查询失败，回退 " + _phoneW + "x" + _phoneH);
-                }
-                tracker.SetPhoneSize(_phoneW, _phoneH);
-                cursor = new CursorModel(_phoneW, _phoneH);
-                pointer.Configure(_phoneW, _phoneH, _phoneRotation);
-                _geometryChanged = false;
-                transport.Send(Protocol.EncodePing(1));
+                cursor = null;
             };
             // 掉线时必须把 tracker 从 TAKEOVER 里拉出来（Task 6 审查 Important）：
             // 只打日志会让 Current 卡在 TAKEOVER、cursor 保持非 null、Armed 不复位，
@@ -442,6 +436,7 @@ namespace PcKvm
             transport.Disconnected += delegate
             {
                 pointer.Reset();
+                cursor = null;
                 log.WriteLine("# 设备已断开");
                 if (tracker.Current == KvmState.Takeover)
                 {
@@ -458,9 +453,7 @@ namespace PcKvm
             };
             transport.MessageReceived += delegate(byte type, byte[] payload)
             {
-                if (type == Protocol.MsgPong)
-                    log.WriteLine("# PONG seq=" + Protocol.GetU32(payload, 0));
-                else if (type == Protocol.MsgPointerReady)
+                if (type == Protocol.MsgPointerReady)
                 {
                     log.WriteLine("# 绝对指针已就绪 epoch=" + Protocol.GetU32(payload, 0));
                     host.BeginInvoke((MethodInvoker)delegate
@@ -478,7 +471,7 @@ namespace PcKvm
             };
 
             // 托盘与生命周期集中到 TrayUi（Ruling 33）。必须在 Application.Run 之前 Install。
-            trayUi = new TrayUi(host, supp, watchers, transport, log, cfg,
+            trayUi = new TrayUi(host, supp, watchers, coordinator, transport, log, cfg,
                 host.TrySetSwitchHotkey);
             trayUi.Install();
             if (!host.TrySetSwitchHotkey(cfg.SwitchHotkey))
@@ -514,14 +507,13 @@ namespace PcKvm
             };
 
             // Subscribe all connection handlers before a fast local injector can connect.
-            if (!watchers.StartDevice())
-                log.WriteLine("# 首次拉起注入器失败（重连监督会继续尝试）");
             watchers.Start();
+            coordinator.Start();
             host.FormClosed += delegate { Application.ExitThread(); };
             // Give every successful first launch visible feedback after startup is ready.
             host.BeginInvoke((MethodInvoker)delegate
             {
-                trayUi.OpenSettings();
+                trayUi.OpenConnection();
             });
             Application.Run();
             instance.Dispose();

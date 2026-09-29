@@ -17,7 +17,9 @@ $sources = @(
     (Join-Path $src 'MouseScaler.cs'),
     (Join-Path $src 'KeyMap.cs'),
     (Join-Path $src 'NumpadTranslator.cs'),
-    (Join-Path $src 'DeviceLauncher.cs')
+    (Join-Path $src 'DeviceLauncher.cs'),
+    (Join-Path $src 'AdbClient.cs'),
+    (Join-Path $src 'AdbDevice.cs')
 )
 $sources = $sources | Where-Object { Test-Path $_ }
 if ($sources.Count -lt 2) { throw "待编译的源文件不足" }

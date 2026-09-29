@@ -4,6 +4,10 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.io.RandomAccessFile;
+import java.nio.channels.FileLock;
+import java.nio.channels.OverlappingFileLockException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class Injector {
 
@@ -22,17 +26,9 @@ public class Injector {
             return;
         }
 
-        System.out.println("INJECTOR start");
-        UhidDevice dev;
-        try {
-            dev = new UhidDevice("PC-KVM Keyboard", HidDescriptor.keyboardOnly());
-        } catch (Exception e) {
-            System.out.println("INJECTOR FAIL open /dev/uhid: " + e);
-            return;
-        }
-        System.out.println("INJECTOR ready");
-
-        // 连不上就重试：PC 端可能比我们先起好，也可能刚重连
+        if (args.length != 2 || !"--session".equals(args[0]))
+            throw new IllegalArgumentException("A session token is required");
+        byte[] token = SessionLink.parseToken(args[1]);
         Socket sock = null;
         for (int i = 0; i < 100 && sock == null; i++) {
             try {
@@ -40,47 +36,67 @@ public class Injector {
                 sock.connect(new InetSocketAddress("127.0.0.1", PORT), 1000);
                 sock.setTcpNoDelay(true);
             } catch (Exception e) {
+                if (sock != null) try { sock.close(); } catch (Exception ignored) { }
                 sock = null;
                 Thread.sleep(100);
             }
         }
-        if (sock == null) {
-            System.out.println("INJECTOR FAIL cannot connect to PC");
-            dev.close();
-            return;
-        }
-        System.out.println("INJECTOR connected");
-
-        AbsoluteSession pointer;
+        if (sock == null) throw new IllegalStateException("Cannot connect to PC reverse tunnel");
+        SessionLink link = null;
+        UhidDevice dev = null;
+        AbsoluteSession pointer = null;
+        RandomAccessFile lockFile = null;
+        FileLock processLock = null;
+        final AtomicBoolean finished = new AtomicBoolean(false);
         try {
+            SessionLink.handshake(sock, token);
+            link = new SessionLink(sock);
+            link.start();
+            final SessionLink observed = link;
+            Thread shutdownGuard = new Thread(new Runnable() { public void run() {
+                while (!finished.get() && observed.isAlive()) {
+                    try { Thread.sleep(100); } catch (InterruptedException e) { return; }
+                }
+                if (finished.get()) return;
+                try { Thread.sleep(1000); } catch (InterruptedException e) { return; }
+                if (!finished.get()) Runtime.getRuntime().halt(0);
+            } }, "pckvm-shutdown-guard");
+            shutdownGuard.setDaemon(true);
+            shutdownGuard.start();
+
+            lockFile = new RandomAccessFile("/data/local/tmp/pckvm.lock", "rw");
+            long lockDeadline = System.nanoTime() + 20000000000L;
+            while (processLock == null && link.isAlive() && System.nanoTime() < lockDeadline) {
+                try { processLock = lockFile.getChannel().tryLock(); }
+                catch (OverlappingFileLockException busy) { /* previous session in same process */ }
+                if (processLock == null) Thread.sleep(50);
+            }
+            if (processLock == null || !link.isAlive()) throw new IllegalStateException("Injector lock unavailable");
+            dev = new UhidDevice("PC-KVM Keyboard", HidDescriptor.keyboardOnly());
             pointer = new AbsoluteSession();
-        } catch (Exception e) {
-            System.out.println("INJECTOR FAIL absolute mouse setup: " + e);
-            e.printStackTrace(System.out);
-            dev.close();
-            sock.close();
-            return;
-        }
-        InputStream in = sock.getInputStream();
-        OutputStream out = sock.getOutputStream();
-
-        try {
-            while (true) {
-                int type = in.read();
-                if (type < 0) break;
-                int plen = payloadLength(type);
-                if (plen < 0) break;
-                byte[] p = new byte[plen];
-                if (plen > 0 && !readExact(in, p, plen)) break;
-                if (!pointer.handle(type, p, out)) handle(dev, out, (byte) type, p);
+            OutputStream out = link.output();
+            link.activate();
+            SessionLink.Frame frame;
+            while (link.isAlive()) {
+                frame = link.poll();
+                if (frame == null) continue;
+                if (!pointer.handle(frame.type, frame.payload, out))
+                    handle(dev, out, (byte)frame.type, frame.payload);
             }
         } catch (Exception e) {
             System.out.println("INJECTOR loop end: " + e);
+        } finally {
+            if (link != null) link.close();
+            else try { sock.close(); } catch (Exception ignored) { }
+            // Every release step is independent: a failed UHID report must not skip FD closure.
+            buttonsDown = 0;
+            if (dev != null) try { KeyState.releaseAll(dev); } catch (Exception ignored) { }
+            if (pointer != null) try { pointer.close(); } catch (Exception ignored) { }
+            if (dev != null) try { dev.close(); } catch (Exception ignored) { }
+            if (processLock != null) try { processLock.release(); } catch (Exception ignored) { }
+            if (lockFile != null) try { lockFile.close(); } catch (Exception ignored) { }
+            finished.set(true);
         }
-
-        pointer.close();
-        dev.close();
-        sock.close();
         System.out.println("INJECTOR exit");
     }
 

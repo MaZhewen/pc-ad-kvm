@@ -30,20 +30,9 @@ if ($newest.LastWriteTime -gt (Get-Item $jar).LastWriteTime) {
 Write-Host ("pckvm.jar 新鲜度 OK（{0:N0} 字节）" -f (Get-Item $jar).Length) -ForegroundColor Green
 
 $exePath = Join-Path $dist 'pc-kvm.exe'
-$running = @(Get-Process -Name 'pc-kvm' -ErrorAction SilentlyContinue)
+$running = @(Get-Process -Name 'pc-kvm' -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exePath })
 if ($running.Count -gt 0) {
-    # Force-ending a takeover process can leave the system cursor clipped.
-    if (-not ('PcKvmBuildCursorRecovery' -as [type])) {
-        Add-Type -TypeDefinition 'public static class PcKvmBuildCursorRecovery { [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool ClipCursor(System.IntPtr rect); }'
-    }
-    foreach ($old in $running) {
-        Write-Host "结束旧版 PC-KVM 进程 PID=$($old.Id)..." -ForegroundColor Yellow
-        Stop-Process -Id $old.Id -Force -ErrorAction Stop
-        if (-not $old.WaitForExit(5000)) { throw "旧版 PC-KVM 进程仍在运行: PID=$($old.Id)" }
-    }
-    if (-not [PcKvmBuildCursorRecovery]::ClipCursor([IntPtr]::Zero)) {
-        throw '旧版已退出，但解除鼠标限制失败'
-    }
+    throw '请先从托盘正常退出当前构建目录中的 PC-KVM，再重新构建。'
 }
 
 Write-Host "编译 $($sources.Count) 个源文件..." -ForegroundColor Cyan
