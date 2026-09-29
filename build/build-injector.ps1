@@ -38,6 +38,8 @@ Move-Item $zip $jar
 # 每次启动与每轮重连都会推）。所以每次构建都必须刷新它。
 # 2026-09-23 教训：设备侧改了源码却只跑了 build-agent.ps1，而那个脚本是从 %TEMP% 拷 jar 的，
 # 于是"构建成功"但手机拿到的还是旧 jar，缺陷照旧。
+$dist = Join-Path $root 'dist'
+if (-not (Test-Path $dist)) { New-Item -ItemType Directory -Path $dist -Force | Out-Null }
 Copy-Item $jar (Join-Path $root 'dist\pckvm.jar') -Force
 Write-Host "已刷新 dist\pckvm.jar" -ForegroundColor Green
 

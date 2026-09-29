@@ -9,6 +9,12 @@ class PointerTests {
   Check(q.Take()[1]==3 && q.Take()[0]==3 && q.Take()[1]==4,"click preserves preceding and following position order");
   for(int i=0;i<4;i++) Check(q.Add(new byte[]{5}),"bounded queue accepts capacity");
   Check(!q.Add(new byte[]{5}),"overflow explicitly fails instead of dropping keys");
+  q.Clear();
+  q.Add(Protocol.EncodeGeometry(7,3200,2136,90));
+  q.Add(Protocol.EncodePointer(7,1,100,100));
+  q.AddControl(Protocol.EncodeLeave());
+  Check(q.Count==2 && q.Take()[0]==Protocol.MsgLeave && q.Take()[0]==Protocol.MsgGeometry,
+        "leave preserves pending geometry but drops stale pointer");
   var p=new PointerSession(delegate(byte[] b){}); p.Configure(3200,2136,90);
   Check(!p.Ready,"not ready before geometry ack");
   p.Receive(13,new byte[]{1,0,0,0}); Check(p.Ready,"matching geometry ack");

@@ -41,7 +41,7 @@ namespace PcKvm
         public event Action LeaveTakeover;
 
         /// <summary>phoneW/phoneH 为占位初值（竖屏 2136x3200），非权威常量；
-        /// 真值在连接后首次鼠标移动、及每次旋转变化时经 SetPhoneSize 灌入（Task 5B 几何轮询）。
+        /// 真值在设备连接时、及每次旋转变化时经 SetPhoneSize 灌入（Task 5B 几何轮询）。
         /// edgeX 约定：触发侧最外侧有效像素列的 x（右挂传桌面宽-1，左挂传 0），见字段注释。</summary>
         public EdgeTracker(int edgeX, int edgeTop, int edgeBottom,
                            int phoneW, int phoneH, bool phoneRight)

@@ -16,9 +16,9 @@ $sources = @(
     (Join-Path $src 'Config.cs'),
     (Join-Path $src 'MouseScaler.cs'),
     (Join-Path $src 'KeyMap.cs'),
+    (Join-Path $src 'NumpadTranslator.cs'),
     (Join-Path $src 'DeviceLauncher.cs')
 )
-# 尚不存在的源文件先跳过（本任务只测 Config；后续任务逐个补上）
 $sources = $sources | Where-Object { Test-Path $_ }
 if ($sources.Count -lt 2) { throw "待编译的源文件不足" }
 

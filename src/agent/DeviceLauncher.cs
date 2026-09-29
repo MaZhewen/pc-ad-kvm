@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using System.IO;
+using System.Text;
+using System.Threading;
 
 namespace PcKvm
 {
@@ -110,73 +112,82 @@ namespace PcKvm
         /// </summary>
         public static bool KillAllAdb()
         {
-            try
-            {
-                ProcessStartInfo psi = new ProcessStartInfo();
-                psi.FileName = "taskkill";
-                psi.Arguments = "/F /IM adb.exe";
-                psi.UseShellExecute = false;
-                psi.RedirectStandardOutput = true;
-                psi.RedirectStandardError = true;
-                psi.CreateNoWindow = true;
-                Process p = Process.Start(psi);
-                p.StandardOutput.ReadToEnd();
-                p.StandardError.ReadToEnd();
-                p.WaitForExit(5000);
-            }
-            catch (System.Exception)
-            {
-                return false;
-            }
+            string ignored;
+            RunCommand("taskkill", "/F /IM adb.exe", out ignored);
             return RunAdb("start-server") == 0;
         }
 
         static int RunAdb(string args)
         {
-            ProcessStartInfo psi = new ProcessStartInfo();
-            psi.FileName = "adb";
-            psi.Arguments = args;
-            psi.UseShellExecute = false;
-            psi.RedirectStandardOutput = true;
-            psi.RedirectStandardError = true;
-            psi.CreateNoWindow = true;
-            try
-            {
-                Process p = Process.Start(psi);
-                p.StandardOutput.ReadToEnd();
-                p.StandardError.ReadToEnd();
-                p.WaitForExit(5000);
-                return p.ExitCode;
-            }
-            catch (System.Exception)
-            {
-                return -1;
-            }
+            string ignored;
+            return RunCommand("adb", args, out ignored);
         }
 
         /// <summary>跑 adb 并把 stdout 取回。返回退出码；失败返回 -1。</summary>
         static int RunAdbCapture(string args, out string stdout)
         {
+            return RunCommand("adb", args, out stdout);
+        }
+
+        /// <summary>Bound the command and drain both pipes while it runs.</summary>
+        static int RunCommand(string fileName, string args, out string stdout)
+        {
             stdout = "";
             ProcessStartInfo psi = new ProcessStartInfo();
-            psi.FileName = "adb";
+            psi.FileName = fileName;
             psi.Arguments = args;
             psi.UseShellExecute = false;
             psi.RedirectStandardOutput = true;
             psi.RedirectStandardError = true;
             psi.CreateNoWindow = true;
+            Process p = null;
+            using (ManualResetEvent outClosed = new ManualResetEvent(false))
+            using (ManualResetEvent errClosed = new ManualResetEvent(false))
             try
             {
-                Process p = Process.Start(psi);
-                stdout = p.StandardOutput.ReadToEnd();
-                p.StandardError.ReadToEnd();
-                p.WaitForExit(5000);
+                Stopwatch watch = Stopwatch.StartNew();
+                StringBuilder output = new StringBuilder();
+                p = Process.Start(psi);
+                p.OutputDataReceived += delegate(object sender, DataReceivedEventArgs e)
+                {
+                    if (e.Data == null)
+                    {
+                        try { outClosed.Set(); } catch (System.ObjectDisposedException) { }
+                    }
+                    else output.AppendLine(e.Data);
+                };
+                p.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs e)
+                {
+                    if (e.Data == null)
+                    {
+                        try { errClosed.Set(); } catch (System.ObjectDisposedException) { }
+                    }
+                };
+                p.BeginOutputReadLine();
+                p.BeginErrorReadLine();
+                if (!p.WaitForExit(Remaining(watch))) return -1;
+                if (!outClosed.WaitOne(Remaining(watch)) || !errClosed.WaitOne(Remaining(watch))) return -1;
+                stdout = output.ToString();
                 return p.ExitCode;
             }
             catch (System.Exception)
             {
                 return -1;
             }
+            finally
+            {
+                if (p != null)
+                {
+                    try { if (!p.HasExited) p.Kill(); } catch (System.Exception) { }
+                    p.Dispose();
+                }
+            }
+        }
+
+        static int Remaining(Stopwatch watch)
+        {
+            long left = 5000 - watch.ElapsedMilliseconds;
+            return left > 0 ? (int)left : 0;
         }
 
         /// <summary>读取手机当前逻辑屏幕尺寸（已按旋转换算）。失败返回 false，且不改动 out。</summary>
@@ -192,7 +203,7 @@ namespace PcKvm
             w = 0; h = 0; rotation = -1;
             string outp;
             if (RunAdbCapture("shell \"wm size; dumpsys window displays 2>/dev/null"
-                              + " | grep -o mRotation=[A-Z0-9_]* | head -1\"", out outp) != 0)
+                              + " | grep 'Display{#0 '\"", out outp) != 0)
                 return false;
             return ParseDisplaySize(outp, out w, out h, out rotation);
         }
@@ -212,6 +223,8 @@ namespace PcKvm
             int ow = 0, oh = 0;      // Override size 优先
             int pw = 0, ph = 0;      // Physical size 兜底
             int rot = -1;
+            int mainRotation = -1;
+            bool mainDisplaySeen = false;
 
             string[] lines = adbOutput.Replace("\r", "").Split('\n');
             for (int i = 0; i < lines.Length; i++)
@@ -223,10 +236,22 @@ namespace PcKvm
                     ParseWxH(s.Substring(14), ref pw, ref ph);
                 else if (s.StartsWith("mRotation="))
                     rot = ParseRotation(s.Substring(10));
+                else if (s.Contains("Display{#0 "))
+                {
+                    mainDisplaySeen = true;
+                    int start = s.IndexOf("ROTATION_", System.StringComparison.Ordinal);
+                    if (start >= 0)
+                    {
+                        int end = s.IndexOfAny(new char[] { ' ', '}' }, start);
+                        mainRotation = ParseRotation(s.Substring(start,
+                            end < 0 ? s.Length - start : end - start));
+                    }
+                }
             }
 
             int baseW = ow > 0 ? ow : pw;
             int baseH = ow > 0 ? oh : ph;
+            if (mainDisplaySeen) rot = mainRotation;
             if (baseW <= 0 || baseH <= 0 || rot < 0) return false;
             if (rot == 90 || rot == 270) { w = baseH; h = baseW; }
             else { w = baseW; h = baseH; }

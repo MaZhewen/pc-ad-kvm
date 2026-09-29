@@ -14,8 +14,14 @@ namespace PcKvm {
    _items.AddLast(frame); return true;
   }
   public bool AddControl(byte[] frame) {
+   byte[] pendingGeometry=null;
+   if(frame[0]==Protocol.MsgLeave && _capacity>=2) {
+    for(var node=_items.First;node!=null;node=node.Next)
+     if(node.Value[0]==Protocol.MsgGeometry) pendingGeometry=node.Value;
+   }
    _items.Clear();
    _items.AddLast(frame);
+   if(pendingGeometry!=null) _items.AddLast(pendingGeometry);
    return true;
   }
   public byte[] Take() { if(_items.First==null) return null; var f=_items.First.Value; _items.RemoveFirst(); return f; }

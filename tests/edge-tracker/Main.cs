@@ -374,6 +374,43 @@ static class EdgeTest
                 "backPush=" + t.BackPush + " state=" + t.Current);
         }
 
+        // Connection setup must replace the placeholder phone dimensions before
+        // the first edge crossing. A narrower phone exposed the original bug.
+        {
+            EdgeTracker t = NewTrackerLeft();
+            t.SetPhoneSize(1080, 2400);
+            CursorModel c = new CursorModel(1080, 2400);
+            int px = -1, py = -1;
+            t.EnterTakeover += delegate(short x, short y) { px = x; py = y; c.SetPosition(x, y); };
+            t.OnIdleMove(-5, 0, 0, 540);
+            Check("L8a", px == 1079 && py == 1200 && c.X == 1079,
+                "entry=" + px + "," + py + " cursorX=" + c.X);
+            t.OnTakeoverMove(40, 0, c.X, c.Y);
+            Check("L8b", t.Current == KvmState.Idle,
+                "return from real right edge=" + t.Current);
+        }
+
+        // The connected phone's main display is landscape 3200x2136. Its
+        // right edge must be reachable and allow an outward return to the PC.
+        {
+            EdgeTracker t = NewTrackerLeft();
+            t.SetPhoneSize(3200, 2136);
+            CursorModel c = new CursorModel(3200, 2136);
+            int entryX = -1;
+            t.EnterTakeover += delegate(short x, short y) { entryX = x; c.SetPosition(x, y); };
+            t.OnIdleMove(-5, 0, 0, 540);
+            Check("L9a", entryX == 3199 && c.X == 3199,
+                "landscape entry x=" + entryX);
+            c.NextDx(-2500);
+            t.OnTakeoverMove(-2500, 0, c.X, c.Y);
+            c.NextDx(2500);
+            t.OnTakeoverMove(2500, 0, c.X, c.Y);
+            c.NextDx(40);
+            t.OnTakeoverMove(40, 0, c.X, c.Y);
+            Check("L9b", t.Current == KvmState.Idle,
+                "landscape return from x=" + c.X + " state=" + t.Current);
+        }
+
         Console.WriteLine("TOTAL: pass=" + _pass + " fail=" + _fail);
         if (_fail > 0) Environment.Exit(1);
     }

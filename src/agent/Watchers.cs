@@ -76,7 +76,6 @@ namespace PcKvm
             // 放隔壁才能让"放弃序列"只有一处需要维护。
             _host.Escape += delegate
             {
-                _log("# 逃逸键触发");
                 // 放弃路径也必须通知设备侧清状态：接管期间若按着鼠标键/修饰键再逃逸，
                 // 不补发 LEAVE 会让手机侧 buttonsDown 与按键槽位永久残留（leave 才会清）。
                 // 设备侧处理 MSG_LEAVE 时会 buttonsDown=0 并 KeyState.releaseAll。
@@ -84,6 +83,7 @@ namespace PcKvm
                 _tracker.AbortTakeover();
                 _supp.Release();
                 _host.SetStatus("IDLE");
+                _log("# 逃逸键触发");
             };
         }
 
@@ -163,13 +163,13 @@ namespace PcKvm
                     System.Threading.Interlocked.Read(ref _lastPongTicks))).TotalSeconds;
                 if (!_transport.IsConnected || age > 2.0)
                 {
-                    _log("# 心跳失联（" + age.ToString("F1") + "s, connected="
-                         + _transport.IsConnected + "），强制解除抑制");
                     // 放弃路径要通知设备侧清 buttonsDown/按键槽位（Ruling 25）；连接已断时 Send 是安全 no-op
                     _transport.SendControl(Protocol.EncodeLeave());
                     _tracker.AbortTakeover();
                     _supp.Release();
                     _host.SetStatus("IDLE");
+                    _log("# 心跳失联（" + age.ToString("F1") + "s, connected="
+                         + _transport.IsConnected + "），强制解除抑制");
                 }
             }
 

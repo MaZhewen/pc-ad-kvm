@@ -86,8 +86,8 @@ namespace PcKvm
             log.WriteLine("# TCP 监听 127.0.0.1:" + transport.ListeningPort
                 + (transport.ListeningPort != DeviceLauncher.Port ? "（默认端口被占用，已自动切换）" : ""));
 
-            // 阶段骨架：只把事件落到日志，后续任务接管这两个事件
-            int mc = 0, kc = 0;
+            // 鼠标采样计数仅用于低频状态日志。
+            int mc = 0;
             // 修饰键位图（HID 键盘报告的 modifier 字节）。必须声明在 KeyChanged 订阅之前：
             // 处理器会捕获并修改它，而 C# 局部变量不支持前向引用（Task 4 与 Task 7 都栽过）
             byte modifiers = 0;
@@ -96,6 +96,7 @@ namespace PcKvm
             // 速度缩放器（含小数余量累积）。必须声明在 ri.MouseMoved 订阅之前：
             // 处理器会捕获它，而 C# 局部变量不支持前向引用（Task 4/7 都栽过）
             MouseScaler scaler = new MouseScaler(cfg.MouseSensitivity);
+            NumpadTranslator numpad = new NumpadTranslator();
             // 入口边**运行时**从真实虚拟桌面推导，不写魔数：写死 3839 时，
             // 换一套显示器布局会让入口条件永远不可达——正是 Task 6 审查栽过的静默 bug。
             // edgeX 约定 = 触发侧最外侧"有效像素列"：右侧取 X+W-1（Windows 把光标钳在最后一列内），
@@ -129,11 +130,11 @@ namespace PcKvm
                 if (!resumeAfterRotation) return;
                 resumeAfterRotation = false;
                 if (tracker.Current != KvmState.Takeover) return;
-                log.WriteLine("# 旋转后指针未就绪，安全退出接管");
                 transport.SendControl(Protocol.EncodeLeave());
                 tracker.AbortTakeover();
                 supp.Release();
                 host.SetStatus("IDLE");
+                log.WriteLine("# 旋转后指针未就绪，安全退出接管");
             };
 
             // 后台守护集中到 Watchers（Ruling 26 的抽取，见该类头注释的线程纪律）。
@@ -207,20 +208,21 @@ namespace PcKvm
                     return;
                 }
                 host.SetStatus("TAKEOVER → 手机");
-                log.WriteLine("# ENTER takeover at phone(" + px + "," + py + ")");
                 cursor.Reset();
                 cursor.SetPosition(px, py);
                 scaler.Reset();   // 归零的同时清掉小数余量，避免带着跨越前的零头
+                numpad.Reset();
                 pointer.Begin(px, py);
+                log.WriteLine("# ENTER takeover at phone(" + px + "," + py + ")");
             };
             tracker.LeaveTakeover += delegate
             {
                 supp.Release();
                 host.SetStatus("IDLE");
+                transport.SendControl(Protocol.EncodeLeave());
                 // 回程外推累积量：正常回程应 >= 阈值(40)；若日志里出现很小的值，
                 // 说明仍有未被阈值挡住的回程路径
                 log.WriteLine("# LEAVE takeover（回程外推累积 " + tracker.BackPush + "）");
-                transport.SendControl(Protocol.EncodeLeave());
             };
             supp.ForegroundLost += delegate
             {
@@ -300,13 +302,6 @@ namespace PcKvm
             };
             ri.KeyChanged += delegate(RawKeyEvent e)
             {
-                kc++;
-                // 末尾的 numlock 位决定小键盘行为，而它来自"读操作系统"：读到过期值时症状是
-                // "怎么切 numlock 都不出数字"，本行是唯一能一眼分辨的仪器（2026-09-23 教训）。
-                log.WriteLine("KEY scancode=0x" + e.Scancode.ToString("X")
-                    + (e.IsUp ? " UP" : " DOWN")
-                    + (e.IsE0 ? "" : " numlock=" + (GetKeyState(VK_NUMLOCK) & 1)));
-
                 byte bit = KeyMap.ModifierBit(e.Scancode, e.IsE0);
                 if (bit != 0)
                 {
@@ -319,18 +314,9 @@ namespace PcKvm
 
                 if (tracker.Current != KvmState.Takeover) return;   // IDLE 态不转发，PC 正常用
 
-                // NumLock 关时把数字键盘普通码翻成 E0 形态（#5）。上面日志已经打过**原始**
-                // scancode——日志必须记录真实观测，不能记录翻译后的值。
-                int sendSc = e.Scancode;
-                if (!e.IsE0)
-                {
-                    if ((GetKeyState(VK_NUMLOCK) & 1) == 0)
-                    {
-                        int nav = KeyMap.NumpadNavE0Scancode(sendSc & 0xFF);
-                        if (nav == 0) return;        // 小键盘 5 在 NumLock 关时 = Clear，丢弃
-                        if (nav > 0) { sendSc = nav; log.WriteLine("# 小键盘翻成 0x" + nav.ToString("X") + "（NumLock 关）"); }
-                    }
-                }
+                int sendSc = numpad.Translate(e.Scancode, e.IsUp,
+                    (GetKeyState(VK_NUMLOCK) & 1) != 0);
+                if (sendSc == 0) return;
                 transport.Send(Protocol.EncodeKey((ushort)sendSc, (byte)(e.IsUp ? 0 : 1), modifiers));
             };
 
@@ -360,6 +346,7 @@ namespace PcKvm
                     _phoneW = 2136; _phoneH = 3200; _phoneRotation = 0;   // 查询失败时的保守回退
                     log.WriteLine("# 屏幕几何查询失败，回退 " + _phoneW + "x" + _phoneH);
                 }
+                tracker.SetPhoneSize(_phoneW, _phoneH);
                 cursor = new CursorModel(_phoneW, _phoneH);
                 pointer.Configure(_phoneW, _phoneH, _phoneRotation);
                 _geometryChanged = false;

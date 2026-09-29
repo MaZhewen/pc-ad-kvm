@@ -212,6 +212,18 @@ static class AgentLogicTest
             "ModifierBit(0x2A, isE0=false) = 0x" + KeyMap.ModifierBit(0x2A, false).ToString("X2")
             + "（期望 0x02）");
 
+        // NumLock can change while a physical keypad key is held. Its release
+        // must use the same usage that its press sent to Android.
+        NumpadTranslator translator = new NumpadTranslator();
+        bool stableMapping = translator.Translate(0x47, false, true) == 0x47
+            && translator.Translate(0x47, true, false) == 0x47
+            && translator.Translate(0x47, false, false) == 0xE047
+            && translator.Translate(0x47, true, true) == 0xE047;
+        bool clearMapping = translator.Translate(0x4C, false, false) == 0
+            && translator.Translate(0x4C, true, true) == 0;
+        Check("N6 NumLock 切换不改变已按下键的松开码", stableMapping, "按下与松开使用相同 scancode");
+        Check("N7 Clear 不产生孤立松开事件", clearMapping, "NumLock 关时的小键盘 5 完整忽略");
+
         // ---- D1（判别性用例）: `adb devices` 只有表头 → 绝不能误判成"有设备" ----
         // 表头行 "List of devices attached" 含有 "devices" 字样，任何 naive 的
         // Contains("device") 粗判都会把空列表判成"有设备"——而断联自愈的整条
@@ -239,6 +251,20 @@ static class AgentLogicTest
         Check("D5 null/空串=不可见",
             !DeviceLauncher.ParseDeviceVisible(null) && !DeviceLauncher.ParseDeviceVisible(""),
             "null 与 \"\" 都应 false 且不抛");
+
+        // Some phones report a secondary display before display #0. The first
+        // mRotation belongs to that display, not to the phone's main screen.
+        int displayW, displayH, displayRotation;
+        bool landscape = DeviceLauncher.ParseDisplaySize(
+            "Physical size: 2136x3200\n"
+            + "mRotation=ROTATION_0\n"
+            + "mDisplayContent=Display{#27 state=ON size=750x750 ROTATION_0}\n"
+            + "mDisplayContent=Display{#0 state=OFF size=3200x2136 ROTATION_270}\n",
+            out displayW, out displayH, out displayRotation);
+        Check("D6 横屏使用主屏方向",
+            landscape && displayW == 3200 && displayH == 2136 && displayRotation == 270,
+            "主屏应为 3200x2136 rotation=270，实际 " + displayW + "x" + displayH
+                + " rotation=" + displayRotation);
 
         Console.WriteLine("TOTAL: pass=" + _pass + " fail=" + _fail);
         if (_fail > 0) Environment.Exit(1);
