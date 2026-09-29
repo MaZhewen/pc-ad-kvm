@@ -1,7 +1,8 @@
-﻿using System;
+using System;
 using System.Drawing;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Security.Principal;
 using System.Windows.Forms;
 
 namespace PcKvm
@@ -37,8 +38,51 @@ namespace PcKvm
         {
             Application.EnableVisualStyles();
 
+            string userSuffix;
+            using (WindowsIdentity identity = WindowsIdentity.GetCurrent())
+            {
+                userSuffix = identity.User == null
+                    ? Environment.UserName.Replace('\\', '_').Replace('/', '_')
+                    : identity.User.Value;
+            }
+            string mutexName = @"Local\PC-KVM-" + userSuffix + "-Instance";
+            string eventName = @"Local\PC-KVM-" + userSuffix + "-OpenSettings";
+            string acknowledgmentName = @"Local\PC-KVM-" + userSuffix + "-SettingsHandled";
+            string requestGateName = @"Local\PC-KVM-" + userSuffix + "-SettingsRequestGate";
+            SingleInstanceGuard instance;
+            try
+            {
+                if (!SingleInstanceGuard.TryAcquire(mutexName, eventName, acknowledgmentName, requestGateName, out instance))
+                {
+                    if (SingleInstanceGuard.RequestSettings(eventName, acknowledgmentName, requestGateName, 10000))
+                        return;
+
+                    // The primary may have exited while this process was signaling it.
+                    if (!SingleInstanceGuard.TryAcquire(mutexName, eventName, acknowledgmentName, requestGateName, out instance))
+                    {
+                        MessageBox.Show("PC-KVM 已在运行，但无法联系现有实例。请检查系统托盘，或稍后重试。",
+                            "PC-KVM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("PC-KVM 无法确认运行实例状态：\n" + ex.Message,
+                    "PC-KVM", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
             MessageHost host = new MessageHost();
             IntPtr hwnd = host.Handle;   // 触发句柄创建
+            TrayUi trayUi = null;
+            // Register before device setup so launches during slow startup are retained.
+            instance.Listen(host, delegate
+            {
+                if (trayUi == null) return;
+                instance.AcknowledgeSettingsRequest();
+                trayUi.OpenSettings();
+            });
             host.Show();
             host.Hide();   // 空闲时不遮挡 PC；接管前再显示以持有前台
 
@@ -434,7 +478,7 @@ namespace PcKvm
             };
 
             // 托盘与生命周期集中到 TrayUi（Ruling 33）。必须在 Application.Run 之前 Install。
-            TrayUi trayUi = new TrayUi(host, supp, watchers, transport, log, cfg,
+            trayUi = new TrayUi(host, supp, watchers, transport, log, cfg,
                 host.TrySetSwitchHotkey);
             trayUi.Install();
             if (!host.TrySetSwitchHotkey(cfg.SwitchHotkey))
@@ -474,7 +518,13 @@ namespace PcKvm
                 log.WriteLine("# 首次拉起注入器失败（重连监督会继续尝试）");
             watchers.Start();
             host.FormClosed += delegate { Application.ExitThread(); };
+            // Give every successful first launch visible feedback after startup is ready.
+            host.BeginInvoke((MethodInvoker)delegate
+            {
+                trayUi.OpenSettings();
+            });
             Application.Run();
+            instance.Dispose();
         }
 
         /// <summary>把 Windows 的 down/up 位对翻译成协议的单次按钮事件。</summary>

@@ -1,4 +1,5 @@
 using System;
+using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using PcKvm;
@@ -13,8 +14,24 @@ class HostTest {
  [DllImport("user32.dll")] static extern bool PostMessage(IntPtr hwnd,uint message,IntPtr wParam,IntPtr lParam);
  static void Check(bool okay,string name) { if(!okay) throw new Exception(name); Console.WriteLine("PASS "+name); }
  static T FindControl<T>(Control parent,string caption) where T:Control {
-  foreach(Control control in parent.Controls) if(control is T && control.Text==caption) return (T)control;
+  foreach(Control control in parent.Controls) {
+   if(control is T && (control.Name==caption || control.Text==caption)) return (T)control;
+   T nested=FindControl<T>(control,caption);
+   if(nested!=null) return nested;
+  }
   return null;
+ }
+ static T FindFirstControl<T>(Control parent) where T:Control {
+  foreach(Control control in parent.Controls) {
+   if(control is T) return (T)control;
+   T nested=FindFirstControl<T>(control);
+   if(nested!=null) return nested;
+  }
+  return null;
+ }
+ static System.Drawing.Rectangle BoundsIn(Control ancestor,Control control) {
+  System.Drawing.Point location=ancestor.PointToClient(control.Parent.PointToScreen(control.Location));
+  return new System.Drawing.Rectangle(location,control.Size);
  }
  [STAThread] static int Main() {
   try {
@@ -26,11 +43,51 @@ class HostTest {
     Check(edge!=null && !edge.Checked,"Settings shows disabled edge switching");
     edge.Checked=true;
     Button okay=FindControl<Button>(form,"确定");
+    Button cancel=FindControl<Button>(form,"取消");
     Check(okay!=null,"Settings has confirm button");
+    Check(cancel!=null,"Settings has cancel button");
+    Panel recovery=FindControl<Panel>(form,"断联恢复");
+    Panel speed=FindControl<Panel>(form,"鼠标速度");
+    Panel position=FindControl<Panel>(form,"手机位置");
+    Panel switching=FindControl<Panel>(form,"切换方式");
+    Panel viewport=FindControl<Panel>(form,"SettingsContentViewport");
+    TrackBar slider=FindFirstControl<TrackBar>(form);
+    Check(form.BackColor==Color.FromArgb(244,247,251),"Settings uses a light blue-gray canvas");
+    Check(form.Font.Name=="Microsoft YaHei UI","Settings uses a sans-serif Chinese UI font");
+    Label speedHeading=FindControl<Label>(form,"鼠标速度");
+    Check(speedHeading!=null && speedHeading.Font.Name=="Microsoft YaHei UI",
+     "Settings card headings use the sans-serif UI font");
+    Check(speed!=null && speed.BackColor==Color.White,"Settings uses white section cards");
+    Check(okay.FlatStyle==FlatStyle.Flat && okay.BackColor==Color.FromArgb(37,99,235),
+     "Settings confirm button uses the blue primary style");
+    Check(slider!=null && slider.TickStyle==TickStyle.None,"Settings slider hides redundant ticks");
+    Check(recovery!=null && speed!=null && position!=null && switching!=null,"Settings has all sections");
     form.Show(); Application.DoEvents();
+    System.Drawing.Rectangle confirmBounds=BoundsIn(form,okay);
+    System.Drawing.Rectangle recoveryBounds=BoundsIn(form,recovery);
+    System.Drawing.Rectangle cancelBounds=BoundsIn(form,cancel);
+    Check(form.ClientRectangle.Contains(confirmBounds),"Settings confirm button fits in dialog");
+    Check(form.ClientRectangle.Contains(cancelBounds),"Settings cancel button fits in dialog");
+    Check(viewport!=null && viewport.AutoScroll,"Settings content can scroll while the footer stays fixed");
+    Check(form.ClientRectangle.Contains(BoundsIn(form,speed)),"Settings speed section fits in dialog");
+    Check(form.ClientRectangle.Contains(BoundsIn(form,position)),"Settings phone-position section fits in dialog");
+    Check(form.ClientRectangle.Contains(BoundsIn(form,switching)),"Settings switching section fits in dialog");
+    Check(form.ClientRectangle.Contains(recoveryBounds),"Settings recovery section fits in dialog");
+    Check(viewport!=null && viewport.ClientRectangle.Contains(BoundsIn(viewport,recovery)),
+     "Settings recovery section is visible above the fixed footer");
     okay.PerformClick();
     Application.DoEvents();
     Check(form.EnableEdgeSwitch,"Settings reads enabled edge option");
+    setting.MouseSensitivity=form.MouseSensitivity;
+    setting.PhoneOnLeft=form.PhoneOnLeft;
+    setting.AllowKillAdb=form.AllowKillAdb;
+    setting.EnableEdgeSwitch=form.EnableEdgeSwitch;
+    setting.SwitchHotkey=form.SwitchHotkey;
+    Check(setting.Save(),"confirmed settings save to INI");
+    Config saved=Config.Load(null);
+    Check(saved.EnableEdgeSwitch && saved.MouseSensitivity==form.MouseSensitivity
+     && saved.PhoneOnLeft==form.PhoneOnLeft && saved.AllowKillAdb==form.AllowKillAdb
+     && saved.SwitchHotkey.ToString()==form.SwitchHotkey.ToString(),"saved settings reload from INI");
    }
    using(RecreatedHost host=new RecreatedHost()) {
     IntPtr hwnd=host.Handle;

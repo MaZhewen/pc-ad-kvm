@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Drawing;
 using System.IO;
 using System.Windows.Forms;
@@ -22,6 +22,7 @@ namespace PcKvm
         readonly StreamWriter _log;
         readonly Config _cfg;
         readonly Func<HotkeyBinding, bool> _trySwitchHotkey;
+        SettingsForm _settingsDialog;
 
         public NotifyIcon Tray { get; private set; }
 
@@ -62,27 +63,9 @@ namespace PcKvm
             Tray.Visible = true;
 
             MenuItem settings = new MenuItem("设置…");
-            settings.Click += delegate
-            {
-                _host.SwitchingEnabled = false;
-                try
-                {
-                    using (SettingsForm f = new SettingsForm(_cfg, _trySwitchHotkey))
-                    {
-                        if (f.ShowDialog(_host) != DialogResult.OK) return;
-                        _cfg.MouseSensitivity = f.MouseSensitivity;
-                        _cfg.AllowKillAdb = f.AllowKillAdb;
-                        _cfg.PhoneOnLeft = f.PhoneOnLeft;
-                        _cfg.EnableEdgeSwitch = f.EnableEdgeSwitch;
-                        _cfg.SwitchHotkey = f.SwitchHotkey;
-                        if (!_cfg.Save())
-                            _log.WriteLine("# 配置写盘失败（设置本次仍生效，只是下次启动会丢）");
-                    }
-                }
-                finally { _host.SwitchingEnabled = true; }
-                Action<Config> h = SettingsApplied;
-                if (h != null) h(_cfg);
-            };
+            settings.Click += delegate { OpenSettings(); };
+            Tray.DoubleClick += delegate { OpenSettings(); };
+
             MenuItem quit = new MenuItem("退出");
             quit.Click += delegate { Application.Exit(); };
             Tray.ContextMenu = new ContextMenu(new MenuItem[] { settings, quit });
@@ -100,6 +83,48 @@ namespace PcKvm
                 DeviceLauncher.Cleanup(_watchers.DeviceProcess);   // Kill + rm jar + 拆 reverse
                 _log.Close();
             };
+        }
+        /// <summary>统一处理托盘菜单、托盘双击、启动与第二次启动发来的设置请求。</summary>
+        public void OpenSettings()
+        {
+            SettingsForm existing = _settingsDialog;
+            if (existing != null && !existing.IsDisposed)
+            {
+                if (existing.WindowState == FormWindowState.Minimized)
+                    existing.WindowState = FormWindowState.Normal;
+                existing.BringToFront();
+                existing.Activate();
+                return;
+            }
+
+            _host.SwitchingEnabled = false;
+            SettingsForm form = null;
+            DialogResult result = DialogResult.Cancel;
+            try
+            {
+                form = new SettingsForm(_cfg, _trySwitchHotkey);
+                _settingsDialog = form;
+                result = form.ShowDialog(_host);
+                if (result != DialogResult.OK) return;
+
+                _cfg.MouseSensitivity = form.MouseSensitivity;
+                _cfg.AllowKillAdb = form.AllowKillAdb;
+                _cfg.PhoneOnLeft = form.PhoneOnLeft;
+                _cfg.EnableEdgeSwitch = form.EnableEdgeSwitch;
+                _cfg.SwitchHotkey = form.SwitchHotkey;
+                if (!_cfg.Save())
+                    _log.WriteLine("# 配置写盘失败（设置本次仍生效，只是下次启动会丢）");
+            }
+            finally
+            {
+                if (Object.ReferenceEquals(_settingsDialog, form))
+                    _settingsDialog = null;
+                if (form != null) form.Dispose();
+                _host.SwitchingEnabled = true;
+            }
+
+            Action<Config> h = SettingsApplied;
+            if (h != null) h(_cfg);
         }
     }
 }
