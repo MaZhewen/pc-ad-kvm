@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Net;
-using System.Diagnostics;
 using System.Threading;
 using System.Windows.Forms;
 
@@ -13,136 +12,245 @@ namespace PcKvm
         sealed class DeviceChoice
         {
             public readonly string Serial;
-            public readonly bool Wireless;
             public readonly string Label;
-            public DeviceChoice(string serial, bool wireless, string label)
-            { Serial = serial; Wireless = wireless; Label = label; }
+            public DeviceChoice(string serial, string label) { Serial = serial; Label = label; }
             public override string ToString() { return Label; }
         }
 
+        static readonly Color Canvas = Color.FromArgb(244, 247, 251);
+        static readonly Color Ink = Color.FromArgb(35, 48, 68);
+        static readonly Color Muted = Color.FromArgb(104, 119, 139);
+        static readonly Color Blue = Color.FromArgb(37, 99, 235);
         readonly ConnectionCoordinator _connection;
-        readonly Config _config;
-        readonly ComboBox _mode, _devices, _endpoint;
-        readonly TextBox _pairIp, _pairCode;
-        readonly ComboBox _pairPort;
-        readonly Label _status, _hint, _adbInfo;
-        readonly Button _scanButton, _cancelScanButton, _pairButton, _findPairPortButton;
+        readonly ComboBox _mode, _devices;
+        readonly TextBox _endpoint, _pairIp, _pairPort, _pairCode;
+        readonly Button _pairButton;
+        readonly Label _status, _adbInfo;
         List<AdbDevice> _knownDevices = new List<AdbDevice>();
         bool _refreshing;
-        CancellationTokenSource _scanCancel;
-        int _scanEpoch;
-        CancellationTokenSource _pairLookupCancel;
-        int _pairLookupEpoch;
-        string _lastPairIp = "";
         bool _pairJustCompleted;
-        readonly int _scanTimeoutMs;
+        string _lastPairIp = "";
 
-        public ConnectionForm(ConnectionCoordinator connection, Config config) : this(connection, config, 180000) { }
+        public event EventHandler OpenSettingsRequested;
 
-        internal ConnectionForm(ConnectionCoordinator connection, Config config, int scanTimeoutMs)
+        public ConnectionForm(ConnectionCoordinator connection, Config config)
         {
-            if (scanTimeoutMs < 1) throw new ArgumentOutOfRangeException("scanTimeoutMs");
-            _scanTimeoutMs = scanTimeoutMs;
-            _connection = connection; _config = config;
+            _connection = connection;
             Text = "PC-KVM · 连接设备";
-            ClientSize = new Size(560, 420);
-            MinimumSize = new Size(560, 430);
             StartPosition = FormStartPosition.CenterScreen;
-            Font = new Font("Microsoft YaHei UI", 9F);
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
+            MinimizeBox = false;
+            AutoScaleMode = AutoScaleMode.Font;
+            Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
+            BackColor = Canvas;
+            ForeColor = Ink;
+            Screen screen = Screen.FromPoint(Cursor.Position);
+            int clientHeight = Math.Max(460, Math.Min(610, screen.WorkingArea.Height - 48));
+            ClientSize = new Size(560, clientHeight);
 
-            AddLabel("连接方式", 20, 20, 90);
-            _mode = new ComboBox { Name = "ConnectionMode", Left = 115, Top = 17, Width = 180, DropDownStyle = ComboBoxStyle.DropDownList };
-            _mode.Items.Add("USB"); _mode.Items.Add("无线调试 (Android 11+)");
+            TableLayoutPanel root = new TableLayoutPanel();
+            root.Dock = DockStyle.Fill;
+            root.ColumnCount = 1;
+            root.RowCount = 3;
+            root.Padding = new Padding(16);
+            root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 46F));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 44F));
+            root.BackColor = Canvas;
+
+            Panel viewport = new Panel();
+            viewport.Name = "ConnectionContentViewport";
+            viewport.Dock = DockStyle.Fill;
+            viewport.AutoScroll = true;
+            viewport.Margin = Padding.Empty;
+            viewport.BackColor = Canvas;
+            TableLayoutPanel sections = new TableLayoutPanel();
+            sections.Dock = DockStyle.Top;
+            sections.AutoSize = true;
+            sections.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            sections.ColumnCount = 1;
+            sections.RowCount = 3;
+            sections.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            for (int i = 0; i < 3; i++) sections.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            sections.BackColor = Canvas;
+
+            TableLayoutPanel deviceLayout = CreateGrid(4, 2);
+            deviceLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 76F));
+            deviceLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            deviceLayout.Controls.Add(FieldLabel("连接方式"), 0, 0);
+            _mode = new ComboBox { Name = "ConnectionMode", DropDownStyle = ComboBoxStyle.DropDownList,
+                Width = 260, Margin = new Padding(0, 1, 0, 7) };
+            _mode.Items.Add("USB");
+            _mode.Items.Add("无线调试 (Android 11+)");
             _mode.SelectedIndex = config.ConnectionMode == "WirelessTls" ? 1 : 0;
-            Controls.Add(_mode);
+            deviceLayout.Controls.Add(_mode, 1, 0);
+            deviceLayout.Controls.Add(FieldLabel("在线设备"), 0, 1);
+            _devices = new ComboBox { Name = "ConnectionDevices", Dock = DockStyle.Fill,
+                DropDownStyle = ComboBoxStyle.DropDownList, Margin = new Padding(0, 1, 0, 7) };
+            deviceLayout.Controls.Add(_devices, 1, 1);
+            FlowLayoutPanel deviceActions = Actions();
+            deviceActions.Controls.Add(StyledButton("刷新设备", "RefreshDevices", false,
+                delegate { RefreshDevices(); }));
+            deviceActions.Controls.Add(StyledButton("选择 ADB", "ChooseAdb", false,
+                delegate { BrowseAdb(); }));
+            deviceLayout.Controls.Add(deviceActions, 1, 2);
+            _adbInfo = FieldLabel("ADB: " + connection.AdbPath);
+            _adbInfo.AutoSize = false;
+            _adbInfo.Height = 22;
+            _adbInfo.ForeColor = Muted;
+            _adbInfo.AutoEllipsis = true;
+            _adbInfo.Dock = DockStyle.Fill;
+            deviceLayout.Controls.Add(_adbInfo, 0, 3);
+            deviceLayout.SetColumnSpan(_adbInfo, 2);
+            sections.Controls.Add(Card("设备", "DeviceCard", deviceLayout), 0, 0);
 
-            Button refresh = Button("刷新设备", 315, 17, 105, delegate { RefreshDevices(); });
-            Button chooseAdb = Button("选择 ADB", 430, 17, 90, delegate { BrowseAdb(); });
-            AddLabel("在线设备", 20, 61, 90);
-            _devices = new ComboBox { Name = "ConnectionDevices", Left = 115, Top = 57,
-                Width = 405, DropDownStyle = ComboBoxStyle.DropDownList };
-            Controls.Add(_devices);
+            TableLayoutPanel connectionLayout = CreateGrid(3, 2);
+            connectionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 76F));
+            connectionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            connectionLayout.Controls.Add(FieldLabel("连接地址"), 0, 0);
+            _endpoint = new TextBox { Name = "ConnectionEndpoint", Dock = DockStyle.Fill,
+                Text = config.WirelessLastEndpoint, Margin = new Padding(0, 0, 0, 7) };
+            connectionLayout.Controls.Add(_endpoint, 1, 0);
+            Label endpointHint = Hint("手动输入无线调试主页面的 IP:连接端口；与配对端口不同。");
+            connectionLayout.Controls.Add(endpointHint, 0, 1);
+            connectionLayout.SetColumnSpan(endpointHint, 2);
+            sections.Controls.Add(Card("无线连接", "ConnectionCard", connectionLayout), 0, 1);
 
-            AddLabel("连接地址", 20, 104, 90);
-            _endpoint = new ComboBox { Name = "ConnectionEndpoint", Left = 115, Top = 100,
-                Width = 300, DropDownStyle = ComboBoxStyle.DropDown };
-            _endpoint.Text = config.WirelessLastEndpoint;
-            Controls.Add(_endpoint);
-            _scanButton = Button("扫描端口", 425, 100, 95, delegate { ScanPorts(); });
-            _scanButton.Name = "ScanPorts";
-            _hint = AddLabel("可输入 IPv4 扫描；连接端口在无线调试主页面，配对端口不同。", 115, 129, 425);
-            _hint.ForeColor = Color.DimGray;
+            TableLayoutPanel pairingLayout = CreateGrid(4, 3);
+            pairingLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 52F));
+            pairingLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 23F));
+            pairingLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25F));
+            pairingLayout.Controls.Add(FieldLabel("配对 IP"), 0, 0);
+            pairingLayout.Controls.Add(FieldLabel("配对端口"), 1, 0);
+            pairingLayout.Controls.Add(FieldLabel("六位码"), 2, 0);
+            _pairIp = new TextBox { Name = "PairIp", Dock = DockStyle.Fill,
+                Margin = new Padding(0, 0, 10, 5) };
+            _pairPort = new TextBox { Name = "PairPort", Dock = DockStyle.Fill,
+                Margin = new Padding(0, 0, 10, 5) };
+            _pairCode = new TextBox { Name = "PairCode", Dock = DockStyle.Fill,
+                MaxLength = 6, UseSystemPasswordChar = true, Margin = new Padding(0, 0, 0, 5) };
+            pairingLayout.Controls.Add(_pairIp, 0, 1);
+            pairingLayout.Controls.Add(_pairPort, 1, 1);
+            pairingLayout.Controls.Add(_pairCode, 2, 1);
+            Label pairHint = Hint("按手机“使用配对码配对设备”弹窗填写，端口必须手动输入。");
+            pairingLayout.Controls.Add(pairHint, 0, 2);
+            pairingLayout.SetColumnSpan(pairHint, 3);
+            FlowLayoutPanel pairingActions = Actions();
+            _pairButton = StyledButton("配对", "PairDevice", true, delegate { Pair(); });
+            pairingActions.Controls.Add(_pairButton);
+            pairingActions.Controls.Add(StyledButton("取消配对", "CancelPair", false,
+                delegate { _connection.CancelPair(); }));
+            pairingLayout.Controls.Add(pairingActions, 0, 3);
+            pairingLayout.SetColumnSpan(pairingActions, 3);
+            sections.Controls.Add(Card("首次配对", "PairCard", pairingLayout), 0, 2);
 
-            GroupBox pairing = new GroupBox { Text = "首次配对", Left = 20, Top = 162, Width = 520, Height = 95 };
-            Controls.Add(pairing);
-            pairing.Controls.Add(new Label { Text = "IP", Left = 12, Top = 28, Width = 25 });
-            _pairIp = new TextBox { Name = "PairIp", Left = 42, Top = 24, Width = 158 };
-            pairing.Controls.Add(_pairIp);
-            pairing.Controls.Add(new Label { Text = "端口", Left = 209, Top = 28, Width = 38 });
-            _pairPort = new ComboBox { Name = "PairPort", Left = 250, Top = 24, Width = 71, DropDownStyle = ComboBoxStyle.DropDown };
-            pairing.Controls.Add(_pairPort);
-            pairing.Controls.Add(new Label { Text = "六位码", Left = 329, Top = 28, Width = 54 });
-            _pairCode = new TextBox { Name = "PairCode", Left = 388, Top = 24, Width = 82, MaxLength = 6, UseSystemPasswordChar = true };
-            pairing.Controls.Add(_pairCode);
-            _findPairPortButton = new Button { Name = "FindPairPort", Text = "查找配对端口", Left = 42, Top = 57, Width = 116 };
-            _findPairPortButton.Click += delegate { FindPairPort(null); };
-            pairing.Controls.Add(_findPairPortButton);
-            _pairButton = new Button { Name = "PairDevice", Text = "配对", Left = 169, Top = 57, Width = 80 };
-            _pairButton.Click += delegate { Pair(); };
-            pairing.Controls.Add(_pairButton);
-            Button cancelPair = new Button { Text = "取消配对", Left = 260, Top = 57, Width = 95 };
-            cancelPair.Click += delegate { CancelPairLookup(); _connection.CancelPair(); };
-            pairing.Controls.Add(cancelPair);
-            _pairIp.TextChanged += delegate { CancelPairLookup(); _pairPort.Items.Clear(); };
-            _pairPort.TextChanged += delegate { CancelPairLookup(); };
+            _status = new Label { Name = "ConnectionStatus", Dock = DockStyle.Fill,
+                Text = connection.State, ForeColor = Blue, AutoEllipsis = true,
+                TextAlign = ContentAlignment.MiddleLeft, Margin = new Padding(0, 4, 0, 0) };
+            FlowLayoutPanel footer = Actions();
+            footer.Dock = DockStyle.Fill;
+            footer.FlowDirection = FlowDirection.RightToLeft;
+            footer.Controls.Add(StyledButton("连接", "ConnectDevice", true, delegate { Connect(); }));
+            footer.Controls.Add(StyledButton("重试", "RetryConnection", false,
+                delegate { _connection.Retry(); }));
+            footer.Controls.Add(StyledButton("断开", "DisconnectDevice", false,
+                delegate { _connection.Disconnect(); }));
+            footer.Controls.Add(StyledButton("忘记设备", "ForgetDevice", false,
+                delegate { Forget(); }));
+            footer.Controls.Add(StyledButton("设置…", "OpenSettings", false, delegate
+            {
+                EventHandler requested = OpenSettingsRequested;
+                if (requested != null) requested(this, EventArgs.Empty);
+            }));
 
-            Button connect = Button("连接", 20, 277, 90, delegate { Connect(); });
-            Button retry = Button("重试", 120, 277, 90, delegate { _connection.Retry(); });
-            Button disconnect = Button("断开", 220, 277, 90, delegate { _connection.Disconnect(); });
-            Button forget = Button("忘记设备", 320, 277, 100, delegate { Forget(); });
-            _cancelScanButton = Button("取消扫描", 430, 277, 90, delegate { CancelScan(); });
-            _cancelScanButton.Name = "CancelScan";
-            _cancelScanButton.Enabled = false;
-            _status = AddLabel(connection.State, 20, 327, 520);
-            _status.Name = "ConnectionStatus";
-            _status.AutoSize = false; _status.Height = 45;
-            _status.ForeColor = Color.DarkSlateBlue;
-            _adbInfo = AddLabel("ADB: " + connection.AdbPath, 20, 380, 520);
-            _adbInfo.ForeColor = Color.DimGray;
-            _mode.SelectedIndexChanged += delegate { if (_mode.SelectedIndex != 1) { CancelScan(); CancelPairLookup(); } FilterDevices(); };
+            viewport.Controls.Add(sections);
+            root.Controls.Add(viewport, 0, 0);
+            root.Controls.Add(_status, 0, 1);
+            root.Controls.Add(footer, 0, 2);
+            Controls.Add(root);
+
+            _mode.SelectedIndexChanged += delegate { FilterDevices(); };
             _connection.StateChanged += OnStateChanged;
             _connection.PairCompleted += OnPairCompleted;
             FormClosed += delegate
             {
-                CancelScan();
-                CancelPairLookup();
                 _connection.StateChanged -= OnStateChanged;
                 _connection.PairCompleted -= OnPairCompleted;
             };
             Shown += delegate { RefreshDevices(); };
+            FilterDevices();
         }
 
-        Label AddLabel(string text, int x, int y, int width)
+        static TableLayoutPanel CreateGrid(int rows, int columns)
         {
-            Label label = new Label { Text = text, Left = x, Top = y, Width = width, AutoSize = false, Height = 25 };
-            Controls.Add(label); return label;
+            TableLayoutPanel layout = new TableLayoutPanel();
+            layout.Dock = DockStyle.Fill;
+            layout.AutoSize = true;
+            layout.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            layout.ColumnCount = columns;
+            layout.RowCount = rows;
+            layout.BackColor = Color.White;
+            for (int i = 0; i < rows; i++) layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            return layout;
         }
 
-        Button Button(string text, int x, int y, int width, EventHandler click)
+        static SettingsCard Card(string title, string name, TableLayoutPanel content)
         {
-            Button button = new Button { Text = text, Left = x, Top = y, Width = width, Height = 30 };
-            button.Click += click; Controls.Add(button); return button;
+            SettingsCard card = new SettingsCard(title);
+            card.Name = name;
+            card.Dock = DockStyle.Fill;
+            card.AutoSize = true;
+            card.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            card.Padding = new Padding(14, 12, 14, 12);
+            card.Margin = new Padding(0, 0, 0, 10);
+            TableLayoutPanel inner = CreateGrid(2, 1);
+            inner.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            Label heading = new Label { Text = title, AutoSize = true,
+                ForeColor = Ink, Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold),
+                Margin = new Padding(0, 0, 0, 8) };
+            content.Margin = Padding.Empty;
+            inner.Controls.Add(heading, 0, 0);
+            inner.Controls.Add(content, 0, 1);
+            card.Controls.Add(inner);
+            return card;
+        }
+
+        static Label FieldLabel(string text)
+        {
+            return new Label { Text = text, AutoSize = true, Margin = new Padding(0, 3, 5, 5) };
+        }
+
+        static Label Hint(string text)
+        {
+            return new Label { Text = text, AutoSize = true, ForeColor = Muted,
+                Margin = new Padding(0, 2, 0, 6) };
+        }
+
+        static FlowLayoutPanel Actions()
+        {
+            return new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill,
+                WrapContents = false, Margin = Padding.Empty };
+        }
+
+        static Button StyledButton(string text, string name, bool primary, EventHandler click)
+        {
+            Button button = new Button { Name = name, Text = text, Size = new Size(text.Length > 4 ? 94 : 78, 32),
+                FlatStyle = FlatStyle.Flat, BackColor = primary ? Blue : Color.White,
+                ForeColor = primary ? Color.White : Ink, UseVisualStyleBackColor = false,
+                Margin = new Padding(0, 2, 8, 2) };
+            button.FlatAppearance.BorderSize = primary ? 0 : 1;
+            button.FlatAppearance.BorderColor = Color.FromArgb(210, 219, 229);
+            button.FlatAppearance.MouseOverBackColor = primary ? Color.FromArgb(29, 78, 216)
+                : Color.FromArgb(246, 248, 251);
+            button.Click += click;
+            return button;
         }
 
         void OnStateChanged(string value)
         {
-            try
-            {
-                if (IsDisposed) return;
-                BeginInvoke((MethodInvoker)delegate { if (!IsDisposed) _status.Text = value; });
-            }
+            try { BeginInvoke((MethodInvoker)delegate { if (!IsDisposed) _status.Text = value; }); }
             catch (Exception) { }
         }
 
@@ -152,9 +260,11 @@ namespace PcKvm
             string pairedIp = _lastPairIp;
             try { BeginInvoke((MethodInvoker)delegate
             {
-                if (IsDisposed || _mode.SelectedIndex != 1) return;
+                if (IsDisposed) return;
                 _devices.SelectedIndex = 0;
-                _endpoint.Text = pairedIp;
+                string currentAddress = _endpoint.Text.Trim();
+                if (currentAddress.Length == 0 || currentAddress == pairedIp)
+                    _endpoint.Text = pairedIp;
                 _pairJustCompleted = true;
                 RefreshDevices();
             }); }
@@ -165,191 +275,75 @@ namespace PcKvm
         {
             if (_refreshing) return;
             _refreshing = true;
-            _status.Text = "正在刷新设备与连接服务…";
+            _status.Text = "正在刷新设备…";
             ThreadPool.QueueUserWorkItem(delegate
             {
                 string version = _connection.AdbVersion();
                 List<AdbDevice> devices = _connection.Devices();
-                List<WirelessService> services = _connection.Services();
-                try
+                try { BeginInvoke((MethodInvoker)delegate
                 {
-                    BeginInvoke((MethodInvoker)delegate
-                    {
-                        _refreshing = false;
-                        if (IsDisposed) return;
-                        _knownDevices = devices;
-                        FilterDevices();
-                        string typed = _endpoint.Text;
-                        _endpoint.Items.Clear();
-                        foreach (WirelessService service in services)
-                            if (!_endpoint.Items.Contains(service.Endpoint.ToString()))
-                                _endpoint.Items.Add(service.Endpoint.ToString());
-                        _endpoint.Text = typed;
-                        if (_scanCancel == null)
-                        {
-                            _status.Text = _pairJustCompleted
-                                ? "配对完成；请扫描或输入无线调试主页面的连接端口，然后点击“连接”"
-                                : _connection.State + "（发现 " + services.Count + " 个连接服务）";
-                            _pairJustCompleted = false;
-                        }
-                        _adbInfo.Text = "ADB: " + version + " · " + _connection.AdbPath;
-                    });
-                }
+                    _refreshing = false;
+                    if (IsDisposed) return;
+                    _knownDevices = devices;
+                    FilterDevices();
+                    _status.Text = _pairJustCompleted
+                        ? "配对完成；请在连接地址中补上手机主页面显示的连接端口。"
+                        : _connection.State;
+                    _pairJustCompleted = false;
+                    _adbInfo.Text = "ADB: " + version + " · " + _connection.AdbPath;
+                }); }
                 catch (Exception) { _refreshing = false; }
             });
         }
 
         void FilterDevices()
         {
-            string previous = (_devices.SelectedItem as DeviceChoice) == null ? "" : ((DeviceChoice)_devices.SelectedItem).Serial;
+            string previous = (_devices.SelectedItem as DeviceChoice) == null ? ""
+                : ((DeviceChoice)_devices.SelectedItem).Serial;
             bool wireless = _mode.SelectedIndex == 1;
             _devices.Items.Clear();
-            _devices.Items.Add(new DeviceChoice("", wireless, "（自动 / 使用下方地址）"));
+            _devices.Items.Add(new DeviceChoice("", "（自动 / 使用下方地址）"));
             foreach (AdbDevice device in _knownDevices)
             {
                 if (!device.IsOnline || device.IsUsb == wireless) continue;
-                _devices.Items.Add(new DeviceChoice(device.Serial, wireless,
+                _devices.Items.Add(new DeviceChoice(device.Serial,
                     device.Serial + (device.Model.Length > 0 ? "  ·  " + device.Model : "")));
             }
             _devices.SelectedIndex = 0;
             for (int i = 1; i < _devices.Items.Count; i++)
                 if (((DeviceChoice)_devices.Items[i]).Serial == previous) _devices.SelectedIndex = i;
             _endpoint.Enabled = wireless;
-            _scanButton.Enabled = wireless && _scanCancel == null;
             _pairIp.Enabled = wireless;
             _pairPort.Enabled = wireless;
             _pairCode.Enabled = wireless;
             _pairButton.Enabled = wireless;
-            _findPairPortButton.Enabled = wireless && _pairLookupCancel == null;
         }
 
-        void ScanPorts()
+        static bool TryParsePairIp(string text, out IPAddress address)
         {
-            if (_mode.SelectedIndex != 1) return;
-            IPAddress address;
-            if (!WirelessPortScanner.TryParseAddress(_endpoint.Text.Trim(), out address))
-            { _status.Text = "请输入要扫描的 IPv4 地址"; return; }
-            CancelScan();
-            CancellationTokenSource cancellation = new CancellationTokenSource();
-            cancellation.CancelAfter(_scanTimeoutMs);
-            Stopwatch elapsed = Stopwatch.StartNew();
-            _scanCancel = cancellation;
-            int epoch = ++_scanEpoch;
-            _scanButton.Enabled = false;
-            _cancelScanButton.Enabled = true;
-            _status.Text = "正在查找 " + address + " 的无线调试端口…";
-            ThreadPool.QueueUserWorkItem(delegate
-            {
-                string found = null;
-                string error = null;
-                WirelessPortScanner.ScanResult result = null;
-                try
-                {
-                    List<WirelessService> services = _connection.Services(cancellation.Token);
-                    foreach (WirelessService service in services)
-                    {
-                        if (cancellation.IsCancellationRequested) break;
-                        if (service.Endpoint.Address != address.ToString()) continue;
-                        string candidate = service.Endpoint.ToString();
-                        if (_connection.VerifyWirelessEndpoint(candidate, cancellation.Token))
-                        { found = candidate; break; }
-                    }
-                    if (found == null && !cancellation.IsCancellationRequested)
-                    {
-                        object verificationGate = new object();
-                        int verifiedPort = 0;
-                        int remainingMs = Math.Max(1, _scanTimeoutMs - (int)elapsed.ElapsedMilliseconds);
-                        result = WirelessPortScanner.Scan(address, WirelessPortScanner.OrderedPorts(),
-                            delegate(int port, CancellationToken scanToken)
-                            {
-                                lock (verificationGate)
-                                {
-                                    if (verifiedPort != 0 || scanToken.IsCancellationRequested) return false;
-                                    if (!_connection.VerifyWirelessEndpoint(address + ":" + port, scanToken)) return false;
-                                    verifiedPort = port;
-                                    return true;
-                                }
-                            },
-                            delegate(int done, int total)
-                            {
-                                try { BeginInvoke((MethodInvoker)delegate
-                                {
-                                    if (!IsDisposed && epoch == _scanEpoch && Object.ReferenceEquals(_scanCancel, cancellation))
-                                        _status.Text = "正在扫描 " + address + "：" + done + "/" + total;
-                                }); }
-                                catch (Exception) { }
-                            }, cancellation.Token, remainingMs);
-                        if (result.FoundPort > 0) found = address + ":" + result.FoundPort;
-                    }
-                }
-                catch (Exception ex) { error = ex.Message; }
-                try { BeginInvoke((MethodInvoker)delegate
-                {
-                    try
-                    {
-                        if (IsDisposed || epoch != _scanEpoch || !Object.ReferenceEquals(_scanCancel, cancellation)) return;
-                        _scanCancel = null;
-                        _scanButton.Enabled = _mode.SelectedIndex == 1;
-                        _cancelScanButton.Enabled = false;
-                        if (found != null)
-                        {
-                            _devices.SelectedIndex = 0; // The verified endpoint wins over an earlier list selection.
-                            _endpoint.Text = found;
-                            _status.Text = "已验证无线调试端口 " + found + "；点击“连接”继续";
-                        }
-                        else if (error != null) _status.Text = "扫描失败：" + error;
-                        else _status.Text = cancellation.IsCancellationRequested || result != null && result.TimedOut
-                            ? "扫描已达时间上限；可输入手机显示的连接端口"
-                            : "未发现已验证的无线调试端口；请检查配对或手动输入连接端口";
-                    }
-                    finally { cancellation.Dispose(); }
-                }); }
-                catch (Exception) { cancellation.Dispose(); }
-            });
-        }
-
-        void CancelScan()
-        {
-            CancellationTokenSource cancellation = _scanCancel;
-            if (cancellation == null) return;
-            _scanEpoch++;
-            _scanCancel = null;
-            cancellation.Cancel();
-            _cancelScanButton.Enabled = false;
-            _scanButton.Enabled = _mode.SelectedIndex == 1;
-            _status.Text = "端口扫描已取消";
+            address = null;
+            WirelessEndpoint endpoint;
+            if (String.IsNullOrEmpty(text) || text.IndexOf(':') >= 0
+                || !WirelessEndpoint.TryParse(text + ":1", out endpoint)
+                || !IPAddress.TryParse(endpoint.Address, out address)
+                || address.ToString() != endpoint.Address)
+            { address = null; return false; }
+            return true;
         }
 
         void Pair()
         {
             string code = _pairCode.Text;
             _pairCode.Clear();
-            CancelPairLookup();
-            if (!ValidPairCode(code)) { _status.Text = "配对码需要六位数字"; return; }
-            if (_pairPort.Text.Trim().Length == 0) { FindPairPort(code); return; }
-            PairWithPort(_pairIp.Text.Trim(), _pairPort.Text.Trim(), code);
-        }
-
-        static bool ValidPairCode(string code)
-        {
-            if (code == null || code.Length != 6) return false;
-            foreach (char c in code) if (c < '0' || c > '9') return false;
-            return true;
-        }
-
-        static bool TryParsePairIp(string text, out IPAddress address)
-        {
-            address = null;
-            return text.IndexOf(':') < 0 && WirelessPortScanner.TryParseAddress(text, out address);
-        }
-
-        void PairWithPort(string ip, string port, string code)
-        {
+            if (code == null || code.Length != 6)
+            { _status.Text = "配对码需要六位数字"; return; }
+            foreach (char c in code) if (c < '0' || c > '9')
+            { _status.Text = "配对码需要六位数字"; return; }
             IPAddress address;
-            WirelessEndpoint endpoint;
-            if (!TryParsePairIp(ip, out address))
+            if (!TryParsePairIp(_pairIp.Text.Trim(), out address))
             { _status.Text = "请输入有效的配对 IPv4 地址"; return; }
-            if (!WirelessEndpoint.TryParse(address + ":" + port, out endpoint))
+            WirelessEndpoint endpoint;
+            if (!WirelessEndpoint.TryParse(address + ":" + _pairPort.Text.Trim(), out endpoint))
             { _status.Text = "请输入手机配对弹窗中的端口（1–65535）"; return; }
             try
             {
@@ -360,71 +354,8 @@ namespace PcKvm
             catch (Exception ex) { _status.Text = ex.Message; }
         }
 
-        void FindPairPort(string code)
-        {
-            if (_mode.SelectedIndex != 1) return;
-            IPAddress address;
-            if (!TryParsePairIp(_pairIp.Text.Trim(), out address))
-            { _status.Text = "请输入有效的配对 IPv4 地址"; return; }
-            CancelPairLookup();
-            CancellationTokenSource cancellation = new CancellationTokenSource();
-            cancellation.CancelAfter(5000);
-            _pairLookupCancel = cancellation;
-            int epoch = ++_pairLookupEpoch;
-            string ip = address.ToString();
-            _findPairPortButton.Enabled = false;
-            _status.Text = "正在查找 " + ip + " 的配对端口…";
-            ThreadPool.QueueUserWorkItem(delegate
-            {
-                List<int> ports = new List<int>();
-                string error = null;
-                try
-                {
-                    foreach (WirelessService service in _connection.PairingServices(cancellation.Token))
-                        if (!cancellation.IsCancellationRequested && service.Endpoint.Address == ip
-                            && !ports.Contains(service.Endpoint.Port)) ports.Add(service.Endpoint.Port);
-                }
-                catch (Exception ex) { error = ex.Message; }
-                try { BeginInvoke((MethodInvoker)delegate
-                {
-                    try
-                    {
-                        if (IsDisposed || epoch != _pairLookupEpoch || !Object.ReferenceEquals(_pairLookupCancel, cancellation)) return;
-                        _pairLookupCancel = null;
-                        _findPairPortButton.Enabled = _mode.SelectedIndex == 1;
-                        if (_mode.SelectedIndex != 1 || _pairIp.Text.Trim() != ip) return;
-                        _pairPort.Items.Clear();
-                        foreach (int port in ports) _pairPort.Items.Add(port.ToString());
-                        if (ports.Count == 1)
-                        {
-                            _pairPort.Text = ports[0].ToString();
-                            if (code == null) _status.Text = "已找到配对端口；输入手机显示的六位码后点击“配对”";
-                            else PairWithPort(ip, _pairPort.Text, code);
-                        }
-                        else if (ports.Count > 1)
-                            _status.Text = "发现多个配对端口；请选择手机配对弹窗显示的端口";
-                        else _status.Text = error != null ? "查找配对端口失败：" + error + "；请手动输入手机显示的端口"
-                            : "未发现此 IP 的配对端口；请手动输入手机配对弹窗中的端口";
-                    }
-                    finally { cancellation.Dispose(); }
-                }); }
-                catch (Exception) { cancellation.Dispose(); }
-            });
-        }
-
-        void CancelPairLookup()
-        {
-            CancellationTokenSource cancellation = _pairLookupCancel;
-            if (cancellation == null) return;
-            _pairLookupEpoch++;
-            _pairLookupCancel = null;
-            cancellation.Cancel();
-            _findPairPortButton.Enabled = _mode.SelectedIndex == 1;
-        }
-
         void BrowseAdb()
         {
-            CancelScan();
             using (OpenFileDialog dialog = new OpenFileDialog())
             {
                 dialog.Filter = "Android Debug Bridge (adb.exe)|adb.exe|可执行文件 (*.exe)|*.exe";
@@ -439,6 +370,7 @@ namespace PcKvm
                     catch (Exception ex) { error = ex.Message; }
                     try { BeginInvoke((MethodInvoker)delegate
                     {
+                        if (IsDisposed) return;
                         if (error != null) _status.Text = error;
                         else RefreshDevices();
                     }); }
@@ -449,13 +381,20 @@ namespace PcKvm
 
         void Connect()
         {
-            CancelScan();
             try
             {
                 DeviceChoice choice = _devices.SelectedItem as DeviceChoice;
                 string serial = choice == null ? "" : choice.Serial;
-                _connection.Connect(_mode.SelectedIndex == 1 ? "WirelessTls" : "Usb", serial,
-                    _mode.SelectedIndex == 1 && serial.Length == 0 ? _endpoint.Text.Trim() : "");
+                bool wireless = _mode.SelectedIndex == 1;
+                string endpoint = "";
+                if (wireless && serial.Length == 0)
+                {
+                    WirelessEndpoint parsed;
+                    if (!WirelessEndpoint.TryParse(_endpoint.Text.Trim(), out parsed))
+                    { _status.Text = "请输入手机无线调试主页面的 IP:连接端口"; return; }
+                    endpoint = parsed.ToString();
+                }
+                _connection.Connect(wireless ? "WirelessTls" : "Usb", serial, endpoint);
             }
             catch (Exception ex) { _status.Text = ex.Message; }
         }

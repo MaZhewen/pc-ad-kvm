@@ -55,10 +55,6 @@ class ConnectionTests
             Check(services.Count == 1 && services[0].Endpoint.ToString() == "192.168.1.5:39123", "pairing service not treated as connect service");
             List<WirelessService> columnServices = WirelessDiscovery.Parse("List of discovered mdns services\nadb-X _adb-tls-connect._tcp. 192.168.1.5:39124\n");
             Check(columnServices.Count == 1 && columnServices[0].Endpoint.Port == 39124, "separate mDNS service columns parsed");
-            List<WirelessService> pairingServices = WirelessDiscovery.ParsePairing("List of discovered mdns services\nadb-X._adb-tls-pairing._tcp. 192.168.1.5:40000\nadb-Y _adb-tls-pairing._tcp. 192.168.1.5:40002\nadb-X._adb-tls-connect._tcp. 192.168.1.5:39123\n");
-            Check(pairingServices.Count == 2 && pairingServices[0].Endpoint.Port == 40000 && pairingServices[1].Endpoint.Port == 40002,
-                "pairing services parsed without connect services");
-
             string folder = AppDomain.CurrentDomain.BaseDirectory;
             string capture = Path.Combine(folder, "capture.txt");
             Environment.SetEnvironmentVariable("PCKVM_FAKE_CAPTURE", capture);

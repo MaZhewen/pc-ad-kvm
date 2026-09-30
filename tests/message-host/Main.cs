@@ -44,8 +44,10 @@ class HostTest {
     edge.Checked=true;
     Button okay=FindControl<Button>(form,"确定");
     Button cancel=FindControl<Button>(form,"取消");
+    Button openConnection=FindControl<Button>(form,"OpenConnection");
     Check(okay!=null,"Settings has confirm button");
     Check(cancel!=null,"Settings has cancel button");
+    Check(openConnection!=null,"Settings has a connection entry");
     Panel recovery=FindControl<Panel>(form,"断联恢复");
     Panel speed=FindControl<Panel>(form,"鼠标速度");
     Panel position=FindControl<Panel>(form,"手机位置");
@@ -64,9 +66,11 @@ class HostTest {
     Check(recovery!=null && speed!=null && position!=null && switching!=null,"Settings has all sections");
     form.Show(); Application.DoEvents();
     System.Drawing.Rectangle confirmBounds=BoundsIn(form,okay);
+    System.Drawing.Rectangle connectionBounds=BoundsIn(form,openConnection);
     System.Drawing.Rectangle recoveryBounds=BoundsIn(form,recovery);
     System.Drawing.Rectangle cancelBounds=BoundsIn(form,cancel);
     Check(form.ClientRectangle.Contains(confirmBounds),"Settings confirm button fits in dialog");
+    Check(form.ClientRectangle.Contains(connectionBounds),"Settings connection entry fits in dialog");
     Check(form.ClientRectangle.Contains(cancelBounds),"Settings cancel button fits in dialog");
     Check(viewport!=null && viewport.AutoScroll,"Settings content can scroll while the footer stays fixed");
     Check(form.ClientRectangle.Contains(BoundsIn(form,speed)),"Settings speed section fits in dialog");
@@ -89,6 +93,14 @@ class HostTest {
      && saved.PhoneOnLeft==form.PhoneOnLeft && saved.AllowKillAdb==form.AllowKillAdb
      && saved.SwitchHotkey.ToString()==form.SwitchHotkey.ToString(),"saved settings reload from INI");
    }
+   bool modalConnectionApplied=false;
+   using(SettingsForm modal=new SettingsForm(setting,delegate(HotkeyBinding binding){return true;})) {
+    modal.Shown+=delegate { FindControl<Button>(modal,"OpenConnection").PerformClick(); };
+    DialogResult navigationResult=modal.ShowDialog();
+    modalConnectionApplied=navigationResult==DialogResult.OK && modal.ConnectAfterApply
+     && modal.MouseSensitivity>0;
+   }
+   Check(modalConnectionApplied,"Settings saves and closes before opening connection");
    using(RecreatedHost host=new RecreatedHost()) {
     IntPtr hwnd=host.Handle;
     RawInput raw=new RawInput(hwnd);

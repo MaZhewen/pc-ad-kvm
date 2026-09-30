@@ -11,6 +11,9 @@ class FakeAdb
         if (command.StartsWith("pair "))
         {
             File.AppendAllText(Environment.GetEnvironmentVariable("PCKVM_COORD_TRACE"), "stdin=" + Console.In.ReadToEnd().Trim() + "\n");
+            int pairDelay;
+            if (int.TryParse(Environment.GetEnvironmentVariable("PCKVM_COORD_PAIR_DELAY_MS"), out pairDelay) && pairDelay > 0)
+                Thread.Sleep(pairDelay);
             Console.WriteLine("Successfully paired");
             return 0;
         }
@@ -26,17 +29,9 @@ class FakeAdb
         { Console.WriteLine("failed to connect"); return 1; }
         else if (command.Contains("mdns services"))
         {
-            int delay;
-            if (int.TryParse(Environment.GetEnvironmentVariable("PCKVM_COORD_MDNS_DELAY_MS"), out delay) && delay > 0)
-                Thread.Sleep(delay);
-            else if (mode == "slowmdns") Thread.Sleep(5000);
             string service = Environment.GetEnvironmentVariable("PCKVM_COORD_SERVICE");
             Console.WriteLine("List of discovered mdns services");
             if (!String.IsNullOrEmpty(service)) Console.WriteLine("adb-test _adb-tls-connect._tcp. " + service);
-            string pairServices = Environment.GetEnvironmentVariable("PCKVM_COORD_PAIR_SERVICE");
-            if (!String.IsNullOrEmpty(pairServices))
-                foreach (string pairService in pairServices.Split(';'))
-                    Console.WriteLine("adb-test _adb-tls-pairing._tcp. " + pairService);
         }
         else if (command.Contains("version")) Console.WriteLine("Android Debug Bridge version 1.0.41");
         return 0;

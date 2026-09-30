@@ -69,7 +69,7 @@ namespace PcKvm
             settings.Click += delegate { OpenSettings(); };
             MenuItem connect = new MenuItem("连接设备…");
             connect.Click += delegate { OpenConnection(); };
-            Tray.DoubleClick += delegate { OpenConnection(); };
+            Tray.DoubleClick += delegate { OpenSettings(); };
 
             MenuItem quit = new MenuItem("退出");
             quit.Click += delegate { Application.Exit(); };
@@ -99,6 +99,7 @@ namespace PcKvm
                 existing.BringToFront(); existing.Activate(); return;
             }
             _connectionDialog = new ConnectionForm(_connection, _cfg);
+            _connectionDialog.OpenSettingsRequested += delegate { OpenSettings(); };
             _connectionDialog.FormClosed += delegate { _connectionDialog = null; };
             _connectionDialog.Show();
             _connectionDialog.BringToFront();
@@ -119,12 +120,14 @@ namespace PcKvm
             _host.SwitchingEnabled = false;
             SettingsForm form = null;
             DialogResult result = DialogResult.Cancel;
+            bool connectAfterApply = false;
             try
             {
                 form = new SettingsForm(_cfg, _trySwitchHotkey);
                 _settingsDialog = form;
                 result = form.ShowDialog(_host);
                 if (result != DialogResult.OK) return;
+                connectAfterApply = form.ConnectAfterApply;
 
                 _cfg.MouseSensitivity = form.MouseSensitivity;
                 _cfg.AllowKillAdb = form.AllowKillAdb;
@@ -144,6 +147,7 @@ namespace PcKvm
 
             Action<Config> h = SettingsApplied;
             if (h != null) h(_cfg);
+            if (connectAfterApply) OpenConnection();
         }
     }
 }

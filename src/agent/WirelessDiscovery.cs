@@ -46,16 +46,7 @@ namespace PcKvm
     {
         public static List<WirelessService> Parse(string output)
         {
-            return ParseService(output, "_adb-tls-connect._tcp");
-        }
-
-        public static List<WirelessService> ParsePairing(string output)
-        {
-            return ParseService(output, "_adb-tls-pairing._tcp");
-        }
-
-        static List<WirelessService> ParseService(string output, string serviceType)
-        {
+            const string serviceType = "_adb-tls-connect._tcp";
             List<WirelessService> services = new List<WirelessService>();
             if (String.IsNullOrEmpty(output)) return services;
             foreach (string raw in output.Replace("\r", "").Split('\n'))

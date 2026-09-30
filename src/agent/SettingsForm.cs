@@ -35,6 +35,7 @@ namespace PcKvm
         public bool AllowKillAdb { get; private set; }
         public bool EnableEdgeSwitch { get; private set; }
         public HotkeyBinding SwitchHotkey { get; private set; }
+        public bool ConnectAfterApply { get; private set; }
 
         public SettingsForm(Config current, Func<HotkeyBinding, bool> trySwitchHotkey)
         {
@@ -289,9 +290,33 @@ namespace PcKvm
             buttonRow.Padding = new Padding(0, 5, 0, 0);
             buttonRow.Controls.Add(ok);
             buttonRow.Controls.Add(cancel);
+            Button openConnection = new Button();
+            openConnection.Name = "OpenConnection";
+            openConnection.Text = "保存并连接设备";
+            openConnection.FlatStyle = FlatStyle.Flat;
+            openConnection.FlatAppearance.BorderSize = 1;
+            openConnection.FlatAppearance.BorderColor = Color.FromArgb(210, 219, 229);
+            openConnection.BackColor = Color.White;
+            openConnection.ForeColor = ForeColor;
+            openConnection.UseVisualStyleBackColor = false;
+            openConnection.Size = new Size(132, 32);
+            openConnection.Margin = new Padding(0, 8, 0, 0);
+            openConnection.Click += delegate
+            {
+                if (!ReadBack()) return;
+                ConnectAfterApply = true;
+                DialogResult = DialogResult.OK;
+            };
+            TableLayoutPanel footer = new TableLayoutPanel();
+            footer.Dock = DockStyle.Fill;
+            footer.ColumnCount = 2;
+            footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 45F));
+            footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 55F));
+            footer.Controls.Add(openConnection, 0, 0);
+            footer.Controls.Add(buttonRow, 1, 0);
             contentViewport.Controls.Add(sectionLayout);
             layout.Controls.Add(contentViewport, 0, 0);
-            layout.Controls.Add(buttonRow, 0, 1);
+            layout.Controls.Add(footer, 0, 1);
 
             Controls.Add(layout);
 

@@ -513,7 +513,7 @@ namespace PcKvm
             // Give every successful first launch visible feedback after startup is ready.
             host.BeginInvoke((MethodInvoker)delegate
             {
-                trayUi.OpenConnection();
+                trayUi.OpenSettings();
             });
             Application.Run();
             instance.Dispose();
