@@ -25,6 +25,7 @@ namespace PcKvm
         readonly Func<HotkeyBinding, bool> _trySwitchHotkey;
         SettingsForm _settingsDialog;
         ConnectionForm _connectionDialog;
+        System.Windows.Forms.Timer _statusTimer;
 
         public NotifyIcon Tray { get; private set; }
 
@@ -32,6 +33,7 @@ namespace PcKvm
         /// 应用行为（改速度、换跨越边）由 Program.cs 订阅处理——它才持有 scaler/tracker/supp。
         /// 本类只做界面与持久化，不碰运行时状态。</summary>
         public event Action<Config> SettingsApplied;
+        public event Action ReturnToComputerRequested;
 
         public TrayUi(MessageHost host, Suppressor supp, Watchers watchers, ConnectionCoordinator connection,
                       Transport transport, TextWriter log, Config cfg,
@@ -67,17 +69,31 @@ namespace PcKvm
 
             MenuItem settings = new MenuItem("设置…");
             settings.Click += delegate { OpenSettings(); };
-            MenuItem connect = new MenuItem("连接设备…");
+            MenuItem connect = new MenuItem("设备与连接…");
             connect.Click += delegate { OpenConnection(); };
-            Tray.DoubleClick += delegate { OpenSettings(); };
+            Tray.DoubleClick += delegate { OpenConnection(); };
 
             MenuItem quit = new MenuItem("退出");
             quit.Click += delegate { Application.Exit(); };
-            Tray.ContextMenu = new ContextMenu(new MenuItem[] { connect, settings, quit });
+            MenuItem status = new MenuItem("未连接设备") { Enabled = false };
+            Tray.ContextMenu = new ContextMenu(new MenuItem[] { status, connect, settings, quit });
+            _statusTimer = new System.Windows.Forms.Timer { Interval = 250 };
+            _statusTimer.Tick += delegate
+            {
+                ConnectionSnapshot snapshot = _connection.Snapshot();
+                string caption = snapshot.Ready ? (_supp.IsEngaged ? "正在控制 Android" : "已连接 · 当前控制电脑")
+                    : snapshot.Desired ? "正在连接设备" : "未连接设备";
+                status.Text = caption;
+                string tip = "PC-KVM · " + caption + (snapshot.Ready ? " · " + snapshot.Device : "");
+                Tray.Text = tip.Length > 63 ? tip.Substring(0, 63) : tip;
+            };
+            _statusTimer.Start();
 
             _host.FormClosing += delegate { _supp.Release(); };
             Application.ApplicationExit += delegate
             {
+                _statusTimer.Stop();
+                _statusTimer.Dispose();
                 // 顺序要紧：先停后台监督（否则它会与 _log.Close() 抢），再释放抑制、收设备。
                 _watchers.Stop();
                 _connection.Stop();
@@ -98,8 +114,14 @@ namespace PcKvm
                     existing.WindowState = FormWindowState.Normal;
                 existing.BringToFront(); existing.Activate(); return;
             }
-            _connectionDialog = new ConnectionForm(_connection, _cfg);
+            _connectionDialog = new ConnectionForm(_connection, _cfg,
+                delegate { return _supp.IsEngaged; },
+                delegate { return _host.SwitchingEnabled && _host.IsSwitchHotkeyActive; });
             _connectionDialog.OpenSettingsRequested += delegate { OpenSettings(); };
+            _connectionDialog.ReturnToComputerRequested += delegate {
+                Action requested = ReturnToComputerRequested;
+                if (requested != null) requested();
+            };
             _connectionDialog.FormClosed += delegate { _connectionDialog = null; };
             _connectionDialog.Show();
             _connectionDialog.BringToFront();

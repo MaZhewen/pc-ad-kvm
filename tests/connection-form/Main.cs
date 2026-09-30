@@ -64,7 +64,8 @@ class ConnectionFormTests
         ConnectionCoordinator connection = new ConnectionCoordinator(config,
             new AdbClient(Path.Combine(folder, "adb.exe")), transport,
             new PointerSession(delegate(byte[] frame) { }), delegate { }, delegate(string message) { });
-        ConnectionForm form = new ConnectionForm(connection, config);
+        bool controlling = false;
+        ConnectionForm form = new ConnectionForm(connection, config, delegate { return controlling; });
         try
         {
             form.ShowInTaskbar = false; form.Opacity = 0; form.Show();
@@ -107,18 +108,67 @@ class ConnectionFormTests
             }
             PumpUntil(delegate { return devices.Items.Count > 1; }, 3000);
             Check(devices.Items.Count > 1, "online device list remains available");
+            ConnectionSnapshot ready = new ConnectionSnapshot { Ready = true, Desired = true,
+                Device = "Test tablet", Mode = "WirelessTls", Status = "ready", Error = "" };
+            form.RenderState(ready);
+            Check(Find<Label>(form, "DeviceSummary").Text.Contains("当前控制电脑")
+                && Find<Label>(form, "DeviceSummary").Text.Contains("Test tablet")
+                && !Find<Button>(form, "ConnectDevice").Visible
+                && Find<Button>(form, "DisconnectDevice").Visible
+                && !Find<Panel>(form, "DeviceCard").Visible,
+                "ready view identifies device and offers disconnect instead of setup");
+            controlling = true;
+            form.RenderState(ready);
+            Check(Find<Label>(form, "DeviceSummary").Text.Contains("正在控制 Android")
+                && Find<Button>(form, "ReturnToComputer").Visible,
+                "takeover changes visible control target");
+            bool returnRequested = false;
+            form.ReturnToComputerRequested += delegate { returnRequested = true; };
+            Find<Button>(form, "ReturnToComputer").PerformClick();
+            Check(returnRequested, "return action is delivered to application controller");
+            form.RenderState(ready);
+            string readyPreview = Environment.GetEnvironmentVariable("PCKVM_CAPTURE_CONNECTION_UI");
+            if (!String.IsNullOrEmpty(readyPreview))
+                using (Bitmap bitmap = new Bitmap(form.Width, form.Height)) {
+                    form.DrawToBitmap(bitmap, new Rectangle(0, 0, bitmap.Width, bitmap.Height));
+                    bitmap.Save(readyPreview + ".ready.png");
+                }
+            controlling = false;
+            form.RenderState(new ConnectionSnapshot { Desired = true, Attempting = true,
+                Device = "", Mode = "Usb", Status = "connecting", Error = "" });
+            Check(!Find<Button>(form, "ConnectDevice").Enabled
+                && Find<Button>(form, "DisconnectDevice").Visible,
+                "connection in progress prevents duplicate submission and allows cancellation");
+            form.RenderState(new ConnectionSnapshot { Desired = true,
+                Device = "", Mode = "Usb", Status = "waiting", Error = "failure detail" });
+            Check(Find<Button>(form, "RetryConnection").Visible
+                && Find<Label>(form, "ErrorDetails").Text.Contains("failure detail")
+                && Find<Panel>(form, "ErrorCard").Visible,
+                "retry state retains failure reason");
+            connection.Disconnect();
+            form.RenderState();
+            Check(Find<Button>(form, "ConnectDevice").Enabled
+                && !Find<Button>(form, "DisconnectDevice").Visible,
+                "manual disconnect restores connect action and stops recovery");
             Check(!ReadTrace(tracePath).Contains("mdns services"),
                 "opening connection window does not search ports");
             mode.SelectedIndex = 0;
+            Check(!Find<Panel>(form, "ConnectionCard").Visible
+                && !Find<Panel>(form, "PairCard").Visible,
+                "USB hides wireless setup instead of showing disabled forms");
             Check(!endpoint.Enabled && !pairIp.Enabled && !pairPort.Enabled && !pairCode.Enabled && !pair.Enabled,
                 "USB mode disables wireless fields");
             mode.SelectedIndex = 1;
+            Check(!Find<Panel>(form, "PairCard").Visible,
+                "first pairing is collapsed until requested");
+            Find<Button>(form, "ShowPairing").PerformClick();
             Check(endpoint.Enabled && pairIp.Enabled && pairPort.Enabled && pairCode.Enabled && pair.Enabled,
                 "wireless mode enables manual fields");
 
             pairIp.Text = "127.0.0.1"; pairPort.Text = ""; pairCode.Text = "001234";
             pair.PerformClick();
             Application.DoEvents();
+            Check(pairCode.Text == "001234", "local validation preserves pairing code");
             Check(!ReadTrace(tracePath).Contains("pair "), "blank pairing port never calls adb pair");
             pairPort.Text = "37123"; pairCode.Text = "001234";
             pair.PerformClick();

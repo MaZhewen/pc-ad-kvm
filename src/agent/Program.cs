@@ -81,7 +81,7 @@ namespace PcKvm
             {
                 if (trayUi == null) return;
                 instance.AcknowledgeSettingsRequest();
-                trayUi.OpenSettings();
+                trayUi.OpenConnection();
             });
             host.Show();
             host.Hide();   // 空闲时不遮挡 PC；接管前再显示以持有前台
@@ -473,6 +473,14 @@ namespace PcKvm
             // 托盘与生命周期集中到 TrayUi（Ruling 33）。必须在 Application.Run 之前 Install。
             trayUi = new TrayUi(host, supp, watchers, coordinator, transport, log, cfg,
                 host.TrySetSwitchHotkey);
+            trayUi.ReturnToComputerRequested += delegate
+            {
+                if (tracker.Current == KvmState.Takeover)
+                    transport.SendControl(Protocol.EncodeLeave());
+                tracker.AbortTakeover();
+                supp.Release();
+                host.SetStatus("IDLE");
+            };
             trayUi.Install();
             if (!host.TrySetSwitchHotkey(cfg.SwitchHotkey))
             {
@@ -513,7 +521,7 @@ namespace PcKvm
             // Give every successful first launch visible feedback after startup is ready.
             host.BeginInvoke((MethodInvoker)delegate
             {
-                trayUi.OpenSettings();
+                trayUi.OpenConnection();
             });
             Application.Run();
             instance.Dispose();

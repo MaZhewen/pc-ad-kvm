@@ -8,6 +8,12 @@ using System.Threading;
 
 namespace PcKvm
 {
+    sealed class ConnectionSnapshot
+    {
+        public bool Ready, Desired, Pairing, Attempting;
+        public string Status, Error, Device, Mode;
+    }
+
     /** The sole owner of deploy/reverse/injector/retry for one selected device. */
     sealed class ConnectionCoordinator
     {
@@ -25,6 +31,7 @@ namespace PcKvm
         Func<bool> _heartbeatHealthy;
         volatile bool _stopping;
         volatile bool _ready;
+        volatile bool _attemptActive;
         bool _desired;
         string _mode, _selectedSerial = "", _endpoint = "";
         bool _manual;
@@ -38,6 +45,22 @@ namespace PcKvm
         bool _ownsReverse;
         bool _pushedJar;
         string _state = "未连接";
+        string _lastError = "";
+
+        public ConnectionSnapshot Snapshot()
+        {
+            lock (_gate)
+            {
+                return new ConnectionSnapshot {
+                    Ready = _ready && _sessionRequestVersion == _requestVersion,
+                    Desired = _desired && (_worker != null || _requestVersion > 0) && !_stopping,
+                    Pairing = _pairCancel != null,
+                    Attempting = _attemptActive,
+                    Status = _state, Error = _lastError, Mode = _mode,
+                    Device = _pendingTarget == null ? "" : _pendingTarget.Serial
+                };
+            }
+        }
 
         public event Action<string> StateChanged;
         public event Action<bool, string> PairCompleted;
@@ -97,7 +120,7 @@ namespace PcKvm
             _worker.Name = "pckvm-connection";
             _worker.Start();
             _wake.Set();
-            if (_config.ConnectionConfigError.Length > 0) Publish("连接配置错误：" + _config.ConnectionConfigError);
+            if (_config.ConnectionConfigError.Length > 0) Publish("连接配置错误：" + _config.ConnectionConfigError, true);
         }
 
         public void Connect(string mode, string selectedSerial, string endpoint)
@@ -117,6 +140,7 @@ namespace PcKvm
                 if (_stopping) return;
                 _mode = mode; _selectedSerial = selectedSerial ?? ""; _endpoint = endpoint ?? "";
                 _manual = true; _desired = true; _requestVersion++; _failures = 0; _usbRecoveryLevel = 0;
+                _lastError = "";
                 _attemptCancel.Cancel(); _attemptCancel.Dispose(); _attemptCancel = new CancellationTokenSource();
             }
             _wake.Set();
@@ -128,6 +152,7 @@ namespace PcKvm
             {
                 if (_stopping) return;
                 _desired = true; _requestVersion++; _failures = 0; _usbRecoveryLevel = 0;
+                _lastError = "";
                 _attemptCancel.Cancel(); _attemptCancel.Dispose(); _attemptCancel = new CancellationTokenSource();
             }
             _wake.Set();
@@ -139,6 +164,7 @@ namespace PcKvm
             {
                 if (_stopping) return;
                 _desired = false; _requestVersion++;
+                _lastError = "";
                 _attemptCancel.Cancel(); _attemptCancel.Dispose(); _attemptCancel = new CancellationTokenSource();
             }
             _ready = false;
@@ -164,7 +190,7 @@ namespace PcKvm
             _ready = false;
             _releaseInput();
             _transport.CloseSession();
-            Publish("心跳失联，正在恢复连接");
+            Publish("心跳失联，正在恢复连接", true);
             _wake.Set();
         }
 
@@ -253,12 +279,14 @@ namespace PcKvm
                 }
                 try
                 {
+                    _attemptActive = true;
                     Resolved resolved = Resolve(mode, serial, endpoint, manual, token);
                     if (resolved == null)
                     {
                         _failures++;
                         MaybeRecoverUsb(mode);
                         int waitForTarget = ConnectionProfile.BackoffMilliseconds(_config.ReconnectSeconds, _failures - 1, new Random().Next(21));
+                        _attemptActive = false;
                         _wake.WaitOne(waitForTarget);
                         continue;
                     }
@@ -284,7 +312,8 @@ namespace PcKvm
                     }
                     Deactivate();
                 }
-                catch (Exception ex) { Publish("连接失败：" + ex.Message); Deactivate(); }
+                catch (Exception ex) { PublishFailure("连接失败：" + ex.Message, token); Deactivate(); }
+                finally { _attemptActive = false; }
                 if (_stopping || token.IsCancellationRequested) continue;
                 _failures++;
                 MaybeRecoverUsb(mode);
@@ -329,7 +358,7 @@ namespace PcKvm
             {
                 AdbDevice usb = ConnectionProfile.ChooseUsb(devices,
                     serial.Length > 0 ? serial : _config.UsbSerial);
-                if (usb == null) { Publish("需要选择在线 USB 设备"); return null; }
+                if (usb == null) { PublishFailure("需要选择在线 USB 设备", cancel); return null; }
                 return new Resolved { Device = usb, Identity = DeviceLauncher.GetIdentity(usb.Target, cancel), Endpoint = "" };
             }
 
@@ -338,11 +367,11 @@ namespace PcKvm
                 foreach (AdbDevice d in devices)
                     if (d.IsOnline && !d.IsUsb && d.Serial == serial)
                         return CheckIdentity(d, endpoint, manual, cancel);
-                Publish("所选无线设备未在线"); return null;
+                PublishFailure("所选无线设备未在线", cancel); return null;
             }
             if (!manual && _config.WirelessDeviceSerial.Length == 0)
             {
-                Publish("需要选择无线设备或输入连接端口");
+                PublishFailure("需要选择无线设备或输入连接端口", cancel);
                 return null;
             }
             if (endpoint.Length == 0 && _config.WirelessDeviceSerial.Length > 0)
@@ -350,7 +379,7 @@ namespace PcKvm
                 bool ambiguous;
                 AdbDevice saved = ConnectionProfile.ChooseWireless(devices, _config.WirelessDeviceSerial,
                     delegate(AdbDevice d) { return DeviceLauncher.GetIdentity(d.Target, cancel); }, out ambiguous);
-                if (ambiguous) { Publish("多个无线设备报告同一身份，需要手动选择"); return null; }
+                if (ambiguous) { PublishFailure("多个无线设备报告同一身份，需要手动选择", cancel); return null; }
                 if (saved != null)
                     return new Resolved { Device = saved, Identity = _config.WirelessDeviceSerial, Endpoint = endpoint };
             }
@@ -376,7 +405,7 @@ namespace PcKvm
                     bool ambiguous;
                     AdbDevice matching = ConnectionProfile.ChooseWireless(after, _config.WirelessDeviceSerial,
                         delegate(AdbDevice d) { return DeviceLauncher.GetIdentity(d.Target, cancel); }, out ambiguous);
-                    if (ambiguous) { Publish("多个无线设备报告同一身份，需要手动选择"); return null; }
+                    if (ambiguous) { PublishFailure("多个无线设备报告同一身份，需要手动选择", cancel); return null; }
                     if (matching != null)
                         return new Resolved { Device = matching, Identity = _config.WirelessDeviceSerial, Endpoint = candidate };
                     continue;
@@ -391,18 +420,18 @@ namespace PcKvm
                     if (checkedDevice != null) return checkedDevice;
                 }
             }
-            Publish(_config.WirelessDeviceSerial.Length == 0 ? "需要选择无线设备或输入连接端口"
-                : "已配对设备未在线；检查无线调试或更新连接端口");
+            PublishFailure(_config.WirelessDeviceSerial.Length == 0 ? "需要选择无线设备或输入连接端口"
+                : "已配对设备未在线；检查无线调试或更新连接端口", cancel);
             return null;
         }
 
         Resolved CheckIdentity(AdbDevice device, string endpoint, bool manual, CancellationToken cancel)
         {
             string identity = DeviceLauncher.GetIdentity(device.Target, cancel);
-            if (identity.Length == 0 && !manual) { Publish("设备身份不可读取，需要手动选择"); return null; }
+            if (identity.Length == 0 && !manual) { PublishFailure("设备身份不可读取，需要手动选择", cancel); return null; }
             if (_config.WirelessDeviceSerial.Length > 0 && identity != _config.WirelessDeviceSerial)
             {
-                Publish("设备身份变化；如需改绑，请先点“忘记设备”再选择"); return null;
+                PublishFailure("设备身份变化；如需改绑，请先点“忘记设备”再选择", cancel); return null;
             }
             return new Resolved { Device = device, Identity = identity, Endpoint = endpoint };
         }
@@ -426,16 +455,16 @@ namespace PcKvm
             DeviceLauncher.LocalPort = _transport.ListeningPort;
             Publish("建立反向隧道…");
             bool createdReverse;
-            if (!DeviceLauncher.EnsureTunnel(resolved.Device.Target, cancel, out createdReverse)) { Publish("反向隧道失败或端口已被占用"); return false; }
+            if (!DeviceLauncher.EnsureTunnel(resolved.Device.Target, cancel, out createdReverse)) { PublishFailure("反向隧道失败或端口已被占用", cancel); return false; }
             _ownsReverse = createdReverse;
             if (_stopping || cancel.IsCancellationRequested) return false;
             Publish("部署注入器…");
             string jar = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "pckvm.jar");
-            if (!DeviceLauncher.PushJar(jar, resolved.Device.Target, cancel)) { Publish("注入器推送失败"); return false; }
+            if (!DeviceLauncher.PushJar(jar, resolved.Device.Target, cancel)) { PublishFailure("注入器推送失败", cancel); return false; }
             _pushedJar = true;
             if (_stopping || cancel.IsCancellationRequested) return false;
             _injector = DeviceLauncher.Start(resolved.Device.Target, hex.ToString());
-            if (_injector == null) { Publish("注入器启动失败"); return false; }
+            if (_injector == null) { PublishFailure("注入器启动失败", cancel); return false; }
             Publish("等待指针与心跳就绪…");
             Stopwatch watch = Stopwatch.StartNew();
             while (watch.ElapsedMilliseconds < 20000 && !_stopping && !cancel.IsCancellationRequested)
@@ -449,7 +478,7 @@ namespace PcKvm
                 if (_injector.HasExited) break;
                 Thread.Sleep(100);
             }
-            Publish("会话握手、几何、READY 或 PONG 超时");
+            PublishFailure("会话握手、几何、READY 或 PONG 超时", cancel);
             return false;
         }
 
@@ -483,9 +512,25 @@ namespace PcKvm
             _pointer.Reset();
         }
 
-        void Publish(string status)
+        void PublishFailure(string status, CancellationToken cancellation)
         {
-            lock (_gate) { if (_state == status) return; _state = status; }
+            // Serialize with Disconnect/Connect so canceled attempts cannot restore stale errors.
+            lock (_gate)
+            {
+                if (_stopping || !_desired || cancellation.IsCancellationRequested) return;
+                Publish(status, true);
+            }
+        }
+
+        void Publish(string status, bool failed = false)
+        {
+            lock (_gate)
+            {
+                if (failed) _lastError = status;
+                else if (_ready) _lastError = "";
+                if (_state == status) return;
+                _state = status;
+            }
             if (!_stopping && _log != null) _log("# 连接: " + status);
             Action<string> changed = StateChanged;
             if (changed != null) changed(status);

@@ -201,7 +201,7 @@ namespace PcKvm
             _enableEdgeSwitch.Margin = new Padding(3, 2, 3, 2);
 
             Label edgeSwitchHint = new Label();
-            edgeSwitchHint.Text = "关闭后贴边切换停用，快捷键仍可用于切换。";
+            edgeSwitchHint.Text = "关闭后贴边切换停用。设置窗口打开期间，切换快捷键暂停；关闭后恢复。";
             edgeSwitchHint.ForeColor = Color.FromArgb(104, 119, 139);
             edgeSwitchHint.AutoSize = true;
             edgeSwitchHint.MaximumSize = new Size(340, 0);
@@ -293,7 +293,7 @@ namespace PcKvm
             buttonRow.Controls.Add(cancel);
             Button openConnection = new Button();
             openConnection.Name = "OpenConnection";
-            openConnection.Text = "保存并连接设备";
+            openConnection.Text = "保存并返回连接";
             openConnection.FlatStyle = FlatStyle.Flat;
             openConnection.FlatAppearance.BorderSize = 1;
             openConnection.FlatAppearance.BorderColor = Color.FromArgb(210, 219, 229);

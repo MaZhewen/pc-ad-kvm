@@ -26,17 +26,27 @@ namespace PcKvm
         readonly TextBox _endpoint, _pairIp, _pairPort, _pairCode;
         readonly Button _pairButton;
         readonly Label _status, _adbInfo;
+        readonly Label _summary, _instructions, _errorDetails;
+        readonly Config _config;
+        readonly Func<bool> _isControlling, _switchingAvailable;
+        readonly System.Windows.Forms.Timer _statusTimer;
+        bool _showPairing;
         List<AdbDevice> _knownDevices = new List<AdbDevice>();
         bool _refreshing;
         bool _pairJustCompleted;
         string _lastPairIp = "";
 
         public event EventHandler OpenSettingsRequested;
+        public event EventHandler ReturnToComputerRequested;
 
-        public ConnectionForm(ConnectionCoordinator connection, Config config)
+        public ConnectionForm(ConnectionCoordinator connection, Config config,
+            Func<bool> isControlling = null, Func<bool> switchingAvailable = null)
         {
             _connection = connection;
-            Text = "PC-KVM · 连接设备";
+            _config = config;
+            _isControlling = isControlling ?? delegate { return false; };
+            _switchingAvailable = switchingAvailable ?? delegate { return true; };
+            Text = "PC-KVM · 设备与连接";
             StartPosition = FormStartPosition.CenterScreen;
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
@@ -52,11 +62,12 @@ namespace PcKvm
             TableLayoutPanel root = new TableLayoutPanel();
             root.Dock = DockStyle.Fill;
             root.ColumnCount = 1;
-            root.RowCount = 3;
+            root.RowCount = 4;
             root.Padding = new Padding(16);
             root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 112F));
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 46F));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 64F));
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 44F));
             root.BackColor = Canvas;
 
@@ -71,10 +82,18 @@ namespace PcKvm
             sections.AutoSize = true;
             sections.AutoSizeMode = AutoSizeMode.GrowAndShrink;
             sections.ColumnCount = 1;
-            sections.RowCount = 3;
+            sections.RowCount = 5;
             sections.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
-            for (int i = 0; i < 3; i++) sections.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            for (int i = 0; i < 5; i++) sections.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             sections.BackColor = Canvas;
+            TableLayoutPanel errors = CreateGrid(1, 1);
+            errors.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            _errorDetails = Hint("");
+            _errorDetails.Name = "ErrorDetails";
+            _errorDetails.ForeColor = Color.Firebrick;
+            _errorDetails.MaximumSize = new Size(460, 0);
+            errors.Controls.Add(_errorDetails, 0, 0);
+            sections.Controls.Add(Card("连接提示", "ErrorCard", errors), 0, 0);
 
             TableLayoutPanel deviceLayout = CreateGrid(4, 2);
             deviceLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 76F));
@@ -104,7 +123,7 @@ namespace PcKvm
             _adbInfo.Dock = DockStyle.Fill;
             deviceLayout.Controls.Add(_adbInfo, 0, 3);
             deviceLayout.SetColumnSpan(_adbInfo, 2);
-            sections.Controls.Add(Card("设备", "DeviceCard", deviceLayout), 0, 0);
+            sections.Controls.Add(Card("设备", "DeviceCard", deviceLayout), 0, 1);
 
             TableLayoutPanel connectionLayout = CreateGrid(3, 2);
             connectionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 76F));
@@ -116,7 +135,12 @@ namespace PcKvm
             Label endpointHint = Hint("手动输入无线调试主页面的 IP:连接端口；与配对端口不同。");
             connectionLayout.Controls.Add(endpointHint, 0, 1);
             connectionLayout.SetColumnSpan(endpointHint, 2);
-            sections.Controls.Add(Card("无线连接", "ConnectionCard", connectionLayout), 0, 1);
+            Button showPairing = StyledButton("添加新设备 / 首次配对", "ShowPairing", false,
+                delegate { _showPairing = !_showPairing; RenderState(); });
+            showPairing.AutoSize = true;
+            connectionLayout.Controls.Add(showPairing, 0, 2);
+            connectionLayout.SetColumnSpan(showPairing, 2);
+            sections.Controls.Add(Card("无线连接", "ConnectionCard", connectionLayout), 0, 2);
 
             TableLayoutPanel pairingLayout = CreateGrid(4, 3);
             pairingLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 52F));
@@ -144,21 +168,36 @@ namespace PcKvm
                 delegate { _connection.CancelPair(); }));
             pairingLayout.Controls.Add(pairingActions, 0, 3);
             pairingLayout.SetColumnSpan(pairingActions, 3);
-            sections.Controls.Add(Card("首次配对", "PairCard", pairingLayout), 0, 2);
+            sections.Controls.Add(Card("首次配对", "PairCard", pairingLayout), 0, 3);
+            TableLayoutPanel usage = CreateGrid(2, 1);
+            usage.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            Label usageText = Hint("鼠标和键盘已可共享。按上方快捷键切换控制对象。\n\n双次贴边：向连接侧外推一次，回到屏内，再次向外推。\n\n断线后会自动返回电脑；重连成功后需要主动切换回 Android。\n\n关闭此窗口仍会保持连接，可从托盘重新打开。");
+            usageText.MaximumSize = new Size(460, 0);
+            usage.Controls.Add(usageText, 0, 0);
+            sections.Controls.Add(Card("使用说明", "UsageCard", usage), 0, 4);
 
             _status = new Label { Name = "ConnectionStatus", Dock = DockStyle.Fill,
-                Text = connection.State, ForeColor = Blue, AutoEllipsis = true,
+                Text = "关闭窗口后仍在托盘运行；退出请使用托盘菜单。", ForeColor = Muted, AutoEllipsis = false,
                 TextAlign = ContentAlignment.MiddleLeft, Margin = new Padding(0, 4, 0, 0) };
             FlowLayoutPanel footer = Actions();
             footer.Dock = DockStyle.Fill;
             footer.FlowDirection = FlowDirection.RightToLeft;
+            footer.Controls.Add(StyledButton("返回电脑", "ReturnToComputer", true, delegate {
+                EventHandler requested = ReturnToComputerRequested;
+                if (requested != null) requested(this, EventArgs.Empty);
+                RenderState();
+            }));
             footer.Controls.Add(StyledButton("连接", "ConnectDevice", true, delegate { Connect(); }));
             footer.Controls.Add(StyledButton("重试", "RetryConnection", false,
-                delegate { _connection.Retry(); }));
+                delegate { _status.Text = ""; _connection.Retry(); RenderState(); }));
             footer.Controls.Add(StyledButton("断开", "DisconnectDevice", false,
-                delegate { _connection.Disconnect(); }));
-            footer.Controls.Add(StyledButton("忘记设备", "ForgetDevice", false,
-                delegate { Forget(); }));
+                delegate { _connection.Disconnect(); _status.Text = "已断开，自动重连已停止。"; RenderState(); }));
+            Button more = StyledButton("更多…", "MoreActions", false, delegate { });
+            ContextMenu menu = new ContextMenu();
+            menu.MenuItems.Add("忘记设备…", delegate { Forget(); RenderState(); });
+            more.Click += delegate { menu.Show(more, new Point(0, more.Height)); };
+            more.Disposed += delegate { menu.Dispose(); };
+            footer.Controls.Add(more);
             footer.Controls.Add(StyledButton("设置…", "OpenSettings", false, delegate
             {
                 EventHandler requested = OpenSettingsRequested;
@@ -166,9 +205,18 @@ namespace PcKvm
             }));
 
             viewport.Controls.Add(sections);
-            root.Controls.Add(viewport, 0, 0);
-            root.Controls.Add(_status, 0, 1);
-            root.Controls.Add(footer, 0, 2);
+            TableLayoutPanel summaryLayout = CreateGrid(2, 1);
+            summaryLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            _summary = new Label { Name = "DeviceSummary", Dock = DockStyle.Fill, AutoSize = true,
+                Font = new Font(Font.FontFamily, 11F, FontStyle.Bold), Margin = new Padding(8) };
+            _instructions = new Label { Name = "ControlInstructions", Dock = DockStyle.Fill,
+                AutoSize = true, Margin = new Padding(8, 0, 8, 8), ForeColor = Muted };
+            summaryLayout.Controls.Add(_summary, 0, 0);
+            summaryLayout.Controls.Add(_instructions, 0, 1);
+            root.Controls.Add(summaryLayout, 0, 0);
+            root.Controls.Add(viewport, 0, 1);
+            root.Controls.Add(_status, 0, 2);
+            root.Controls.Add(footer, 0, 3);
             Controls.Add(root);
 
             _mode.SelectedIndexChanged += delegate { FilterDevices(); };
@@ -176,11 +224,59 @@ namespace PcKvm
             _connection.PairCompleted += OnPairCompleted;
             FormClosed += delegate
             {
+                _statusTimer.Stop();
+                _statusTimer.Dispose();
                 _connection.StateChanged -= OnStateChanged;
                 _connection.PairCompleted -= OnPairCompleted;
             };
             Shown += delegate { RefreshDevices(); };
+            _statusTimer = new System.Windows.Forms.Timer { Interval = 250 };
+            _statusTimer.Tick += delegate { RenderState(); };
+            _statusTimer.Start();
             FilterDevices();
+        }
+
+        Control Named(string name) { return Controls.Find(name, true)[0]; }
+
+        internal void RenderState()
+        {
+            RenderState(_connection.Snapshot());
+        }
+
+        internal void RenderState(ConnectionSnapshot state)
+        {
+            bool controlling = state.Ready && _isControlling();
+            bool wireless = _mode.SelectedIndex == 1;
+            string deviceName = state.Device;
+            foreach (AdbDevice device in _knownDevices)
+                if (device.Serial == state.Device && device.Model.Length > 0)
+                    deviceName = device.Model + " · " + device.Serial;
+            _summary.Text = state.Ready
+                ? (controlling ? "正在控制 Android" : "已连接 · 当前控制电脑")
+                    + "\n" + (state.Mode == "Usb" ? "USB" : "无线") + " · " + deviceName
+                : state.Desired ? (state.Error.Length > 0 ? "连接未完成 · 正在重试" : "正在连接设备") : "未连接设备";
+            _summary.ForeColor = state.Ready ? Color.SeaGreen : Ink;
+            _instructions.Text = state.Ready
+                ? (!_switchingAvailable() ? "切换快捷键暂不可用；请关闭设置或检查快捷键注册。 " : "按 " + _config.SwitchHotkey + " 切换。 ")
+                    + (_config.EnableEdgeSwitch ? "向" + (_config.PhoneOnLeft ? "左" : "右") + "侧双次贴边可进入 Android。 " : "贴边切换已关闭。 ")
+                    + "Ctrl+Alt+Esc 紧急返回电脑。"
+                : state.Error.Length > 0 ? "请根据下方提示修正连接信息，或重试连接。"
+                    : state.Desired ? state.Status : "选择 USB 或无线设备开始连接。";
+            _errorDetails.Text = state.Error;
+            Named("ErrorCard").Visible = !state.Ready && state.Error.Length > 0;
+            Named("DeviceCard").Visible = !state.Ready;
+            Named("ReturnToComputer").Visible = controlling;
+            Named("UsageCard").Visible = state.Ready;
+            Named("ConnectionCard").Visible = wireless && !state.Ready;
+            Named("PairCard").Visible = wireless && !state.Ready && _showPairing;
+            Named("ConnectDevice").Visible = !state.Ready;
+            Named("ConnectDevice").Enabled = !state.Pairing && !state.Attempting;
+            Named("RetryConnection").Visible = !state.Ready && state.Error.Length > 0;
+            Named("DisconnectDevice").Visible = state.Ready || state.Desired;
+            Named("DisconnectDevice").Text = state.Ready ? "断开连接" : "停止连接";
+            _pairButton.Enabled = wireless && !state.Pairing && !state.Ready;
+            Named("CancelPair").Enabled = state.Pairing;
+            Named("ChooseAdb").Enabled = !state.Ready && !state.Pairing;
         }
 
         static TableLayoutPanel CreateGrid(int rows, int columns)
@@ -250,22 +346,24 @@ namespace PcKvm
 
         void OnStateChanged(string value)
         {
-            try { BeginInvoke((MethodInvoker)delegate { if (!IsDisposed) _status.Text = value; }); }
+            try { BeginInvoke((MethodInvoker)delegate { if (!IsDisposed) RenderState(); }); }
             catch (Exception) { }
         }
 
         void OnPairCompleted(bool success, string message)
         {
-            if (!success) return;
             string pairedIp = _lastPairIp;
             try { BeginInvoke((MethodInvoker)delegate
             {
                 if (IsDisposed) return;
+                _status.Text = message;
+                if (!success) return;
                 _devices.SelectedIndex = 0;
                 string currentAddress = _endpoint.Text.Trim();
                 if (currentAddress.Length == 0 || currentAddress == pairedIp)
                     _endpoint.Text = pairedIp;
                 _pairJustCompleted = true;
+                _showPairing = false;
                 RefreshDevices();
             }); }
             catch (Exception) { }
@@ -288,7 +386,7 @@ namespace PcKvm
                     FilterDevices();
                     _status.Text = _pairJustCompleted
                         ? "配对完成；请在连接地址中补上手机主页面显示的连接端口。"
-                        : _connection.State;
+                        : devices.Count == 0 ? "未检测到设备。USB 请检查连接线与调试授权；无线请填写连接地址。" : "设备列表已更新。";
                     _pairJustCompleted = false;
                     _adbInfo.Text = "ADB: " + version + " · " + _connection.AdbPath;
                 }); }
@@ -302,12 +400,13 @@ namespace PcKvm
                 : ((DeviceChoice)_devices.SelectedItem).Serial;
             bool wireless = _mode.SelectedIndex == 1;
             _devices.Items.Clear();
-            _devices.Items.Add(new DeviceChoice("", "（自动 / 使用下方地址）"));
+            _devices.Items.Add(new DeviceChoice("", wireless ? "使用下方连接地址" : "自动选择 USB 设备"));
             foreach (AdbDevice device in _knownDevices)
             {
-                if (!device.IsOnline || device.IsUsb == wireless) continue;
+                if (device.IsUsb == wireless) continue;
                 _devices.Items.Add(new DeviceChoice(device.Serial,
-                    device.Serial + (device.Model.Length > 0 ? "  ·  " + device.Model : "")));
+                    device.Serial + (device.Model.Length > 0 ? "  ·  " + device.Model : "")
+                    + (device.IsOnline ? "" : device.State == "unauthorized" ? " · 请在手机允许 USB 调试" : " · 设备离线")));
             }
             _devices.SelectedIndex = 0;
             for (int i = 1; i < _devices.Items.Count; i++)
@@ -317,6 +416,7 @@ namespace PcKvm
             _pairPort.Enabled = wireless;
             _pairCode.Enabled = wireless;
             _pairButton.Enabled = wireless;
+            RenderState();
         }
 
         static bool TryParsePairIp(string text, out IPAddress address)
@@ -334,7 +434,6 @@ namespace PcKvm
         void Pair()
         {
             string code = _pairCode.Text;
-            _pairCode.Clear();
             if (code == null || code.Length != 6)
             { _status.Text = "配对码需要六位数字"; return; }
             foreach (char c in code) if (c < '0' || c > '9')
@@ -347,9 +446,12 @@ namespace PcKvm
             { _status.Text = "请输入手机配对弹窗中的端口（1–65535）"; return; }
             try
             {
+                _pairCode.Clear();
                 _lastPairIp = address.ToString();
                 _pairJustCompleted = false;
                 _connection.Pair(endpoint.ToString(), code);
+                _status.Text = "正在配对…";
+                RenderState();
             }
             catch (Exception ex) { _status.Text = ex.Message; }
         }
@@ -386,6 +488,13 @@ namespace PcKvm
                 DeviceChoice choice = _devices.SelectedItem as DeviceChoice;
                 string serial = choice == null ? "" : choice.Serial;
                 bool wireless = _mode.SelectedIndex == 1;
+                foreach (AdbDevice device in _knownDevices)
+                    if (device.Serial == serial && !device.IsOnline)
+                    {
+                        _status.Text = device.State == "unauthorized"
+                            ? "请在手机上允许 USB 调试，然后刷新设备。" : "设备离线，请检查连接后刷新设备。";
+                        return;
+                    }
                 string endpoint = "";
                 if (wireless && serial.Length == 0)
                 {
@@ -395,6 +504,8 @@ namespace PcKvm
                     endpoint = parsed.ToString();
                 }
                 _connection.Connect(wireless ? "WirelessTls" : "Usb", serial, endpoint);
+                _status.Text = "连接请求已提交。";
+                RenderState();
             }
             catch (Exception ex) { _status.Text = ex.Message; }
         }
