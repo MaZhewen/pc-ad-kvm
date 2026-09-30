@@ -14,5 +14,13 @@ try {
     & "$out\connection-form.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Connection form test failed' }
 } finally {
-    Remove-Item -LiteralPath $out -Recurse -Force
+    for ($attempt = 0; $attempt -lt 100; $attempt++) {
+        try {
+            Remove-Item -LiteralPath $out -Recurse -Force -ErrorAction Stop
+            break
+        } catch {
+            if ($attempt -eq 99) { throw }
+            Start-Sleep -Milliseconds 100
+        }
+    }
 }

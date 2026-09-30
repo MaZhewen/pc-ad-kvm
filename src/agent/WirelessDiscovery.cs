@@ -46,6 +46,16 @@ namespace PcKvm
     {
         public static List<WirelessService> Parse(string output)
         {
+            return ParseService(output, "_adb-tls-connect._tcp");
+        }
+
+        public static List<WirelessService> ParsePairing(string output)
+        {
+            return ParseService(output, "_adb-tls-pairing._tcp");
+        }
+
+        static List<WirelessService> ParseService(string output, string serviceType)
+        {
             List<WirelessService> services = new List<WirelessService>();
             if (String.IsNullOrEmpty(output)) return services;
             foreach (string raw in output.Replace("\r", "").Split('\n'))
@@ -53,8 +63,8 @@ namespace PcKvm
                 string[] parts = raw.Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
                 if (parts.Length < 2) continue;
                 string name = parts[0].TrimEnd('.');
-                bool combined = name.EndsWith("._adb-tls-connect._tcp", StringComparison.Ordinal);
-                bool separated = parts.Length >= 3 && parts[1].TrimEnd('.') == "_adb-tls-connect._tcp";
+                bool combined = name.EndsWith("." + serviceType, StringComparison.Ordinal);
+                bool separated = parts.Length >= 3 && parts[1].TrimEnd('.') == serviceType;
                 if (!combined && !separated) continue;
                 WirelessEndpoint endpoint;
                 if (WirelessEndpoint.TryParse(parts[parts.Length - 1], out endpoint))

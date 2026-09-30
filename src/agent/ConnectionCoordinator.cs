@@ -185,6 +185,12 @@ namespace PcKvm
             return result.Success ? WirelessDiscovery.Parse(result.Stdout) : new List<WirelessService>();
         }
 
+        public List<WirelessService> PairingServices(CancellationToken cancel)
+        {
+            AdbResult result = _adb.Execute(new string[] { "mdns", "services" }, null, 5000, null, cancel);
+            return result.Success ? WirelessDiscovery.ParsePairing(result.Stdout) : new List<WirelessService>();
+        }
+
         /** Verify a scan candidate without deploying KVM or changing the saved profile. */
         public bool VerifyWirelessEndpoint(string endpoint, CancellationToken cancel)
         {
