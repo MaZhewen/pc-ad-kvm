@@ -1,14 +1,21 @@
 import java.io.OutputStream;
 /** Versioned mouse session; socket thread owns all mutable state. */
 public final class AbsoluteSession {
+ interface TouchAction { boolean down(int x,int y); boolean move(int x,int y); boolean up(int x,int y); void cancel(); }
  UhidDevice mouse;
  int epoch,width,height,rotation,x,y,buttons;
  boolean active;
  Object inputDevice;
+ boolean leftDown;
+ final TouchAction touchAction;
  AbsoluteTransform transform;
  long nextCaptureAt;
  final Class<?> input;
  public AbsoluteSession() throws Exception {
+  this(new TouchPointer());
+ }
+ AbsoluteSession(TouchAction touchAction) throws Exception {
+  this.touchAction=touchAction;
   input=Class.forName("android.view.InputDevice");
  }
  public boolean handle(int type,byte[] p,OutputStream out) throws Exception {
@@ -31,18 +38,40 @@ public final class AbsoluteSession {
   if(type==0x08) { if(mouse!=null && transform==null) tryReady(out); return false; }
   if(type==0x0b) {
    if(epoch==0||transform==null||Injector.i32(p,0)!=epoch) return true;
-   x=Injector.u16(p,8); y=Injector.u16(p,10);
-   active=true; send(0);
+   int nx=Injector.u16(p,8), ny=Injector.u16(p,10);
+   boolean moved=nx!=x || ny!=y;
+   x=nx; y=ny;
+   if(active && leftDown && moved) touchAction.move(x,y);
+   active=true;
+   if(!leftDown) send(0);
    // Acknowledge UHID submission, not display presentation. PC also requires
    // sustained outward movement, and never trusts an acknowledgement from an old epoch.
    byte[] ack=new byte[13]; ack[0]=0x0e; System.arraycopy(p,0,ack,1,12);
    out.write(ack); out.flush(); return true;
   }
   if(type==0x03) {
-   if(active) { int bit=Injector.btnToBit(p[0]&255); if(p[1]!=0) buttons|=bit; else buttons&=~bit; send(0); }
+   if(active) {
+    int btn=p[0]&255, bit=Injector.btnToBit(btn);
+    boolean down=p[1]!=0;
+    if(btn==1) {
+     if(down) {
+      if(leftDown) touchAction.cancel();
+      leftDown=true;
+      if(!touchAction.down(x,y)) System.out.println("Touch down failed; left click suppressed");
+     } else if(leftDown) {
+      if(!touchAction.up(x,y)) System.out.println("Touch up failed; left click suppressed");
+      leftDown=false;
+      send(0);
+     }
+     return true;
+    }
+    if(down && leftDown) { touchAction.cancel(); leftDown=false; }
+    if(down) buttons|=bit; else buttons&=~bit;
+    send(0);
+   }
    return true;
   }
-  if(type==0x04) { if(active) send(Injector.clamp127(Injector.i16(p,2))); return true; }
+  if(type==0x04) { if(leftDown) { touchAction.cancel(); leftDown=false; } if(active) send(Injector.clamp127(Injector.i16(p,2))); return true; }
   if(type==0x06) { release(); return false; } // keyboard release remains in Injector
   if(type==0x01||type==0x02||type==0x0a) return true; // legacy relative path is never used
   return false;
@@ -52,7 +81,7 @@ public final class AbsoluteSession {
   int[] raw=transform.raw(x,y);
   mouse.sendReport(AbsolutePointer.rawReport(buttons,raw[0],raw[1],wheel,active));
  }
- void release() throws Exception { buttons=0; active=false; if(width>0) send(0); }
+ void release() throws Exception { if(leftDown) touchAction.cancel(); leftDown=false; buttons=0; active=false; if(width>0) send(0); }
  void tryReady(OutputStream out) throws Exception {
   long now=System.currentTimeMillis();
   if(now<nextCaptureAt) return;

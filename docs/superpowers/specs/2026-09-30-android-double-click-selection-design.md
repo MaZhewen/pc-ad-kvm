@@ -1,21 +1,19 @@
-# Android mouse double-click selection design
+# Android left-click selection design
 
 ## Problem and evidence
 
-On the connected Android device, double-clicking a word in the WeChat compose field sends that word. A finger double-tap selects it. A captured PC-KVM double-click produced two left-button down/up pairs at the same pointer coordinates, roughly 69 ms apart, with no keyboard event. Android classifies the PC-KVM pointer as a mouse. The observed difference therefore lies after mouse event delivery; WeChat's internal handling is not observable here.
+In WeChat's compose field, a PC-KVM mouse double-click can send the selected word, while a finger double-tap selects it. PC-KVM forwards left-button presses as a UHID mouse. Android's input trace showed no keyboard event during the accidental send. The first attempt preserved the first mouse click and converted the second to two touch taps; selection appeared and vanished. Converting only the second click to one touch tap kept selection more often, but the first mouse click still reached WeChat and roughly one in five user trials sent text. The precise WeChat handler is not observable, so the reliable boundary is to stop forwarding left-button mouse clicks altogether.
 
 ## Intended behavior
 
-A PC-KVM mouse double-click at one position should select the word as a finger double-tap does and must not send it. Ordinary single clicks, right/middle clicks, scrolling, and pointer movement should keep their current behavior. This change addresses double-clicks only.
+Two PC-KVM left clicks should reach Android as two touchscreen taps, matching the user's working finger gesture and selecting a word without sending it. A single left click should behave as a touchscreen tap. Holding and moving the left button should form one continuous touch gesture. Pointer hover, right/middle buttons, and wheel input remain on the existing UHID mouse path.
 
 ## Design
 
-Keep the first completed left click as a mouse click. If a second left-button press follows within Android's double-tap interval and close to the first position, suppress that second mouse press and release. On its release, inject two touchscreen taps at the Android display coordinates through InputManager from the shell-owned injector process. The touch events use one consistent display ID, source, device ID, and monotonically ordered event times. If injection fails, swallow the second mouse click and log the failure rather than forwarding the click that may send text.
+`AbsoluteSession` routes left-button down, pointer movement while held, and up to `TouchPointer`, and never sets the UHID primary-button bit. `TouchPointer` creates touchscreen `MotionEvent` down/move/up events on display 0 through the shell process's `InputManagerGlobal`. Each gesture shares one `downTime`, event times are monotonic, and each injection waits for a dispatch result. Leave, disconnect, geometry changes, wheel input, and another button cancel an active touch. If injection fails, the left click is swallowed instead of falling back to the mouse path that may send text.
 
-The recognition state lives in a small pure Java class. AbsoluteSession owns the Android input injector and integrates the recognition into button forwarding. A left-button drag cancels double-click candidacy. State resets on leave, disconnect, geometry change, and close.
+This change necessarily makes all Android-side PC-KVM left clicks touch based, so it needs device verification beyond Java tests.
 
 ## Verification
 
-Test the recognizer offline for timing, distance, interrupted sequences, drag, and reset. Test the touch-event construction and failure behavior without an Android device where possible. Build the Android injector and run existing pointer/session tests. Then verify on the connected device in WeChat File Transfer Assistant using disposable text: double-click selects one word without sending it; single click and right click still work.
-
-The device test is necessary because Android input delivery and WeChat's response cannot be proven by an offline unit test.
+Tests cover two taps with separate down times, drag movement, cancellation, injection failure, session event routing, and no UHID primary-button state. Build the injector and run existing pointer and session suites. On the device, test WeChat File Transfer Assistant with disposable text: repeated double-clicks should keep the word selected and never send it; a single click and other mouse buttons should remain usable.
