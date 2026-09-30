@@ -266,7 +266,7 @@ namespace PcKvm
             ok.ForeColor = Color.White;
             ok.UseVisualStyleBackColor = false;
             ok.Size = new Size(88, 32);
-            ok.Click += delegate { if (ReadBack()) DialogResult = DialogResult.OK; };
+            ok.Click += delegate { if (ReadBack()) Finish(DialogResult.OK); };
             ok.Margin = new Padding(3, 3, 0, 3);
 
             Button cancel = new Button();
@@ -280,6 +280,7 @@ namespace PcKvm
             cancel.UseVisualStyleBackColor = false;
             cancel.Size = new Size(88, 32);
             cancel.DialogResult = DialogResult.Cancel;
+            cancel.Click += delegate { Finish(DialogResult.Cancel); };
             cancel.Margin = new Padding(3, 3, 8, 3);
 
             FlowLayoutPanel buttonRow = new FlowLayoutPanel();
@@ -305,7 +306,7 @@ namespace PcKvm
             {
                 if (!ReadBack()) return;
                 ConnectAfterApply = true;
-                DialogResult = DialogResult.OK;
+                Finish(DialogResult.OK);
             };
             TableLayoutPanel footer = new TableLayoutPanel();
             footer.Dock = DockStyle.Fill;
@@ -324,6 +325,14 @@ namespace PcKvm
             CancelButton = cancel;
 
             OnSpeedChanged();   // 初始显示数值
+        }
+
+        void Finish(DialogResult result)
+        {
+            DialogResult = result;
+            // ShowDialog closes itself after DialogResult is set; a modeless form needs
+            // an explicit Close so its FormClosed handler can apply the settings.
+            if (!Modal) Close();
         }
 
         static TableLayoutPanel CreateVerticalLayout(int rows)

@@ -1,6 +1,8 @@
 using System;
 using System.Drawing;
+using System.IO;
 using System.Runtime.InteropServices;
+using System.Reflection;
 using System.Windows.Forms;
 using PcKvm;
 
@@ -177,6 +179,48 @@ class HostTest {
       Check(suppressor.Engage(),"hidden host can acquire foreground for takeover");
      } finally { suppressor.Release(); Application.DoEvents(); }
      Check(!IsWindowVisible(hwnd),"takeover release restores click-through idle state");
+    }
+    using(RecreatedHost settingsHost=new RecreatedHost()) {
+     Config liveConfig=new Config();
+     var ui=new TrayUi(settingsHost,null,null,null,null,new StringWriter(),liveConfig,
+      delegate(HotkeyBinding binding){return true;});
+     int applied=0;
+     ui.SettingsApplied+=delegate(Config updated){applied++;};
+     FieldInfo dialogField=typeof(TrayUi).GetField("_settingsDialog",
+      BindingFlags.Instance|BindingFlags.NonPublic);
+     bool watchdogFired=false;
+     using(var watchdog=new System.Windows.Forms.Timer()) {
+      watchdog.Interval=1000;
+      watchdog.Tick+=delegate {
+       watchdog.Stop(); watchdogFired=true;
+       SettingsForm blocking=(SettingsForm)dialogField.GetValue(ui);
+       if(blocking!=null) blocking.Close();
+      };
+      watchdog.Start();
+      ui.OpenSettings();
+      watchdog.Stop();
+     }
+     SettingsForm opened=(SettingsForm)dialogField.GetValue(ui);
+     Check(!watchdogFired && opened!=null && opened.Visible && settingsHost.Enabled,
+      "Settings stays modeless and leaves capture host enabled");
+     FindControl<Button>(opened,"确定").PerformClick();
+     Application.DoEvents();
+     Check(applied==1 && dialogField.GetValue(ui)==null && settingsHost.SwitchingEnabled,
+      "modeless Settings applies and restores shortcut state on confirm");
+     ui.OpenSettings();
+     opened=(SettingsForm)dialogField.GetValue(ui);
+     FindControl<Button>(opened,"取消").PerformClick();
+     Application.DoEvents();
+     Check(applied==1 && dialogField.GetValue(ui)==null && settingsHost.SwitchingEnabled,
+      "modeless Settings cancellation closes without applying");
+     var brokenUi=new TrayUi(settingsHost,null,null,null,null,new StringWriter(),null,
+      delegate(HotkeyBinding binding){return true;});
+     bool constructorFailed=false;
+     try { brokenUi.OpenSettings(); }
+     catch(NullReferenceException) { constructorFailed=true; }
+     Check(constructorFailed && settingsHost.SwitchingEnabled
+      && dialogField.GetValue(brokenUi)==null,
+      "Settings construction failure restores shortcut state");
     }
    }
    return 0;

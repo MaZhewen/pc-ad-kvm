@@ -119,35 +119,43 @@ namespace PcKvm
 
             _host.SwitchingEnabled = false;
             SettingsForm form = null;
-            DialogResult result = DialogResult.Cancel;
-            bool connectAfterApply = false;
             try
             {
                 form = new SettingsForm(_cfg, _trySwitchHotkey);
                 _settingsDialog = form;
-                result = form.ShowDialog(_host);
-                if (result != DialogResult.OK) return;
-                connectAfterApply = form.ConnectAfterApply;
+                form.FormClosed += delegate
+                {
+                    if (Object.ReferenceEquals(_settingsDialog, form))
+                        _settingsDialog = null;
+                    _host.SwitchingEnabled = true;
+                    if (form.DialogResult != DialogResult.OK) return;
+                    bool connectAfterApply = form.ConnectAfterApply;
 
-                _cfg.MouseSensitivity = form.MouseSensitivity;
-                _cfg.AllowKillAdb = form.AllowKillAdb;
-                _cfg.PhoneOnLeft = form.PhoneOnLeft;
-                _cfg.EnableEdgeSwitch = form.EnableEdgeSwitch;
-                _cfg.SwitchHotkey = form.SwitchHotkey;
-                if (!_cfg.Save())
-                    _log.WriteLine("# 配置写盘失败（设置本次仍生效，只是下次启动会丢）");
+                    _cfg.MouseSensitivity = form.MouseSensitivity;
+                    _cfg.AllowKillAdb = form.AllowKillAdb;
+                    _cfg.PhoneOnLeft = form.PhoneOnLeft;
+                    _cfg.EnableEdgeSwitch = form.EnableEdgeSwitch;
+                    _cfg.SwitchHotkey = form.SwitchHotkey;
+                    if (!_cfg.Save())
+                        _log.WriteLine("# 配置写盘失败（设置本次仍生效，只是下次启动会丢）");
+
+                    Action<Config> h = SettingsApplied;
+                    if (h != null) h(_cfg);
+                    if (connectAfterApply) OpenConnection();
+                };
+                // A modal dialog disables its owner (the capture window). Windows then
+                // redirects a pinned mouse click back to Settings and ends takeover.
+                form.Show();
+                form.BringToFront();
             }
-            finally
+            catch
             {
                 if (Object.ReferenceEquals(_settingsDialog, form))
                     _settingsDialog = null;
-                if (form != null) form.Dispose();
                 _host.SwitchingEnabled = true;
+                if (form != null) form.Dispose();
+                throw;
             }
-
-            Action<Config> h = SettingsApplied;
-            if (h != null) h(_cfg);
-            if (connectAfterApply) OpenConnection();
         }
     }
 }
