@@ -7,11 +7,13 @@
 ```powershell
 pwsh -File tests\connection\run.ps1
 pwsh -File tests\coordinator\run.ps1
+pwsh -File tests\port-scan\run.ps1
+pwsh -File tests\connection-form\run.ps1
 pwsh -File tests\transport\run.ps1
 pwsh -File tests\session\run.ps1
 ```
 
-它们覆盖 ADB 目标选择与超时、手动选择时的设备身份校验、会话握手与断线通知、Android 侧心跳及半帧超时。`coordinator` 使用假 ADB，确保身份不匹配时不会部署注入器。真机的无线调试、反向隧道和 UHID 仍需按设计文档的验收步骤验证。
+它们覆盖 ADB 目标选择与超时、手动选择时的设备身份校验、单 IP 端口探测和取消、连接窗口结果填入、会话握手与断线通知、Android 侧心跳及半帧超时。`coordinator` 和 `connection-form` 使用假 ADB，确保身份不匹配或仅执行扫描时不会部署注入器。真机的无线调试、反向隧道和 UHID 仍需按设计文档的验收步骤验证。
 
 三个纯逻辑 harness，**不需要手机、不需要 adb、不需要用户在场**（对比：本项目大多数验收是真机 + 人眼）。
 

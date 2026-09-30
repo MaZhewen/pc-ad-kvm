@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Net;
+using System.Diagnostics;
 using System.Threading;
 using System.Windows.Forms;
 
@@ -23,11 +25,19 @@ namespace PcKvm
         readonly ComboBox _mode, _devices, _endpoint;
         readonly TextBox _pairEndpoint, _pairCode;
         readonly Label _status, _hint, _adbInfo;
+        readonly Button _scanButton, _cancelScanButton;
         List<AdbDevice> _knownDevices = new List<AdbDevice>();
         bool _refreshing;
+        CancellationTokenSource _scanCancel;
+        int _scanEpoch;
+        readonly int _scanTimeoutMs;
 
-        public ConnectionForm(ConnectionCoordinator connection, Config config)
+        public ConnectionForm(ConnectionCoordinator connection, Config config) : this(connection, config, 180000) { }
+
+        internal ConnectionForm(ConnectionCoordinator connection, Config config, int scanTimeoutMs)
         {
+            if (scanTimeoutMs < 1) throw new ArgumentOutOfRangeException("scanTimeoutMs");
+            _scanTimeoutMs = scanTimeoutMs;
             _connection = connection; _config = config;
             Text = "PC-KVM · 连接设备";
             ClientSize = new Size(560, 420);
@@ -46,14 +56,18 @@ namespace PcKvm
             Button refresh = Button("刷新设备", 315, 17, 105, delegate { RefreshDevices(); });
             Button chooseAdb = Button("选择 ADB", 430, 17, 90, delegate { BrowseAdb(); });
             AddLabel("在线设备", 20, 61, 90);
-            _devices = new ComboBox { Left = 115, Top = 57, Width = 405, DropDownStyle = ComboBoxStyle.DropDownList };
+            _devices = new ComboBox { Name = "ConnectionDevices", Left = 115, Top = 57,
+                Width = 405, DropDownStyle = ComboBoxStyle.DropDownList };
             Controls.Add(_devices);
 
             AddLabel("连接地址", 20, 104, 90);
-            _endpoint = new ComboBox { Left = 115, Top = 100, Width = 405, DropDownStyle = ComboBoxStyle.DropDown };
+            _endpoint = new ComboBox { Name = "ConnectionEndpoint", Left = 115, Top = 100,
+                Width = 300, DropDownStyle = ComboBoxStyle.DropDown };
             _endpoint.Text = config.WirelessLastEndpoint;
             Controls.Add(_endpoint);
-            _hint = AddLabel("连接端口在手机“无线调试”主页面；配对弹窗端口与它不同。", 115, 129, 425);
+            _scanButton = Button("扫描端口", 425, 100, 95, delegate { ScanPorts(); });
+            _scanButton.Name = "ScanPorts";
+            _hint = AddLabel("可输入 IPv4 扫描；连接端口在无线调试主页面，配对端口不同。", 115, 129, 425);
             _hint.ForeColor = Color.DimGray;
 
             GroupBox pairing = new GroupBox { Text = "首次配对", Left = 20, Top = 162, Width = 520, Height = 95 };
@@ -75,16 +89,21 @@ namespace PcKvm
             Button retry = Button("重试", 120, 277, 90, delegate { _connection.Retry(); });
             Button disconnect = Button("断开", 220, 277, 90, delegate { _connection.Disconnect(); });
             Button forget = Button("忘记设备", 320, 277, 100, delegate { Forget(); });
+            _cancelScanButton = Button("取消扫描", 430, 277, 90, delegate { CancelScan(); });
+            _cancelScanButton.Name = "CancelScan";
+            _cancelScanButton.Enabled = false;
             _status = AddLabel(connection.State, 20, 327, 520);
+            _status.Name = "ConnectionStatus";
             _status.AutoSize = false; _status.Height = 45;
             _status.ForeColor = Color.DarkSlateBlue;
             _adbInfo = AddLabel("ADB: " + connection.AdbPath, 20, 380, 520);
             _adbInfo.ForeColor = Color.DimGray;
-            _mode.SelectedIndexChanged += delegate { FilterDevices(); };
+            _mode.SelectedIndexChanged += delegate { if (_mode.SelectedIndex != 1) CancelScan(); FilterDevices(); };
             _connection.StateChanged += OnStateChanged;
             _connection.PairCompleted += OnPairCompleted;
             FormClosed += delegate
             {
+                CancelScan();
                 _connection.StateChanged -= OnStateChanged;
                 _connection.PairCompleted -= OnPairCompleted;
             };
@@ -144,7 +163,8 @@ namespace PcKvm
                             if (!_endpoint.Items.Contains(service.Endpoint.ToString()))
                                 _endpoint.Items.Add(service.Endpoint.ToString());
                         _endpoint.Text = typed;
-                        _status.Text = _connection.State + "（发现 " + services.Count + " 个连接服务）";
+                        if (_scanCancel == null)
+                            _status.Text = _connection.State + "（发现 " + services.Count + " 个连接服务）";
                         _adbInfo.Text = "ADB: " + version + " · " + _connection.AdbPath;
                     });
                 }
@@ -168,8 +188,106 @@ namespace PcKvm
             for (int i = 1; i < _devices.Items.Count; i++)
                 if (((DeviceChoice)_devices.Items[i]).Serial == previous) _devices.SelectedIndex = i;
             _endpoint.Enabled = wireless;
+            _scanButton.Enabled = wireless && _scanCancel == null;
             _pairEndpoint.Enabled = wireless;
             _pairCode.Enabled = wireless;
+        }
+
+        void ScanPorts()
+        {
+            if (_mode.SelectedIndex != 1) return;
+            IPAddress address;
+            if (!WirelessPortScanner.TryParseAddress(_endpoint.Text.Trim(), out address))
+            { _status.Text = "请输入要扫描的 IPv4 地址"; return; }
+            CancelScan();
+            CancellationTokenSource cancellation = new CancellationTokenSource();
+            cancellation.CancelAfter(_scanTimeoutMs);
+            Stopwatch elapsed = Stopwatch.StartNew();
+            _scanCancel = cancellation;
+            int epoch = ++_scanEpoch;
+            _scanButton.Enabled = false;
+            _cancelScanButton.Enabled = true;
+            _status.Text = "正在查找 " + address + " 的无线调试端口…";
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                string found = null;
+                string error = null;
+                WirelessPortScanner.ScanResult result = null;
+                try
+                {
+                    List<WirelessService> services = _connection.Services(cancellation.Token);
+                    foreach (WirelessService service in services)
+                    {
+                        if (cancellation.IsCancellationRequested) break;
+                        if (service.Endpoint.Address != address.ToString()) continue;
+                        string candidate = service.Endpoint.ToString();
+                        if (_connection.VerifyWirelessEndpoint(candidate, cancellation.Token))
+                        { found = candidate; break; }
+                    }
+                    if (found == null && !cancellation.IsCancellationRequested)
+                    {
+                        object verificationGate = new object();
+                        int verifiedPort = 0;
+                        int remainingMs = Math.Max(1, _scanTimeoutMs - (int)elapsed.ElapsedMilliseconds);
+                        result = WirelessPortScanner.Scan(address, WirelessPortScanner.OrderedPorts(),
+                            delegate(int port, CancellationToken scanToken)
+                            {
+                                lock (verificationGate)
+                                {
+                                    if (verifiedPort != 0 || scanToken.IsCancellationRequested) return false;
+                                    if (!_connection.VerifyWirelessEndpoint(address + ":" + port, scanToken)) return false;
+                                    verifiedPort = port;
+                                    return true;
+                                }
+                            },
+                            delegate(int done, int total)
+                            {
+                                try { BeginInvoke((MethodInvoker)delegate
+                                {
+                                    if (!IsDisposed && epoch == _scanEpoch && Object.ReferenceEquals(_scanCancel, cancellation))
+                                        _status.Text = "正在扫描 " + address + "：" + done + "/" + total;
+                                }); }
+                                catch (Exception) { }
+                            }, cancellation.Token, remainingMs);
+                        if (result.FoundPort > 0) found = address + ":" + result.FoundPort;
+                    }
+                }
+                catch (Exception ex) { error = ex.Message; }
+                try { BeginInvoke((MethodInvoker)delegate
+                {
+                    try
+                    {
+                        if (IsDisposed || epoch != _scanEpoch || !Object.ReferenceEquals(_scanCancel, cancellation)) return;
+                        _scanCancel = null;
+                        _scanButton.Enabled = _mode.SelectedIndex == 1;
+                        _cancelScanButton.Enabled = false;
+                        if (found != null)
+                        {
+                            _devices.SelectedIndex = 0; // The verified endpoint wins over an earlier list selection.
+                            _endpoint.Text = found;
+                            _status.Text = "已验证无线调试端口 " + found + "；点击“连接”继续";
+                        }
+                        else if (error != null) _status.Text = "扫描失败：" + error;
+                        else _status.Text = cancellation.IsCancellationRequested || result != null && result.TimedOut
+                            ? "扫描已达时间上限；可输入手机显示的连接端口"
+                            : "未发现已验证的无线调试端口；请检查配对或手动输入连接端口";
+                    }
+                    finally { cancellation.Dispose(); }
+                }); }
+                catch (Exception) { cancellation.Dispose(); }
+            });
+        }
+
+        void CancelScan()
+        {
+            CancellationTokenSource cancellation = _scanCancel;
+            if (cancellation == null) return;
+            _scanEpoch++;
+            _scanCancel = null;
+            cancellation.Cancel();
+            _cancelScanButton.Enabled = false;
+            _scanButton.Enabled = _mode.SelectedIndex == 1;
+            _status.Text = "端口扫描已取消";
         }
 
         void Pair()
@@ -182,6 +300,7 @@ namespace PcKvm
 
         void BrowseAdb()
         {
+            CancelScan();
             using (OpenFileDialog dialog = new OpenFileDialog())
             {
                 dialog.Filter = "Android Debug Bridge (adb.exe)|adb.exe|可执行文件 (*.exe)|*.exe";
@@ -206,6 +325,7 @@ namespace PcKvm
 
         void Connect()
         {
+            CancelScan();
             try
             {
                 DeviceChoice choice = _devices.SelectedItem as DeviceChoice;

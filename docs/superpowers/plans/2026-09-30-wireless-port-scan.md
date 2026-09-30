@@ -25,7 +25,7 @@
 
 - [ ] Add failing fake-ADB cases: an open port with no exact online ADB endpoint is rejected; a candidate with `ro.serialno` different from saved identity is rejected; a matching endpoint is returned without reverse, push, or injector start.
 - [ ] Run `./tests/coordinator/run.ps1`; expect missing verification API.
-- [ ] Add `VerifyWirelessEndpoint` that executes target-specific `adb connect`, `devices -l`, and `getprop ro.serialno`, applying the existing identity rule and cleaning up only a scan-created wrong endpoint.
+- [ ] Add `VerifyWirelessEndpoint` that executes target-specific `adb connect`, `devices -l`, and `getprop ro.serialno`, applying the existing identity rule. Do not disconnect shared ADB transports after a failed probe because ownership cannot be established across processes.
 - [ ] Run the coordinator tests and `./tests/connection/run.ps1`; expect all pass.
 
 ### Task 3: Nonblocking connection-window flow

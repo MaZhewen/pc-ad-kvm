@@ -176,8 +176,43 @@ namespace PcKvm
 
         public List<WirelessService> Services()
         {
-            AdbResult result = _adb.Execute(new string[] { "mdns", "services" }, null, 5000, null, CancellationToken.None);
+            return Services(CancellationToken.None);
+        }
+
+        public List<WirelessService> Services(CancellationToken cancel)
+        {
+            AdbResult result = _adb.Execute(new string[] { "mdns", "services" }, null, 5000, null, cancel);
             return result.Success ? WirelessDiscovery.Parse(result.Stdout) : new List<WirelessService>();
+        }
+
+        /** Verify a scan candidate without deploying KVM or changing the saved profile. */
+        public bool VerifyWirelessEndpoint(string endpoint, CancellationToken cancel)
+        {
+            WirelessEndpoint parsed;
+            if (!WirelessEndpoint.TryParse(endpoint, out parsed)) return false;
+            if (_stopping || cancel.IsCancellationRequested) return false;
+            AdbClient client;
+            lock (_gate) client = _adb;
+            // ADB transports are shared across processes. A scan cannot prove ownership of a
+            // newly listed endpoint, so it must never disconnect one after a failed probe.
+            AdbResult connected = client.Execute(new string[] { "connect", endpoint }, null, 5000, null, cancel);
+            if (!connected.Success || cancel.IsCancellationRequested) return false;
+            AdbResult listing = client.Execute(new string[] { "devices", "-l" }, null, 5000, null, cancel);
+            if (!listing.Success) return false;
+            foreach (AdbDevice device in AdbDevice.Parse(listing.Stdout))
+            {
+                if (!device.IsOnline || device.IsUsb || device.Serial != endpoint) continue;
+                AdbResult identity = client.Execute(new string[] { "shell", "getprop ro.serialno" },
+                    device.Target, 5000, null, cancel);
+                if (!identity.Success || cancel.IsCancellationRequested) return false;
+                string serial = identity.Stdout.Trim();
+                if (serial.Length == 0 || String.Equals(serial, "unknown", StringComparison.OrdinalIgnoreCase))
+                    return false;
+                if (_config.WirelessDeviceSerial.Length > 0 && serial != _config.WirelessDeviceSerial)
+                    return false;
+                return true;
+            }
+            return false;
         }
 
         public void Pair(string pairEndpoint, string code)
