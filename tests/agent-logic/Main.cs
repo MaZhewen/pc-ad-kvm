@@ -188,6 +188,15 @@ static class AgentLogicTest
         // 清理 C9 写下的 ini（C10 还要用它，所以删在最后），保证重跑从零开始
         try { File.Delete(iniPath); } catch (Exception) { }
 
+        Config oldConnection = Config.Parse("MouseSensitivity=1.25\n", null);
+        Check("C11 old ini defaults to USB", oldConnection.ConnectionMode == "Usb" && oldConnection.UsbSerial == "", "mode=" + oldConnection.ConnectionMode);
+        Config wireless = Config.Parse("ConnectionMode=WirelessTls\nWirelessDeviceSerial=tablet-123\nWirelessLastEndpoint=192.168.1.5:39123\n", null);
+        Check("C12 wireless identity retained", wireless.ConnectionMode == "WirelessTls" && wireless.WirelessDeviceSerial == "tablet-123" && wireless.WirelessLastEndpoint == "192.168.1.5:39123", "wireless profile");
+        Config badConnection = Config.Parse("ConnectionMode=WirelessTls\nWirelessDeviceSerial=other device\n", null);
+        Check("C13 invalid saved identity flagged", badConnection.ConnectionConfigError.Length > 0 && badConnection.WirelessDeviceSerial == "", "error=" + badConnection.ConnectionConfigError);
+        Config adbPath = Config.Parse("AdbPath=C:\\Android Tools\\adb.exe\n", null);
+        Check("C14 configured adb executable path retained", adbPath.AdbPath == "C:\\Android Tools\\adb.exe", "path=" + adbPath.AdbPath);
+
         // ---- S1: 系数 1.0 时逐位透传 ----
         MouseScaler ms = new MouseScaler(1.0);
         Check("S1 系数1透传", ms.ApplyX(7) == 7 && ms.ApplyX(-3) == -3 && ms.ApplyY(11) == 11,

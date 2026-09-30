@@ -86,6 +86,14 @@
             _mainVirtualKey = mainVirtualKey;
         }
 
+        public void Reset()
+        {
+            _active = false;
+            _mainKeyReleased = false;
+            _forwardedOtherKey = false;
+            _mainVirtualKey = 0;
+        }
+
         public bool ShouldSuppress(int virtualKey, bool isUp, byte modifiers)
         {
             if (!_active) return false;

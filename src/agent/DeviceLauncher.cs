@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Threading;
+using System;
 
 namespace PcKvm
 {
@@ -16,6 +17,88 @@ namespace PcKvm
             get { return "reverse tcp:" + Port + " tcp:" + LocalPort; }
         }
         const string RemoteJar = "/data/local/tmp/pckvm.jar";
+        static AdbClient _client = new AdbClient(AdbClient.ResolvePath());
+
+        public static void UseClient(AdbClient client)
+        {
+            if (client == null) throw new ArgumentNullException("client");
+            _client = client;
+        }
+
+        public static bool EnsureTunnel(AdbTarget target, CancellationToken cancel)
+        {
+            bool created;
+            return EnsureTunnel(target, cancel, out created);
+        }
+
+        public static bool EnsureTunnel(AdbTarget target, CancellationToken cancel, out bool created)
+        {
+            created = false;
+            if (target == null) throw new ArgumentNullException("target");
+            AdbResult mappings = _client.Execute(new string[] { "reverse", "--list" }, target, 5000, null, cancel);
+            if (!mappings.Success) return false;
+            foreach (string raw in mappings.Stdout.Replace("\r", "").Split('\n'))
+            {
+                string[] fields = raw.Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
+                for (int i = 0; i + 1 < fields.Length; i++)
+                {
+                    if (fields[i] == "tcp:" + Port)
+                        return fields[i + 1] == "tcp:" + LocalPort; // Borrow exact mapping; never claim its ownership.
+                }
+            }
+            created = _client.Execute(new string[] { "reverse", "tcp:" + Port, "tcp:" + LocalPort }, target, 5000, null, cancel).Success;
+            return created;
+        }
+
+        public static bool PushJar(string localJarPath, AdbTarget target, CancellationToken cancel)
+        {
+            if (target == null) throw new ArgumentNullException("target");
+            return File.Exists(localJarPath) && _client.Execute(
+                new string[] { "push", localJarPath, RemoteJar }, target, 15000, null, cancel).Success;
+        }
+
+        public static Process Start(AdbTarget target, string tokenHex)
+        {
+            if (target == null) throw new ArgumentNullException("target");
+            if (tokenHex == null || tokenHex.Length != 64) throw new ArgumentException("Invalid session token", "tokenHex");
+            foreach (char c in tokenHex)
+                if (!Uri.IsHexDigit(c)) throw new ArgumentException("Invalid session token", "tokenHex");
+            return _client.StartLongRunning(new string[] {
+                "shell", "CLASSPATH=" + RemoteJar + " app_process / Injector --session " + tokenHex
+            }, target);
+        }
+
+        public static bool QueryDisplay(AdbTarget target, out int w, out int h, out int rotation, CancellationToken cancel)
+        {
+            w = h = 0; rotation = -1;
+            if (target == null) throw new ArgumentNullException("target");
+            AdbResult result = _client.Execute(new string[] {
+                "shell", "wm size; dumpsys window displays 2>/dev/null | grep 'Display{#0 '"
+            }, target, 5000, null, cancel);
+            return result.Success && ParseDisplaySize(result.Stdout, out w, out h, out rotation);
+        }
+
+        public static string GetIdentity(AdbTarget target, CancellationToken cancel)
+        {
+            if (target == null) throw new ArgumentNullException("target");
+            AdbResult result = _client.Execute(new string[] { "shell", "getprop ro.serialno" }, target, 5000, null, cancel);
+            string identity = result.Success ? result.Stdout.Trim() : "";
+            return String.Equals(identity, "unknown", StringComparison.OrdinalIgnoreCase) ? "" : identity;
+        }
+
+        public static void Cleanup(AdbTarget target, Process process, bool ownedReverse)
+        {
+            Cleanup(target, process, ownedReverse, true);
+        }
+
+        public static void Cleanup(AdbTarget target, Process process, bool ownedReverse, bool pushedJar)
+        {
+            if (process != null)
+                try { if (!process.HasExited) process.Kill(); process.Dispose(); } catch (Exception) { }
+            if (target == null) return;
+            if (ownedReverse) _client.Execute(new string[] { "reverse", "--remove", "tcp:" + Port }, target, 3000, null, CancellationToken.None);
+            if (pushedJar) _client.Execute(new string[] { "shell", "rm -f " + RemoteJar }, target, 3000, null, CancellationToken.None);
+        }
 
         /// <summary>只建反向隧道。重连时用这个——不重推 jar（设备侧那份还在）。</summary>
         public static bool EnsureTunnel()
@@ -100,8 +183,8 @@ namespace PcKvm
         /// <summary>温和恢复：重启 adb server。不碰别的进程，代价最小。</summary>
         public static bool RestartAdbServer()
         {
-            RunAdb("kill-server");
-            return RunAdb("start-server") == 0;
+            _client.Execute(new string[] { "kill-server" }, null, 5000, null, CancellationToken.None);
+            return _client.Execute(new string[] { "start-server" }, null, 5000, null, CancellationToken.None).Success;
         }
 
         /// <summary>
@@ -114,7 +197,7 @@ namespace PcKvm
         {
             string ignored;
             RunCommand("taskkill", "/F /IM adb.exe", out ignored);
-            return RunAdb("start-server") == 0;
+            return _client.Execute(new string[] { "start-server" }, null, 5000, null, CancellationToken.None).Success;
         }
 
         static int RunAdb(string args)

@@ -34,6 +34,14 @@ namespace PcKvm
         public int ReconnectSeconds = 5;
         public bool EnableEdgeSwitch = true;
         public HotkeyBinding SwitchHotkey = HotkeyBinding.Default;
+        public string ConnectionMode = "Usb";
+        public string AdbPath = "";
+        public string UsbSerial = "";
+        public string WirelessDeviceSerial = "";
+        public string WirelessDeviceGuid = "";
+        public string WirelessServiceName = "";
+        public string WirelessLastEndpoint = "";
+        public string ConnectionConfigError = "";
 
         /// <summary>纯函数：解析 INI 文本。warnings 收到每一条回退/忽略的说明（可为 null）。</summary>
         public static Config Parse(string text, List<string> warnings)
@@ -101,6 +109,26 @@ namespace PcKvm
                     if (TryParseBool(v, out b)) c.EnableEdgeSwitch = b;
                     else Warn(warnings, "EnableEdgeSwitch=" + v + " 无效，使用默认 true");
                 }
+                else if (Same(k, "ConnectionMode"))
+                {
+                    if (Same(v, "Usb")) c.ConnectionMode = "Usb";
+                    else if (Same(v, "WirelessTls")) c.ConnectionMode = "WirelessTls";
+                    else c.BadConnection(warnings, "ConnectionMode 无效（需要 Usb 或 WirelessTls）");
+                }
+                else if (Same(k, "AdbPath"))
+                {
+                    if (v.IndexOfAny(new char[] { '\0', '"' }) >= 0) c.BadConnection(warnings, "AdbPath 无效");
+                    else c.AdbPath = v;
+                }
+                else if (Same(k, "UsbSerial")) c.SetIdentity(warnings, v, "UsbSerial", delegate(string x) { c.UsbSerial = x; });
+                else if (Same(k, "WirelessDeviceSerial")) c.SetIdentity(warnings, v, "WirelessDeviceSerial", delegate(string x) { c.WirelessDeviceSerial = x; });
+                else if (Same(k, "WirelessDeviceGuid")) c.SetIdentity(warnings, v, "WirelessDeviceGuid", delegate(string x) { c.WirelessDeviceGuid = x; });
+                else if (Same(k, "WirelessServiceName")) c.SetIdentity(warnings, v, "WirelessServiceName", delegate(string x) { c.WirelessServiceName = x; });
+                else if (Same(k, "WirelessLastEndpoint"))
+                {
+                    if (v.Length == 0 || ValidEndpoint(v)) c.WirelessLastEndpoint = v;
+                    else c.BadConnection(warnings, "WirelessLastEndpoint 无效");
+                }
                 else
                 {
                     Warn(warnings, "未知配置项（已忽略）: " + k);
@@ -153,6 +181,13 @@ namespace PcKvm
                 sb.AppendLine("ReconnectSeconds=" + ReconnectSeconds);
                 sb.AppendLine("SwitchHotkey=" + SwitchHotkey);
                 sb.AppendLine("EnableEdgeSwitch=" + (EnableEdgeSwitch ? "true" : "false"));
+                sb.AppendLine("ConnectionMode=" + ConnectionMode);
+                sb.AppendLine("AdbPath=" + AdbPath);
+                sb.AppendLine("UsbSerial=" + UsbSerial);
+                sb.AppendLine("WirelessDeviceSerial=" + WirelessDeviceSerial);
+                sb.AppendLine("WirelessDeviceGuid=" + WirelessDeviceGuid);
+                sb.AppendLine("WirelessServiceName=" + WirelessServiceName);
+                sb.AppendLine("WirelessLastEndpoint=" + WirelessLastEndpoint);
                 // 带 BOM：这个文件是给人用记事本改的，BOM 让任何编辑器都能正确识别编码
                 File.WriteAllText(path, sb.ToString(), new UTF8Encoding(true));
                 return true;
@@ -166,6 +201,35 @@ namespace PcKvm
         static void Warn(List<string> warnings, string s)
         {
             if (warnings != null) warnings.Add(s);
+        }
+
+        void BadConnection(List<string> warnings, string message)
+        {
+            if (ConnectionConfigError.Length == 0) ConnectionConfigError = message;
+            Warn(warnings, message);
+        }
+
+        void SetIdentity(List<string> warnings, string value, string key, Action<string> store)
+        {
+            if (value.IndexOfAny(new char[] { ' ', '\t', '\r', '\n', '\0', '=', '"' }) >= 0)
+                BadConnection(warnings, key + " 无效");
+            else store(value);
+        }
+
+        static bool ValidEndpoint(string value)
+        {
+            string[] pieces = value.Split(':');
+            if (pieces.Length != 2) return false;
+            int port;
+            if (!int.TryParse(pieces[1], NumberStyles.None, CultureInfo.InvariantCulture, out port) || port < 1 || port > 65535) return false;
+            string[] octets = pieces[0].Split('.');
+            if (octets.Length != 4) return false;
+            foreach (string octet in octets)
+            {
+                int n;
+                if (octet.Length == 0 || octet.Length > 3 || !int.TryParse(octet, NumberStyles.None, CultureInfo.InvariantCulture, out n) || n > 255) return false;
+            }
+            return true;
         }
 
         static bool Same(string a, string b)

@@ -1,50 +1,37 @@
-﻿$ErrorActionPreference = 'Stop'
-$root  = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-$src   = Join-Path $root 'src\injector'
-$r8    = Join-Path $root 'tools\r8.jar'
+$ErrorActionPreference = 'Stop'
+$root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$src = Join-Path $root 'src\injector'
+$r8 = if ($env:PCKVM_R8_JAR) { $env:PCKVM_R8_JAR } else { Join-Path $root 'tools\r8.jar' }
 $javac = 'C:\Program Files\JetBrains\PyCharm 2026.2.0.1\jbr\bin\javac.exe'
-$java  = 'C:\Program Files\JetBrains\PyCharm 2026.2.0.1\jbr\bin\java.exe'
-
-foreach ($p in @($javac, $java, $r8)) {
-    if (-not (Test-Path $p)) { throw "缺少: $p" }
+$java = 'C:\Program Files\JetBrains\PyCharm 2026.2.0.1\jbr\bin\java.exe'
+foreach ($path in @($javac, $java, $r8)) {
+    if (-not (Test-Path -LiteralPath $path)) { throw "缺少: $path" }
 }
 
-$out = Join-Path $env:TEMP 'pckvm-injector-classes'
-if (Test-Path $out) { Remove-Item -Recurse -Force $out }
-New-Item -ItemType Directory -Force -Path $out | Out-Null
+$out = Join-Path $env:TEMP ('pckvm-injector-' + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $out | Out-Null
+try {
+    $sources = Get-ChildItem -Path $src -Filter '*.java' | ForEach-Object FullName
+    & $javac --release 8 -nowarn -d $out $sources
+    if ($LASTEXITCODE -ne 0) { throw 'javac 失败' }
 
-$sources = Get-ChildItem -Path $src -Filter '*.java' | ForEach-Object { $_.FullName }
+    $classes = Get-ChildItem -Path $out -Filter '*.class' | ForEach-Object FullName
+    & $java -cp $r8 com.android.tools.r8.D8 --release --min-api 28 --output $out $classes
+    if ($LASTEXITCODE -ne 0) { throw 'd8 失败' }
+    $dex = Join-Path $out 'classes.dex'
+    if (-not (Test-Path -LiteralPath $dex)) { throw '未生成 classes.dex' }
 
-Write-Host "javac（--release 8，会打印弃用警告，正常）..." -ForegroundColor Cyan
-& $javac --release 8 -nowarn -d $out $sources
-if ($LASTEXITCODE -ne 0) { throw "javac 失败" }
-
-Write-Host "d8 转 dex..." -ForegroundColor Cyan
-$classes = Get-ChildItem -Path $out -Filter '*.class' | ForEach-Object { $_.FullName }
-& $java -cp $r8 com.android.tools.r8.D8 --release --min-api 28 --output $out $classes
-if ($LASTEXITCODE -ne 0) { throw "d8 失败" }
-
-$dex = Join-Path $out 'classes.dex'
-if (-not (Test-Path $dex)) { throw "未生成 classes.dex" }
-
-$jar = Join-Path $env:TEMP 'pckvm.jar'
-if (Test-Path $jar) { Remove-Item -Force $jar }
-$zip = Join-Path $out 'payload.zip'
-if (Test-Path $zip) { Remove-Item -Force $zip }
-Compress-Archive -Path $dex -DestinationPath $zip -Force
-Move-Item $zip $jar
-
-# dist\pckvm.jar 是**唯一会被 exe 推给手机的那一份**（DeviceLauncher.PushJar 只认它，
-# 每次启动与每轮重连都会推）。所以每次构建都必须刷新它。
-# 2026-09-23 教训：设备侧改了源码却只跑了 build-agent.ps1，而那个脚本是从 %TEMP% 拷 jar 的，
-# 于是"构建成功"但手机拿到的还是旧 jar，缺陷照旧。
-$dist = Join-Path $root 'dist'
-if (-not (Test-Path $dist)) { New-Item -ItemType Directory -Path $dist -Force | Out-Null }
-Copy-Item $jar (Join-Path $root 'dist\pckvm.jar') -Force
-Write-Host "已刷新 dist\pckvm.jar" -ForegroundColor Green
-
-Write-Host "推送到设备..." -ForegroundColor Cyan
-& adb push $jar /data/local/tmp/pckvm.jar
-if ($LASTEXITCODE -ne 0) { throw "adb push 失败" }
-
-Write-Host "完成: /data/local/tmp/pckvm.jar" -ForegroundColor Green
+    $zip = Join-Path $out 'payload.zip'
+    Compress-Archive -Path $dex -DestinationPath $zip
+    $dist = Join-Path $root 'dist'
+    if (-not (Test-Path -LiteralPath $dist)) { New-Item -ItemType Directory -Path $dist | Out-Null }
+    Copy-Item -LiteralPath $zip -Destination (Join-Path $dist 'pckvm.jar') -Force
+    Write-Host "已生成 dist\pckvm.jar；连接时会推送到所选设备。" -ForegroundColor Green
+}
+finally {
+    $tempRoot = [IO.Path]::GetFullPath($env:TEMP).TrimEnd('\') + '\'
+    $resolved = [IO.Path]::GetFullPath($out)
+    if ($resolved.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase) -and (Test-Path -LiteralPath $resolved)) {
+        Remove-Item -LiteralPath $resolved -Recurse -Force
+    }
+}
