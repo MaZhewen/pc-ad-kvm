@@ -3,23 +3,65 @@ import java.io.OutputStream;
 import java.io.IOException;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
-import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.Locale;
 
 /** Sole socket reader for the production injector. PING remains live during UHID initialization. */
 public final class SessionLink {
     public static final class Frame {
         public final int type;
         public final byte[] payload;
-        Frame(int type, byte[] payload) { this.type = type; this.payload = payload; }
+        public final long receivedAt;
+        long processingStartedAt;
+        boolean processing;
+        Frame(int type, byte[] payload) { this(type, payload, System.nanoTime()); }
+        Frame(int type, byte[] payload, long receivedAt) {
+            this.type = type; this.payload = payload; this.receivedAt = receivedAt;
+        }
+    }
+
+    /** Constant-memory timing aggregates, with no frame contents retained in summaries. */
+    static final class InputTimings {
+        private long windowStartedAt;
+        private long queued, processed, queueTotal, queueMax, processTotal, processMax;
+        InputTimings(long now) { windowStartedAt = now; }
+
+        synchronized void begin(Frame frame, long now) {
+            if (frame.processing) return;
+            frame.processing = true;
+            frame.processingStartedAt = now;
+            long wait = Math.max(0, now - frame.receivedAt);
+            queued++; queueTotal += wait; queueMax = Math.max(queueMax, wait);
+        }
+
+        synchronized void complete(Frame frame, long now) {
+            if (!frame.processing) return;
+            frame.processing = false;
+            long duration = Math.max(0, now - frame.processingStartedAt);
+            processed++; processTotal += duration; processMax = Math.max(processMax, duration);
+        }
+
+        synchronized String summary(long now, boolean force) {
+            if (!force && now - windowStartedAt < TimeUnit.SECONDS.toNanos(5)) return null;
+            windowStartedAt = now;
+            if (queued == 0 && processed == 0) return null;
+            String result = String.format(Locale.ROOT,
+                "INJECTOR input timing queued=%d processed=%d queue_avg_ms=%.3f queue_max_ms=%.3f process_avg_ms=%.3f process_max_ms=%.3f",
+                queued, processed, queued == 0 ? 0.0 : queueTotal / (double)queued / 1000000.0,
+                queueMax / 1000000.0, processed == 0 ? 0.0 : processTotal / (double)processed / 1000000.0,
+                processMax / 1000000.0);
+            queued = processed = queueTotal = queueMax = processTotal = processMax = 0;
+            return result;
+        }
     }
 
     final Socket socket;
     final InputStream input;
     final OutputStream output;
-    final ArrayBlockingQueue<Frame> frames = new ArrayBlockingQueue<Frame>(128);
+    final InputFrameQueue frames = new InputFrameQueue(128);
     final Object geometryGate = new Object();
     final long initializedAt = System.nanoTime();
+    final InputTimings timings = new InputTimings(initializedAt);
     volatile long lastPing = initializedAt;
     volatile boolean formal;
     volatile boolean alive = true;
@@ -65,6 +107,18 @@ public final class SessionLink {
     public OutputStream output() { return output; }
     public boolean isAlive() { return alive; }
     public Frame poll() throws InterruptedException { return frames.poll(200, TimeUnit.MILLISECONDS); }
+    /** Call immediately before submitting a dequeued frame to its input handler. */
+    public void beginProcessing(Frame frame) { timings.begin(frame, System.nanoTime()); }
+    /** Call in the handler's finally block, including failed submissions. */
+    public void completeProcessing(Frame frame) {
+        timings.complete(frame, System.nanoTime());
+        // A socket failure can close the link while the handler is still running.
+        if (!alive) flushTimings(System.nanoTime(), true);
+    }
+    private void flushTimings(long now, boolean force) {
+        String summary = timings.summary(now, force);
+        if (summary != null) System.out.println(summary);
+    }
     public void activate() {
         synchronized (geometryGate) {
             if (latestGeometry != null && !frames.offer(latestGeometry)) { close(); return; }
@@ -79,6 +133,7 @@ public final class SessionLink {
         watcher = new Thread(new Runnable() { public void run() {
             while (alive) {
                 long now = System.nanoTime();
+                flushTimings(now, false);
                 if (formal ? now - lastPing > TimeUnit.SECONDS.toNanos(3)
                            : now - initializedAt > TimeUnit.SECONDS.toNanos(20)) { close(); return; }
                 try { Thread.sleep(100); } catch (InterruptedException e) { return; }
@@ -125,6 +180,8 @@ public final class SessionLink {
 
     public void close() {
         alive = false;
+        frames.close();
+        flushTimings(System.nanoTime(), true);
         try { socket.close(); } catch (IOException e) { }
     }
 

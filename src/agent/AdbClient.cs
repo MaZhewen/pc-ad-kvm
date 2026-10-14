@@ -169,11 +169,14 @@ namespace PcKvm
             else { b.Append(line); b.Append('\n'); }
         }
 
-        public Process StartLongRunning(string[] args, AdbTarget target)
+        public Process StartLongRunning(string[] args, AdbTarget target, Action<string> output)
         {
             Process process = new Process();
             process.StartInfo = StartInfo(args, target, false);
-            process.OutputDataReceived += delegate { };
+            process.OutputDataReceived += delegate(object sender, DataReceivedEventArgs e) {
+                if (output != null && e.Data != null)
+                    try { output(e.Data); } catch (Exception) { /* diagnostics cannot terminate a session */ }
+            };
             process.ErrorDataReceived += delegate { };
             try
             {
@@ -183,6 +186,11 @@ namespace PcKvm
                 return process;
             }
             catch (Exception) { process.Dispose(); return null; }
+        }
+
+        public Process StartLongRunning(string[] args, AdbTarget target)
+        {
+            return StartLongRunning(args, target, null);
         }
     }
 }

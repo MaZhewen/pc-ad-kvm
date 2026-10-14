@@ -20,14 +20,20 @@ public class Injector {
     /** 当前按下的鼠标按钮位图（bit0 左, bit1 右, bit2 中）。 */
     static int buttonsDown = 0;
 
+    static boolean wifiLatencyRequested(String[] args) {
+        if (args == null || (args.length != 2 && args.length != 3) || !"--session".equals(args[0])
+            || (args.length == 3 && !"--wifi-low-latency".equals(args[2])))
+            throw new IllegalArgumentException("A session token and optional --wifi-low-latency are required");
+        return args.length == 3;
+    }
+
     public static void main(String[] args) throws Exception {
         if (args.length > 0 && args[0].equals("--stdin")) {
             StdinMode.run();
             return;
         }
 
-        if (args.length != 2 || !"--session".equals(args[0]))
-            throw new IllegalArgumentException("A session token is required");
+        boolean wifiLowLatency = wifiLatencyRequested(args);
         byte[] token = SessionLink.parseToken(args[1]);
         Socket sock = null;
         for (int i = 0; i < 100 && sock == null; i++) {
@@ -47,6 +53,7 @@ public class Injector {
         AbsoluteSession pointer = null;
         RandomAccessFile lockFile = null;
         FileLock processLock = null;
+        WifiLatencyGuard wifiLatency = WifiLatencyGuard.forAndroid(wifiLowLatency);
         final AtomicBoolean finished = new AtomicBoolean(false);
         try {
             SessionLink.handshake(sock, token);
@@ -72,6 +79,7 @@ public class Injector {
                 if (processLock == null) Thread.sleep(50);
             }
             if (processLock == null || !link.isAlive()) throw new IllegalStateException("Injector lock unavailable");
+            wifiLatency.start();
             dev = new UhidDevice("PC-KVM Keyboard", HidDescriptor.keyboardOnly());
             pointer = new AbsoluteSession();
             OutputStream out = link.output();
@@ -80,14 +88,18 @@ public class Injector {
             while (link.isAlive()) {
                 frame = link.poll();
                 if (frame == null) continue;
-                if (!pointer.handle(frame.type, frame.payload, out))
-                    handle(dev, out, (byte)frame.type, frame.payload);
+                link.beginProcessing(frame);
+                try {
+                    if (!pointer.handle(frame.type, frame.payload, out))
+                        handle(dev, out, (byte)frame.type, frame.payload);
+                } finally { link.completeProcessing(frame); }
             }
         } catch (Exception e) {
             System.out.println("INJECTOR loop end: " + e);
         } finally {
             if (link != null) link.close();
             else try { sock.close(); } catch (Exception ignored) { }
+            wifiLatency.close();
             // Every release step is independent: a failed UHID report must not skip FD closure.
             buttonsDown = 0;
             if (dev != null) try { KeyState.releaseAll(dev); } catch (Exception ignored) { }

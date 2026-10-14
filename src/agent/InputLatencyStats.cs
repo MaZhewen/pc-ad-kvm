@@ -58,8 +58,6 @@ namespace PcKvm
         readonly Queue<uint> _pingOrder = new Queue<uint>();
         readonly Dictionary<ulong, long> _sentPointer = new Dictionary<ulong, long>();
         readonly Queue<ulong> _pointerOrder = new Queue<ulong>();
-        long _lastPointerSample;
-        bool _hasPointerSample;
         int _maxPending;
 
         public InputLatencyStats(long frequency)
@@ -92,11 +90,11 @@ namespace PcKvm
                     _maxPending = Math.Max(_maxPending, pending);
                 }
                 if (type != Protocol.MsgPointer || frame.Length != 13) return;
-                if (_hasPointerSample && now - _lastPointerSample < _frequency / 20) return;
-                _hasPointerSample = true; _lastPointerSample = now;
+                // Record every dispatched position: Android may coalesce the one that
+                // would otherwise have been sampled and acknowledge a newer sequence.
                 ulong key = ((ulong)Protocol.GetU32(frame, 1) << 32) | Protocol.GetU32(frame, 5);
                 _sentPointer[key] = now; _pointerOrder.Enqueue(key);
-                while (_pointerOrder.Count > 64) _sentPointer.Remove(_pointerOrder.Dequeue());
+                while (_pointerOrder.Count > 1024) _sentPointer.Remove(_pointerOrder.Dequeue());
             }
         }
 
@@ -143,7 +141,7 @@ namespace PcKvm
         {
             _sentPing.Clear(); _pingOrder.Clear();
             _sentPointer.Clear(); _pointerOrder.Clear();
-            _hasPointerSample = false; _maxPending = 0;
+            _maxPending = 0;
         }
 
         public LatencySummary TakeAndResetSummary()

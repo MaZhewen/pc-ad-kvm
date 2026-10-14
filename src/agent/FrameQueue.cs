@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 namespace PcKvm {
@@ -33,6 +34,14 @@ namespace PcKvm {
    queuedAt=0;
    if(_items.First==null) return null;
    Entry entry=_items.First.Value; _items.RemoveFirst(); queuedAt=entry.QueuedAt; return entry.Frame;
+  }
+  // Caller holds the queue lock. A position before a barrier must flush in order.
+  public int GetDispatchWaitMilliseconds(long lastPointerSentAt,long now,long frequency) {
+   var head=_items.First;
+   if(head==null || head.Value.Frame[0]!=Protocol.MsgPointer
+    || (head.Next!=null && head.Next.Value.Frame[0]!=Protocol.MsgPointer)) return 0;
+   double remaining=4.0-(now-lastPointerSentAt)*1000.0/frequency;
+   return remaining>0 ? Math.Max(1,(int)Math.Ceiling(remaining)) : 0;
   }
   public void Clear() { _items.Clear(); }
  }

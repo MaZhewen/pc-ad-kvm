@@ -463,7 +463,14 @@ namespace PcKvm
             if (!DeviceLauncher.PushJar(jar, resolved.Device.Target, cancel)) { PublishFailure("注入器推送失败", cancel); return false; }
             _pushedJar = true;
             if (_stopping || cancel.IsCancellationRequested) return false;
-            _injector = DeviceLauncher.Start(resolved.Device.Target, hex.ToString());
+            _injector = DeviceLauncher.Start(resolved.Device.Target, hex.ToString(), mode == "WirelessTls",
+                delegate(string line) {
+                    if (_log != null && (line.StartsWith("WIFI_LATENCY ", StringComparison.Ordinal)
+                        || line.StartsWith("INJECTOR input timing ", StringComparison.Ordinal)
+                        || line.StartsWith("DRAG_CURSOR ", StringComparison.Ordinal)
+                        || line.StartsWith("Touch event ", StringComparison.Ordinal)))
+                        _log("# Android gen=" + generation + ": " + (line.Length > 512 ? line.Substring(0, 512) : line));
+                });
             if (_injector == null) { PublishFailure("注入器启动失败", cancel); return false; }
             Publish("等待指针与心跳就绪…");
             Stopwatch watch = Stopwatch.StartNew();

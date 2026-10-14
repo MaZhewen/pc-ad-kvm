@@ -67,6 +67,24 @@ class ConnectionTests
             adb.Execute(new string[] { "shell", "id" }, AdbTarget.ForTransport(7, "USB-123"), 3000, null, CancellationToken.None);
             Check(File.ReadAllText(capture).Contains("arg0=-t") && File.ReadAllText(capture).Contains("arg1=7"), "transport selector used");
             DeviceLauncher.UseClient(adb);
+            using (ManualResetEvent outputSeen = new ManualResetEvent(false))
+            using (System.Diagnostics.Process probe = adb.StartLongRunning(new string[]{ "shell", "id" },
+                AdbTarget.ForTransport(7, "USB-123"), delegate(string line) { if (line == "ok") outputSeen.Set(); }))
+            {
+                Check(probe.WaitForExit(2000) && outputSeen.WaitOne(2000), "long-running injector diagnostics reach the log callback");
+            }
+            string sessionToken = new string('a', 64);
+            using (System.Diagnostics.Process injector = DeviceLauncher.Start(AdbTarget.ForTransport(7, "USB-123"), sessionToken))
+            {
+                Check(injector.WaitForExit(2000), "USB injector launch completed");
+                Check(!File.ReadAllText(capture).Contains("--wifi-low-latency"), "USB launch does not request a Wi-Fi lock");
+            }
+            using (System.Diagnostics.Process injector = DeviceLauncher.Start(AdbTarget.ForSerial("192.168.1.5:40000"), sessionToken, true))
+            {
+                Check(injector.WaitForExit(2000), "wireless injector launch completed");
+                Check(File.ReadAllText(capture).Contains("--session " + sessionToken + " --wifi-low-latency"),
+                    "wireless launch requests session-scoped Wi-Fi latency mode");
+            }
             DeviceLauncher.LocalPort = 27183;
             Check(DeviceLauncher.EnsureTunnel(AdbTarget.ForTransport(7, "USB-123"), CancellationToken.None), "targeted reverse succeeds");
             Check(File.ReadAllText(capture).Contains("arg0=-t") && File.ReadAllText(capture).Contains("arg2=reverse"), "reverse is explicitly targeted");

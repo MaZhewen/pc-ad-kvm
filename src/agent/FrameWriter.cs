@@ -42,9 +42,10 @@ namespace PcKvm {
      lock(_gate) {
       while(!_stopped && _queue.Count==0) Monitor.Wait(_gate);
       if(_stopped) return;
-      // Wait before dequeueing so new adjacent moves still replace the target.
-      double remaining=4.0-(Stopwatch.GetTimestamp()-lastMove)*1000.0/Stopwatch.Frequency;
-      if(remaining>0) { Monitor.Wait(_gate,Math.Max(1,(int)Math.Ceiling(remaining))); continue; }
+      // Pace isolated positions before dequeueing so adjacent moves can replace them.
+      // A following barrier wakes this wait and flushes the position first.
+      int wait=_queue.GetDispatchWaitMilliseconds(lastMove,Stopwatch.GetTimestamp(),Stopwatch.Frequency);
+      if(wait>0) { Monitor.Wait(_gate,wait); continue; }
       frame=_queue.Take(out queuedAt);
       pending=_queue.Count;
      }

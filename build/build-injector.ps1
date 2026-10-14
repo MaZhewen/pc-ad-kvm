@@ -12,7 +12,7 @@ $out = Join-Path $env:TEMP ('pckvm-injector-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $out | Out-Null
 try {
     $sources = Get-ChildItem -Path $src -Filter '*.java' | ForEach-Object FullName
-    & $javac --release 8 -nowarn -d $out $sources
+    & $javac --release 8 -nowarn -sourcepath (Join-Path $root 'build\android-stubs') -d $out $sources
     if ($LASTEXITCODE -ne 0) { throw 'javac 失败' }
 
     $classes = Get-ChildItem -Path $out -Filter '*.class' | ForEach-Object FullName
