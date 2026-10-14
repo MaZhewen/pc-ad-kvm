@@ -33,6 +33,8 @@ namespace PcKvm
         public event Action<long> SessionConnected;
         public event Action<long> SessionDisconnected;
         public event Action<long, byte, byte[]> SessionMessageReceived;
+        public event Action<byte[], long, int, long> FrameWriting;
+        public event Action<long, long> FrameWritten;
 
         public bool IsConnected { get { return _active; } }
 
@@ -130,7 +132,17 @@ namespace PcKvm
                         _candidate = null;
                         _client = c;
                         _stream = stream;
-                        writer = new FrameWriter(stream);
+                        writer = new FrameWriter(stream,
+                            delegate(byte[] frame, long queuedAt, int pending, long now)
+                            {
+                                Action<byte[], long, int, long> handler = FrameWriting;
+                                if (handler != null) handler(frame, queuedAt, pending, now);
+                            },
+                            delegate(long started, long finished)
+                            {
+                                Action<long, long> handler = FrameWritten;
+                                if (handler != null) handler(started, finished);
+                            });
                         _writer = writer;
                         _active = true;
                         authenticated = true;

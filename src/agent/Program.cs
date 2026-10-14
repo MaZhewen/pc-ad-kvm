@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -126,6 +127,30 @@ namespace PcKvm
             }
 
             DeviceLauncher.LocalPort = transport.ListeningPort;
+            InputLatencyStats latency = new InputLatencyStats(Stopwatch.Frequency);
+            transport.FrameWriting += delegate(byte[] frame, long queuedAt, int pending, long now)
+            { latency.RecordWriting(frame, queuedAt, pending, now); };
+            transport.FrameWritten += delegate(long started, long finished)
+            { latency.RecordWriteCompleted(started, finished); };
+            Action<LatencySummary, string> writeLatencySummary = delegate(LatencySummary s, string marker)
+            {
+                if (s.Queue.Count == 0 && s.PingQueue.Count == 0 && s.Write.Count == 0
+                    && s.Ping.Count == 0 && s.Pointer.Count == 0) return;
+                log.WriteLine("# 输入时延 " + DateTime.Now.ToString("HH:mm:ss")
+                    + (marker.Length > 0 ? " " + marker : "") + "：PC排队 n="
+                    + s.Queue.Count + " p95=" + s.Queue.P95Ms
+                    + "ms max=" + s.Queue.MaxMs + "ms 队列峰值=" + s.MaxPending
+                    + "；心跳排队 n=" + s.PingQueue.Count + " max=" + s.PingQueue.MaxMs
+                    + "ms；写入耗时 n=" + s.Write.Count + " max=" + s.Write.MaxMs
+                    + "ms；链路往返 n=" + s.Ping.Count + " p95=" + s.Ping.P95Ms
+                    + "ms max=" + s.Ping.MaxMs + "ms；指针提交确认 n=" + s.Pointer.Count
+                    + " p95=" + s.Pointer.P95Ms + "ms max=" + s.Pointer.MaxMs + "ms");
+            };
+            transport.SessionConnected += delegate(long generation) { latency.Reset(); };
+            transport.SessionDisconnected += delegate(long generation)
+            { writeLatencySummary(latency.TakeAndResetSummary(), "断线前 gen=" + generation); };
+            transport.SessionMessageReceived += delegate(long generation, byte type, byte[] payload)
+            { latency.RecordReceived(type, payload, Stopwatch.GetTimestamp()); };
             PointerSession pointer = new PointerSession(transport.Send);
             transport.MessageReceived += pointer.Receive;
             log.WriteLine("# TCP 监听 127.0.0.1:" + transport.ListeningPort
@@ -469,6 +494,16 @@ namespace PcKvm
                     });
                 }
             };
+
+            // Aggregate timing in memory; one short line every five seconds avoids per-mouse-event disk I/O.
+            Timer latencyTimer = new Timer();
+            latencyTimer.Interval = 5000;
+            latencyTimer.Tick += delegate
+            {
+                writeLatencySummary(latency.TakeSummary(), "");
+            };
+            latencyTimer.Start();
+            Application.ApplicationExit += delegate { latencyTimer.Stop(); latencyTimer.Dispose(); };
 
             // 托盘与生命周期集中到 TrayUi（Ruling 33）。必须在 Application.Run 之前 Install。
             trayUi = new TrayUi(host, supp, watchers, coordinator, transport, log, cfg,

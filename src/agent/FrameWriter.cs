@@ -11,10 +11,16 @@ namespace PcKvm {
   readonly FrameQueue _queue=new FrameQueue(256);
   readonly object _gate=new object();
   readonly Thread _thread;
+  readonly Action<byte[],long,int,long> _onWriting;
+  readonly Action<long,long> _onWritten;
   bool _stopped;
   [DllImport("winmm.dll")] static extern uint timeBeginPeriod(uint period);
   [DllImport("winmm.dll")] static extern uint timeEndPeriod(uint period);
-  public FrameWriter(Stream stream) { _stream=stream; _thread=new Thread(Run); _thread.IsBackground=true; _thread.Start(); }
+  public FrameWriter(Stream stream) : this(stream,null,null) { }
+  public FrameWriter(Stream stream,Action<byte[],long,int,long> onWriting,Action<long,long> onWritten) {
+   _stream=stream; _onWriting=onWriting; _onWritten=onWritten;
+   _thread=new Thread(Run); _thread.IsBackground=true; _thread.Start();
+  }
   public void Send(byte[] frame) {
    bool overflow=false;
    lock(_gate) { if(_stopped) return; overflow=!_queue.Add(frame); Monitor.Pulse(_gate); }
@@ -31,15 +37,29 @@ namespace PcKvm {
    try {
     while(true) {
      byte[] frame;
+     long queuedAt;
+     int pending;
      lock(_gate) {
       while(!_stopped && _queue.Count==0) Monitor.Wait(_gate);
       if(_stopped) return;
       // Wait before dequeueing so new adjacent moves still replace the target.
       double remaining=4.0-(Stopwatch.GetTimestamp()-lastMove)*1000.0/Stopwatch.Frequency;
       if(remaining>0) { Monitor.Wait(_gate,Math.Max(1,(int)Math.Ceiling(remaining))); continue; }
-      frame=_queue.Take();
+      frame=_queue.Take(out queuedAt);
+      pending=_queue.Count;
      }
-     _stream.Write(frame,0,frame.Length);
+     if(_onWriting!=null) {
+      try { _onWriting(frame,queuedAt,pending,Stopwatch.GetTimestamp()); }
+      catch(Exception) { /* diagnostics cannot interrupt input */ }
+     }
+     long writeStarted=Stopwatch.GetTimestamp();
+     try { _stream.Write(frame,0,frame.Length); }
+     finally {
+      if(_onWritten!=null) {
+       try { _onWritten(writeStarted,Stopwatch.GetTimestamp()); }
+       catch(Exception) { /* diagnostics cannot interrupt input */ }
+      }
+     }
      if(frame[0]==Protocol.MsgPointer) lastMove=Stopwatch.GetTimestamp();
     }
    } catch(Exception) { try { _stream.Close(); } catch(Exception) {} }
