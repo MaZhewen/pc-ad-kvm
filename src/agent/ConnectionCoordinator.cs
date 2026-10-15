@@ -43,6 +43,7 @@ namespace PcKvm
         ConnectionProfile _session;
         Process _injector;
         bool _ownsReverse;
+        bool _ownsClipboardReverse;
         bool _pushedJar;
         string _state = "未连接";
         string _lastError = "";
@@ -457,6 +458,13 @@ namespace PcKvm
             bool createdReverse;
             if (!DeviceLauncher.EnsureTunnel(resolved.Device.Target, cancel, out createdReverse)) { PublishFailure("反向隧道失败或端口已被占用", cancel); return false; }
             _ownsReverse = createdReverse;
+            bool createdClipboard;
+            if (!DeviceLauncher.EnsureClipboardTunnel(resolved.Device.Target, cancel, out createdClipboard))
+            {
+                // Clipboard failure must not disable keyboard/mouse operation.
+                if (_log != null) _log("# 剪贴板独立隧道不可用，键鼠连接继续");
+            }
+            _ownsClipboardReverse = createdClipboard;
             if (_stopping || cancel.IsCancellationRequested) return false;
             Publish("部署注入器…");
             string jar = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "pckvm.jar");
@@ -468,6 +476,7 @@ namespace PcKvm
                     if (_log != null && (line.StartsWith("WIFI_LATENCY ", StringComparison.Ordinal)
                         || line.StartsWith("INJECTOR input timing ", StringComparison.Ordinal)
                         || line.StartsWith("DRAG_CURSOR ", StringComparison.Ordinal)
+                        || line.StartsWith("CLIPBOARD ", StringComparison.Ordinal)
                         || line.StartsWith("Touch event ", StringComparison.Ordinal)))
                         _log("# Android gen=" + generation + ": " + (line.Length > 512 ? line.Substring(0, 512) : line));
                 });
@@ -504,7 +513,7 @@ namespace PcKvm
 
         void Deactivate()
         {
-            if (_pendingTarget == null && _injector == null && !_ownsReverse && !_pushedJar && !_transport.IsConnected)
+            if (_pendingTarget == null && _injector == null && !_ownsReverse && !_ownsClipboardReverse && !_pushedJar && !_transport.IsConnected)
                 return;
             _ready = false;
             _releaseInput();
@@ -513,8 +522,10 @@ namespace PcKvm
             lock (_gate) { target = _pendingTarget; _pendingTarget = null; }
             Process process = _injector; _injector = null;
             bool owned = _ownsReverse; _ownsReverse = false;
+            bool clipboardOwned = _ownsClipboardReverse; _ownsClipboardReverse = false;
             bool pushed = _pushedJar; _pushedJar = false;
             if (process != null || owned || pushed) DeviceLauncher.Cleanup(target, process, owned, pushed);
+            if (clipboardOwned) DeviceLauncher.CleanupClipboardTunnel(target);
             _session = null;
             _pointer.Reset();
         }

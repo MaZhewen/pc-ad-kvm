@@ -10,6 +10,8 @@ namespace PcKvm
     public static class DeviceLauncher
     {
         public const int Port = 27183;
+        public const int ClipboardRemotePort = 27184;
+        public static int ClipboardLocalPort;
         // Shared by initial setup and reconnects; the Android endpoint stays fixed.
         public static int LocalPort = Port;
         public static string TunnelArguments
@@ -55,6 +57,29 @@ namespace PcKvm
             if (target == null) throw new ArgumentNullException("target");
             return File.Exists(localJarPath) && _client.Execute(
                 new string[] { "push", localJarPath, RemoteJar }, target, 15000, null, cancel).Success;
+        }
+
+        // Optional independent data tunnel. Never replace a mapping owned by another process.
+        public static bool EnsureClipboardTunnel(AdbTarget target, CancellationToken cancel, out bool created)
+        {
+            created = false;
+            if (ClipboardLocalPort <= 0) return true;
+            AdbResult result = _client.Execute(new string[] { "reverse", "--list" }, target, 5000, null, cancel);
+            if (!result.Success) return false;
+            foreach (string line in result.Stdout.Replace("\r", "").Split('\n'))
+            {
+                string[] fields = line.Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
+                for (int i = 0; i + 1 < fields.Length; i++)
+                    if (fields[i] == "tcp:" + ClipboardRemotePort)
+                        return fields[i + 1] == "tcp:" + ClipboardLocalPort;
+            }
+            created = _client.Execute(new string[] { "reverse", "tcp:" + ClipboardRemotePort, "tcp:" + ClipboardLocalPort }, target, 5000, null, cancel).Success;
+            return created;
+        }
+
+        public static void CleanupClipboardTunnel(AdbTarget target)
+        {
+            if (target != null) _client.Execute(new string[] { "reverse", "--remove", "tcp:" + ClipboardRemotePort }, target, 3000, null, CancellationToken.None);
         }
 
         public static Process Start(AdbTarget target, string tokenHex)

@@ -28,6 +28,7 @@ namespace PcKvm
         System.Windows.Forms.Timer _statusTimer;
 
         public NotifyIcon Tray { get; private set; }
+        public ClipboardService Clipboard { get; set; }
 
         /// <summary>设置对话框点了确定、且配置已更新并写盘之后抛出。
         /// 应用行为（改速度、换跨越边）由 Program.cs 订阅处理——它才持有 scaler/tracker/supp。
@@ -76,7 +77,17 @@ namespace PcKvm
             MenuItem quit = new MenuItem("退出");
             quit.Click += delegate { Application.Exit(); };
             MenuItem status = new MenuItem("未连接设备") { Enabled = false };
-            Tray.ContextMenu = new ContextMenu(new MenuItem[] { status, connect, settings, quit });
+            MenuItem clipboardStatus = new MenuItem("剪贴板：等待连接") { Enabled = false };
+            MenuItem clipboardToggle = new MenuItem("共享剪贴板") { Checked = _cfg.EnableClipboard };
+            clipboardToggle.Click += delegate
+            {
+                _cfg.EnableClipboard = !_cfg.EnableClipboard;
+                clipboardToggle.Checked = _cfg.EnableClipboard;
+                if (Clipboard != null) Clipboard.SetEnabled(_cfg.EnableClipboard);
+                _transport.Send(Protocol.EncodeClipboardControl((byte)(_cfg.EnableClipboard && Clipboard != null ? 1 : 0)));
+                if (!_cfg.Save()) _log.WriteLine("# 剪贴板开关配置保存失败");
+            };
+            Tray.ContextMenu = new ContextMenu(new MenuItem[] { status, connect, settings, clipboardToggle, clipboardStatus, quit });
             _statusTimer = new System.Windows.Forms.Timer { Interval = 250 };
             _statusTimer.Tick += delegate
             {
@@ -84,6 +95,7 @@ namespace PcKvm
                 string caption = snapshot.Ready ? (_supp.IsEngaged ? "正在控制 Android" : "已连接 · 当前控制电脑")
                     : snapshot.Desired ? "正在连接设备" : "未连接设备";
                 status.Text = caption;
+                clipboardStatus.Text = "剪贴板：" + (Clipboard == null ? "不可用" : Clipboard.Status);
                 string tip = "PC-KVM · " + caption + (snapshot.Ready ? " · " + snapshot.Device : "");
                 Tray.Text = tip.Length > 63 ? tip.Substring(0, 63) : tip;
             };

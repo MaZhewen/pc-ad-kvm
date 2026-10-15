@@ -127,6 +127,28 @@ namespace PcKvm
             }
 
             DeviceLauncher.LocalPort = transport.ListeningPort;
+            ClipboardService clipboard = null;
+            try
+            {
+                clipboard = new ClipboardService(host,
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PC-KVM", "Clipboard"),
+                    delegate(string line) { log.WriteLine("# " + line); });
+                clipboard.SetEnabled(cfg.EnableClipboard);
+                DeviceLauncher.ClipboardLocalPort = clipboard.Start();
+            }
+            catch (Exception e)
+            {
+                log.WriteLine("# 剪贴板启动失败：" + e.GetType().Name);
+                if (clipboard != null) clipboard.Dispose();
+                clipboard = null;
+            }
+            transport.SessionConfigured += delegate(byte[] token, long generation)
+            { if (clipboard != null) clipboard.Configure(token, generation); };
+            transport.SessionConnected += delegate(long generation)
+            { transport.Send(Protocol.EncodeClipboardControl((byte)(clipboard != null && cfg.EnableClipboard ? 1 : 0))); };
+            transport.SessionDisconnected += delegate(long generation)
+            { if (clipboard != null) clipboard.CloseSession(generation); };
+            Application.ApplicationExit += delegate { if (clipboard != null) clipboard.Dispose(); };
             InputLatencyStats latency = new InputLatencyStats(Stopwatch.Frequency);
             transport.FrameWriting += delegate(byte[] frame, long queuedAt, int pending, long now)
             { latency.RecordWriting(frame, queuedAt, pending, now); };
@@ -317,6 +339,7 @@ namespace PcKvm
                     return;
                 }
                 host.SetStatus("TAKEOVER → 手机");
+                if (clipboard != null && cfg.EnableClipboard) clipboard.RequestSync();
                 cursor.Reset();
                 cursor.SetPosition(px, py);
                 scaler.Reset();   // 归零的同时清掉小数余量，避免带着跨越前的零头
@@ -330,6 +353,7 @@ namespace PcKvm
                 host.SetStatus("IDLE");
                 transport.SendControl(Protocol.EncodeLeave());
                 // 快捷键回程记 0；贴边回程记第二次外推的实际累积量。
+                if (cfg.EnableClipboard) transport.Send(Protocol.EncodeClipboardControl(2));
                 log.WriteLine("# LEAVE takeover（回程外推累积 " + tracker.BackPush + "）");
             };
             supp.ForegroundLost += delegate
@@ -508,6 +532,7 @@ namespace PcKvm
             // 托盘与生命周期集中到 TrayUi（Ruling 33）。必须在 Application.Run 之前 Install。
             trayUi = new TrayUi(host, supp, watchers, coordinator, transport, log, cfg,
                 host.TrySetSwitchHotkey);
+            trayUi.Clipboard = clipboard;
             trayUi.ReturnToComputerRequested += delegate
             {
                 if (tracker.Current == KvmState.Takeover)

@@ -1,5 +1,17 @@
 # 离线回归测试
 
+## 共享剪贴板
+
+`tests/clipboard/run.ps1` 汇总编码、认证会话、平台适配、缓存和接入测试。Windows 实际剪贴板用例需解锁电脑桌面；Android 逻辑用例不需要连接设备。
+
+真实两端测试明确指定已确认设备，例如：
+
+```powershell
+./tests/clipboard/run-device.ps1 -TransportId <adb中的transport_id> -Serial <已确认的设备序列> -AdbPath <adb.exe完整路径>
+```
+
+运行前解锁两端、暂停其他剪贴板同步软件。测试使用标记文本、PNG 和文本文件，并恢复原剪贴板；不发送微信消息。它验证生产剪贴板协议和平台适配，不能替代微信与文件管理器各自的 Ctrl+V 应用验收。
+
 ## 无线连接回归
 
 无线方案新增以下离线测试，均从当前源码编译：
