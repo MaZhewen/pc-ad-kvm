@@ -59,13 +59,24 @@ namespace PcKvm
 
         public static Process Start(AdbTarget target, string tokenHex)
         {
+            return Start(target, tokenHex, false);
+        }
+
+        public static Process Start(AdbTarget target, string tokenHex, bool wifiLowLatency)
+        {
+            return Start(target, tokenHex, wifiLowLatency, null);
+        }
+
+        public static Process Start(AdbTarget target, string tokenHex, bool wifiLowLatency, Action<string> output)
+        {
             if (target == null) throw new ArgumentNullException("target");
             if (tokenHex == null || tokenHex.Length != 64) throw new ArgumentException("Invalid session token", "tokenHex");
             foreach (char c in tokenHex)
                 if (!Uri.IsHexDigit(c)) throw new ArgumentException("Invalid session token", "tokenHex");
             return _client.StartLongRunning(new string[] {
                 "shell", "CLASSPATH=" + RemoteJar + " app_process / Injector --session " + tokenHex
-            }, target);
+                    + (wifiLowLatency ? " --wifi-low-latency" : "")
+            }, target, output);
         }
 
         public static bool QueryDisplay(AdbTarget target, out int w, out int h, out int rotation, CancellationToken cancel)

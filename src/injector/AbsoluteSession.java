@@ -1,14 +1,32 @@
 import java.io.OutputStream;
 /** Versioned mouse session; socket thread owns all mutable state. */
 public final class AbsoluteSession {
+ interface TouchAction { boolean down(int x,int y); boolean move(int x,int y); boolean up(int x,int y); void cancel(); }
  UhidDevice mouse;
  int epoch,width,height,rotation,x,y,buttons;
  boolean active;
  Object inputDevice;
+ int mouseDeviceId=-1;
+ boolean leftDown;
+ final TouchAction touchAction;
+ final DragCursor.View dragCursor;
+ final NativeCursor.Control nativeCursor;
  AbsoluteTransform transform;
  long nextCaptureAt;
  final Class<?> input;
  public AbsoluteSession() throws Exception {
+  this(new TouchPointer());
+ }
+ AbsoluteSession(TouchAction touchAction) throws Exception {
+  this(touchAction,DragCursor.create());
+ }
+ AbsoluteSession(TouchAction touchAction,DragCursor.View dragCursor) throws Exception {
+  this(touchAction,dragCursor,NativeCursor.create());
+ }
+ AbsoluteSession(TouchAction touchAction,DragCursor.View dragCursor,NativeCursor.Control nativeCursor) throws Exception {
+  this.touchAction=touchAction;
+  this.dragCursor=dragCursor;
+  this.nativeCursor=nativeCursor;
   input=Class.forName("android.view.InputDevice");
  }
  public boolean handle(int type,byte[] p,OutputStream out) throws Exception {
@@ -20,8 +38,11 @@ public final class AbsoluteSession {
    // The actual display mapping is measured after Android registers the device.
    mouse=new UhidDevice("PC-KVM Absolute Pointer",AbsolutePointer.DESCRIPTOR,0x5680);
    inputDevice=waitForInputDevice();
+   mouseDeviceId=(Integer)input.getMethod("getId").invoke(inputDevice);
+   nativeCursor.prepare();
    // Android creates PointerChoreographer's viewport only after the first
-   // visible report. Hide it immediately; no buttons or movement are sent.
+   // in-range report. Leave the device out of range until takeover; this
+   // is registration setup, not the native icon hiding used for touch drag.
    mouse.sendReport(AbsolutePointer.rawReport(0,0,0,0,true));
    mouse.sendReport(AbsolutePointer.rawReport(0,0,0,0,false));
    nextCaptureAt=0;
@@ -31,28 +52,64 @@ public final class AbsoluteSession {
   if(type==0x08) { if(mouse!=null && transform==null) tryReady(out); return false; }
   if(type==0x0b) {
    if(epoch==0||transform==null||Injector.i32(p,0)!=epoch) return true;
-   x=Injector.u16(p,8); y=Injector.u16(p,10);
-   active=true; send(0);
-   // Acknowledge UHID submission, not display presentation. PC also requires
+   int nx=Injector.u16(p,8), ny=Injector.u16(p,10);
+   boolean moved=nx!=x || ny!=y;
+   x=nx; y=ny;
+   if(active && leftDown && moved) touchAction.move(x,y);
+   active=true;
+   if(leftDown) { if(!dragCursor.move(x,y)) nativeCursor.restore(); }
+   else { send(0); nativeCursor.restore(); }
+   // Acknowledge position processing, not display presentation. PC also requires
    // sustained outward movement, and never trusts an acknowledgement from an old epoch.
    byte[] ack=new byte[13]; ack[0]=0x0e; System.arraycopy(p,0,ack,1,12);
    out.write(ack); out.flush(); return true;
   }
   if(type==0x03) {
-   if(active) { int bit=Injector.btnToBit(p[0]&255); if(p[1]!=0) buttons|=bit; else buttons&=~bit; send(0); }
+   if(active) {
+    int btn=p[0]&255, bit=Injector.btnToBit(btn);
+    boolean down=p[1]!=0;
+    if(btn==1) {
+     if(down) {
+      if(leftDown) touchAction.cancel();
+      leftDown=true;
+      // InRange=false does not hide Android's mouse sprite. Hide its icon
+      // without injecting hover, and never add another visible cursor if that fails.
+      dragCursor.hide();
+      if(nativeCursor.hide(mouseDeviceId) && !dragCursor.show(x,y)) nativeCursor.restore();
+      if(!touchAction.down(x,y)) {
+       System.out.println("Touch down failed; left click suppressed");
+       leftDown=false; dragCursor.hide(); send(0); nativeCursor.restore();
+      }
+     } else if(leftDown) {
+      if(!touchAction.up(x,y)) System.out.println("Touch up failed; left click suppressed");
+      leftDown=false;
+      dragCursor.hide();
+      send(0);
+      nativeCursor.restore();
+     }
+     return true;
+    }
+    if(leftDown) { touchAction.cancel(); leftDown=false; dragCursor.hide(); }
+    if(down) buttons|=bit; else buttons&=~bit;
+    send(0);
+    nativeCursor.restore();
+   }
    return true;
   }
-  if(type==0x04) { if(active) send(Injector.clamp127(Injector.i16(p,2))); return true; }
+  if(type==0x04) { if(leftDown) { touchAction.cancel(); leftDown=false; dragCursor.hide(); } if(active) { send(Injector.clamp127(Injector.i16(p,2))); nativeCursor.restore(); } return true; }
   if(type==0x06) { release(); return false; } // keyboard release remains in Injector
   if(type==0x01||type==0x02||type==0x0a) return true; // legacy relative path is never used
   return false;
  }
  void send(int wheel) throws Exception {
+  sendVisible(wheel,active);
+ }
+ void sendVisible(int wheel,boolean visible) throws Exception {
   if(mouse==null || transform==null) return;
   int[] raw=transform.raw(x,y);
-  mouse.sendReport(AbsolutePointer.rawReport(buttons,raw[0],raw[1],wheel,active));
+  mouse.sendReport(AbsolutePointer.rawReport(buttons,raw[0],raw[1],wheel,visible));
  }
- void release() throws Exception { buttons=0; active=false; if(width>0) send(0); }
+ void release() throws Exception { if(leftDown) touchAction.cancel(); leftDown=false; dragCursor.hide(); nativeCursor.restore(); buttons=0; active=false; if(width>0) send(0); }
  void tryReady(OutputStream out) throws Exception {
   long now=System.currentTimeMillis();
   if(now<nextCaptureAt) return;
@@ -90,5 +147,10 @@ public final class AbsoluteSession {
   }
   throw new IllegalStateException("Absolute mouse registration timed out");
  }
- public void close() { try { release(); } catch(Exception e) { } if(mouse!=null) mouse.close(); mouse=null; }
+ public void close() {
+  try { release(); } catch(Exception e) { }
+  try { dragCursor.close(); } catch(Exception ignored) { }
+  try { nativeCursor.close(); } catch(Exception ignored) { }
+  if(mouse!=null) mouse.close(); mouse=null;
+ }
 }
