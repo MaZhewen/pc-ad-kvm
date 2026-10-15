@@ -12,6 +12,8 @@
 
 运行前解锁两端、暂停其他剪贴板同步软件。测试使用标记文本、PNG 和文本文件，并恢复原剪贴板；不发送微信消息。它验证生产剪贴板协议和平台适配，不能替代微信与文件管理器各自的 Ctrl+V 应用验收。
 
+应用验收工具位于 `probes/05-clipboard`：`build-paste-probes.ps1` 编译正式 UHID 键盘和剪贴板代码；`KeyboardPasteProbe` 只注入 Ctrl+V，不注入 Enter。`ClipboardMetadataProbe` 只输出格式与 URI 元数据，传入自建文件的 SHA-256 时额外校验正式适配器读取的文件字节。仅对已明确创建的测试内容运行，不用它读取用户原有文件。`ClipboardDeviceProbe` 的 `QUIT` 恢复原始剪贴板；测试时必须保持双方解锁，并手动确认预览后取消，不能把传输 ACK 当成应用验收。
+
 ## 无线连接回归
 
 无线方案新增以下离线测试，均从当前源码编译：

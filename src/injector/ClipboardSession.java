@@ -100,8 +100,8 @@ public final class ClipboardSession implements AutoCloseable {
         ClipboardWire.Snapshot snapshot=null;long revision=local.revision();
         try {
             snapshot=local.capture();
-            String fingerprint=snapshot==null?null:snapshot.fingerprint();
-            if(local.revision()==revision)lastFingerprint=fingerprint;
+            // Local baseline observation does not prove the peer has that content.
+            if(local.revision()==revision)lastFingerprint=null;
             else synchronized(state){forcePending=true;}
         } catch(Exception e) {unavailable(e);}
         finally {if(snapshot!=null)local.release(snapshot);}

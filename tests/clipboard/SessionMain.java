@@ -99,5 +99,6 @@ public final class SessionMain {
    try(Socket next=h.ready()){check(ClipboardWire.textContent(receive(next,h.root)).equals("new copy wins"),"newer native copy retained across reconnect");}
   }}
  }
- public static void main(String[] args)throws Exception{basics();canceledPublication();supersededPublication();failedSourceNoRetry();unacknowledgedReconnect();mutatedSourceNoRetry();delayedNativeCallback();canceledSendReconnect();System.out.println("PASS clipboard session "+checks+" assertions");}
+ static void initialCopiedAgain()throws Exception{try(Harness h=new Harness()){h.session.control(1);try(Socket s=h.ready()){h.fake.get().copy("preconnect 中文");check(ClipboardWire.textContent(receive(s,h.root)).equals("preconnect 中文"),"new copy of initial clipboard must synchronize");}}}
+ public static void main(String[] args)throws Exception{initialCopiedAgain();basics();canceledPublication();supersededPublication();failedSourceNoRetry();unacknowledgedReconnect();mutatedSourceNoRetry();delayedNativeCallback();canceledSendReconnect();System.out.println("PASS clipboard session "+checks+" assertions");}
 }

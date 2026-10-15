@@ -17,7 +17,7 @@ public class ClipboardDeviceProbe {
     try{
      if(line.equals("SET_TEXT"))platform.publish(ClipboardWire.text(ANDROID),"PC-KVM native test",()->true);
      else if(line.equals("SET_IMAGE"))platform.publish(file("/data/local/tmp/pckvm-clipboard-test-image.png","image/png",2),"PC-KVM native image",()->true);
-     else if(line.equals("SET_FILE"))platform.publish(file("/data/local/tmp/pckvm-clipboard-test-file.txt","text/plain",3),"PC-KVM native file",()->true);
+     else if(line.equals("SET_FILE"))platform.publish(file("/data/local/tmp/pckvm-clipboard-test-file.txt","application/octet-stream",3),"PC-KVM native file",()->true);
      else if(line.equals("EXPECT_TEXT")){
       ClipboardWire.Snapshot s=platform.capture();if(s==null||!PC.equals(ClipboardWire.textContent(s)))throw new AssertionError("text mismatch");
      }else if(line.startsWith("EXPECT_IMAGE ")||line.startsWith("EXPECT_FILE ")){

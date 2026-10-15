@@ -65,11 +65,13 @@ Files: `README.md`, `tests/README.md`, design validation appendix.
 
 ## Progress
 
-- 2026-10-15: Design approved; device detected as Android 16. Plan created before production edits.
-- Task 1 complete: shell clipboard text/listener and externally acquired MediaStore URI publish/read validated without APK. Probe restores original contents.
-- Task 2 complete: both codecs64 assertions plus cross-language fixtures; malformed metadata/digests/limits/cancellation covered.
-- Task 3 complete: Windows23 assertions previously passed; Android30 assertions plus provider/cache ownership tests pass. Native Windows latest rerun requires unlocked desktop.
-- Task 4 complete: service168 assertions, Android session99 assertions, independent authenticated tunnel, switches and configuration integrated; matching binaries build.
-- Task 5 in progress: core regressions passed except interactive Windows clipboard/message-host checks blocked by locked desktop. Physical device passed text in both directions and Windows-to-Android PNG digest check. Reverse-image metadata bug fixed with RED→GREEN; full physical rerun and WeChat/file-manager application validation await unlocked devices.
-- Review findings addressed: delayed native clipboard callback cannot let old remote data overwrite a new copy; rejected receive directories are correctly owned/deleted; successful materialized Windows text/images are cleaned; old owned file/media caches use reference protection plus24h/2GiB retention.
-- Ruling: keep feature on attached `codex/shared-clipboard` branch and deliver a separate trial directory; do not merge or replace the user's running installation during incomplete application validation.
+- 2026-10-15: Design approved; work executed on attached `codex/shared-clipboard` based on local master 93ce77a.
+- Tasks 1–4 implemented: shell clipboard/provider capability proven, bounded codecs, independent authenticated tunnel, Windows/Android adapters, lifecycle, tray toggle and status. No APK required on the tested Android 16 main user.
+- Final clipboard regression passes: C#/Java codecs 64 assertions each with cross-language fixtures; Android adapter 30, session 104; Windows service 174, native clipboard 23; provider/cache/integration suites pass.
+- Existing transport/session/agent/coordinator/connection/UI/edge/pointer/double-click/cursor/scancode/single-instance regressions pass. Interactive message-host click/settings pass after unlock; its foreground-window assertion skipped because no eligible foreground window was detected.
+- Final physical two-way text/image/file transfer passes on wireless, with exact text and binary checks. Both clipboards restored afterward.
+- WeChat 8.0.79 accepts marked multiline text and opens image/file previews using the production UHID Ctrl+V path. No messages sent; previews canceled and marked text cleared.
+- Xiaomi File Explorer 8.2.3.2 exposes readable standard file URI via “复制到剪贴板”. Its directory view does not paste either an external file or its own system clipboard file with Ctrl+V; report this target-app limitation. Own test directory removed.
+- Review findings addressed: delayed callback overwrite, rejected receive cleanup, materialized cache cleanup and reference-protected owned cache retention. New same-as-baseline copy regressions fail before the fix and pass afterward in both runtimes.
+- Matching production exe/jar built; deliver a separate trial directory. Validation probes compile production clipboard classes, rather than driving the packaged connection UI; no separate USB, multi-file or large-file interactive acceptance is claimed.
+- Preserve branch/worktree and running installation. Remaining acceptance coverage is documented in the design; no merge or replacement of the user's running installation performed.

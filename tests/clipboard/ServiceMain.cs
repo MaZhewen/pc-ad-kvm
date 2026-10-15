@@ -197,6 +197,14 @@ class ServiceMain
         Assert(!ClipboardPublicationGate.CanPublish(1, 1, 2, 3, 3, 4), "gate native copy");
         Assert(!ClipboardPublicationGate.CanPublish(1, 1, 2, 2, 4, 4), "gate replay");
         using (var fixture = new Fixture())
+        using (var client = fixture.Connect(fixture.Token, true))
+        {
+            fixture.Do(delegate { fixture.Backend.Copy("before connection"); });
+            Assert(client.GetStream().ReadByte() == 1, "fresh copy of initial content is not mistaken for mirrored content");
+            ClipboardSnapshot repeated = ClipboardWire.Read(client.GetStream(), fixture.Root, null);
+            Assert(ClipboardWire.TextContent(repeated) == "before connection", "fresh initial copy transfers");
+        }
+        using (var fixture = new Fixture())
         {
             using (var client = fixture.Connect(new byte[32], false)) Assert(Closed(client), "wrong token rejected");
             fixture.Service.RequestSync();

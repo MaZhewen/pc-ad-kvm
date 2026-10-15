@@ -73,15 +73,18 @@ Windows 读取 Unicode 文本、位图/PNG 与文件列表；Android 读取标�
 
 ## 实现与验证记录（2026-10-15）
 
-- 功能分支 `codex/shared-clipboard` 从本地 master `93ce77a` 创建，保留既有无线、光标与双击修复。
-- Android 16 / 主用户，微信 8.0.79、小米文件管理器 8.2.3.2。目标硬件序列与现有连接配置一致；无线端口变化后重新核验身份。
-- 真机已验证系统文本读写/通知、MediaStore 文件 URI 发布与内容读取，无需 APK。
-- 实际两端链路已通过 Windows → Android 多行中文文本、Android → Windows 多行中文文本、Windows → Android PNG 内容摘要一致性。反向图片/文件、微信和文件管理器应用粘贴尚待两端解锁后继续，不能标记为已验收。
-- 真机反向图片发现原生二进制快照缺少消息标识，已修复并新增先失败后通过的回归；尚需重新跑完整真机链路。
-- 编码测试 C#/Java 各 64 项及两方向交叉样本；Android 会话 99 项、适配器 30 项；Windows 服务最新 168 项。额外覆盖 URI 路由、缓存年龄/容量/所有权和配置接入。
-- Windows 原生剪贴板测试曾通过 23 项；最新复验被 Windows 锁定桌面的访问拒绝阻挡。message-host 的真实窗口点击测试同样受锁定桌面影响，不将其算作通过。
-- `transport`、`session`、`agent-logic`、`coordinator`、`connection`、`connection-form`、`edge-tracker`、`absolute-pointer`、`double-click`、`wifi-latency`、`native-cursor`、`drag-cursor`、`scancode-map`、`single-instance` 最新回归通过。
-- 两端匹配 exe/jar 构建成功。键鼠与大文件通道分离，文件类型仅通过系统 ClipData 消费；不自动发送微信消息。
+- 功能分支 `codex/shared-clipboard` 从本地 master `93ce77a` 创建，保留既有无线、光标与双击修复；独立试用产物位于 `G:\pc-kvm\dist\shared-clipboard`。
+- Android 16 / 主用户，微信 8.0.79、小米文件管理器 8.2.3.2。无线端口变化后重新核验设备身份；本次真机使用无线连接，未另外重跑 USB 和其他用户配置。
+- 最新源码的真实双向链路通过：中文多行文本、PNG 图片、文件字节及摘要。测试使用正式服务、协议与平台适配器，结束后恢复双方原剪贴板，不发送消息。
+- 微信文件传输助手：用正式 UHID 键盘路径注入 Ctrl+V，中文多行文本正确；640×360 标记图片进入图片预览，31 字节标记文件进入附件预览。图片和文件均返回取消，测试文字已清除，未点击发送。
+- 小米文件管理器：「复制到剪贴板」发布标准 content URI，正式 Android 适配器读取自建 source-test.txt 的字节摘要一致；普通内部「复制」不能等同于系统复制。目录界面对外部 MediaStore 文件及其自身发布的文件 Ctrl+V 均无粘贴结果，专用目标目录保持空。该版本暂不支持作为文件 Ctrl+V 目标，不以落盘代替成功。
+- Android 微信的图片/文件通常使用保存或转发入口；本次未验证其向系统剪贴板发布二进制内容的动作。反向图片/文件链路已用标准 ClipData 验证，不能因此声称微信具备对应复制入口。
+- 修复真机发现的二进制快照标识缺失，并新增先失败后通过的回归。修复连接后的同内容重复制被本地基线误去重：本地基线不再当成已同步内容，C#/Java 均有 RED→GREEN 回归。
+- 最终完整剪贴板回归通过：编码 C#/Java 各 64 项及双向交叉样本；Android 会话 104 项、适配器 30 项；Windows 服务 174 项、原生剪贴板 23 项；额外覆盖 URI 路由、缓存所有权/引用/年龄/容量和配置接入。
+- 既有 transport、session、agent-logic、coordinator、connection、connection-form、edge-tracker、absolute-pointer、double-click、wifi-latency、native-cursor、drag-cursor、scancode-map、single-instance 回归通过。解锁后 message-host 的点击及设置回归通过；无交互前台窗口时的 foreground takeover 子项被测试工具跳过，不计为通过。
+- 已审查并修复延迟本地回调覆盖新内容、失败接收缓存清理、成功文本/图片缓存清理；已发布文件和 URI 保持可读，自有旧缓存按引用保护及 24 小时 / 2 GiB 策略回收。
+- 同批 exe/jar 构建成功。大文件与输入通道分离；截断、取消、超限、断线及并发覆盖有自动化测试。多文件和大型文件传输期间操作体验仍需用户实际场景验证，不声称已完成全部性能矩阵。
+- 证据保留在工作区忽略的 `dist/regression-results` 与 `dist/clipboard-device-test`，含应用截图；截图包含当前界面，因此不提交源码。自建文件管理器测试目录已移除，原剪贴板已恢复。
 
 ## 参考
 

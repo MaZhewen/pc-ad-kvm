@@ -429,8 +429,8 @@ namespace PcKvm
                     if (capture) { Post(delegate { CaptureOutgoing(connection, true); }); continue; }
                     if (baselineWork)
                     {
-                        string hash = baseline == null ? null : baseline.Fingerprint();
-                        lock (_gate) { if (!CurrentLocked(connection)) return; connection.LastHash = hash; }
+                        // An observed local baseline has never been mirrored to the peer.
+                        lock (_gate) { if (!CurrentLocked(connection)) return; connection.LastHash = null; }
                         connection.Stream.WriteByte(0);
                         lock (_gate) { if (!CurrentLocked(connection)) return; connection.LocalReady = true; _status = "剪贴板已就绪"; }
                         Release(baseline); baseline = null; continue;
