@@ -57,7 +57,7 @@ public final class AbsoluteSession {
    x=nx; y=ny;
    if(active && leftDown && moved) touchAction.move(x,y);
    active=true;
-   if(leftDown) dragCursor.move(x,y);
+   if(leftDown) { if(!dragCursor.move(x,y)) nativeCursor.restore(); }
    else { send(0); nativeCursor.restore(); }
    // Acknowledge position processing, not display presentation. PC also requires
    // sustained outward movement, and never trusts an acknowledgement from an old epoch.

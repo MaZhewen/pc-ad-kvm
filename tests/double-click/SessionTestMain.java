@@ -9,9 +9,9 @@ public class SessionTestMain {
   public void close() { hidden=false; closed++; }
  }
  static final class Cursor implements DragCursor.View {
-  int x,y,moved,closed; boolean visible,available=true;
+  int x,y,moved,closed; boolean visible,available=true,failMove;
   public boolean show(int xx,int yy) { x=xx; y=yy; visible=available; return available; }
-  public void move(int xx,int yy) { x=xx; y=yy; moved++; }
+  public boolean move(int xx,int yy) { x=xx; y=yy; moved++; if(failMove) visible=false; return visible; }
   public void hide() { visible=false; }
   public void close() { visible=false; closed++; }
  }
@@ -101,6 +101,17 @@ public class SessionTestMain {
   eq(Injector.u16(released.mouse.lastReport,2),120); eq(Injector.u16(released.mouse.lastReport,4),210);
   released.close();
   System.out.println("PASS drag up restores native mouse at newest coordinates");
+  NativeIcon failedMoveIcon=new NativeIcon(); Cursor failedMoveCursor=new Cursor(); Touch failedMoveTouch=new Touch();
+  AbsoluteSession failedMove=new AbsoluteSession(failedMoveTouch,failedMoveCursor,failedMoveIcon);
+  failedMove.active=true; failedMove.mouseDeviceId=46; failedMove.x=100; failedMove.y=200;
+  failedMove.transform=ctor.newInstance(identity,identity); failedMove.epoch=7;
+  failedMove.mouse=new UhidDevice("failed move",new int[0]);
+  button(failedMove,1,1); failedMoveCursor.failMove=true;
+  failedMove.handle(0x0b,move,new ByteArrayOutputStream());
+  if(failedMoveIcon.hidden) throw new AssertionError("failed compositor movement kept the native cursor hidden");
+  eq(failedMoveTouch.calls.toString(),"DM"); eq(failedMove.mouse.reports,0);
+  button(failedMove,1,0); eq(failedMoveTouch.calls.toString(),"DMU"); failedMove.close();
+  System.out.println("PASS compositor movement failure restores native icon without interrupting touch or injecting hover");
   System.out.println("PASS other-button release cancels touch before restoring native mouse");
   System.out.println("PASS all left clicks use touch and session release cancels touch");
  }

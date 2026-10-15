@@ -4,7 +4,7 @@ import java.lang.reflect.Method;
 public final class DragCursor {
     public interface View {
         boolean show(int x, int y);
-        void move(int x, int y);
+        boolean move(int x, int y);
         void hide();
         void close();
     }
@@ -24,11 +24,12 @@ public final class DragCursor {
               catch (LinkageError error) { disable(error); }
             return false;
         }
-        public synchronized void move(int x, int y) {
-            if (!visible || closed || unavailable) return;
-            try { layer.move(x, y); }
+        public synchronized boolean move(int x, int y) {
+            if (!visible || closed || unavailable) return false;
+            try { layer.move(x, y); return true; }
             catch (Exception error) { disable(error); }
             catch (LinkageError error) { disable(error); }
+            return false;
         }
         public synchronized void hide() {
             if (!visible || closed || unavailable) return;

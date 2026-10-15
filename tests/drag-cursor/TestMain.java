@@ -41,7 +41,9 @@ public class TestMain {
     "unavailable graphics report avoids input coordinates");
    close(v);
   }
-  TestState.reset();v=create();show(v,1,2);TestState.fail="position:3.0,4.0";move(v,3,4);hide(v);close(v);
+  TestState.reset();v=create();show(v,1,2);TestState.fail="position:3.0,4.0";
+  Object failedMove=call(v,"move",new Class<?>[]{int.class,int.class},3,4);
+  check(Boolean.FALSE.equals(failedMove),"failed compositor movement signals that no visual cursor remains");hide(v);close(v);
   check(count("surface.release")==1&&count("layer.release")==1,"move failure disables graphics while completing cleanup");
   TestState.reset();v=create();show(v,1,2);TestState.fail="surface.release";close(v);
   check(count("layer.release")==1&&count("transaction.close")==1,
