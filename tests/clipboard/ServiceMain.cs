@@ -27,6 +27,7 @@ class ServiceMain
         public ClipboardSnapshot Current = ClipboardWire.Text("before connection");
         public int Publishes, Owner, FailCaptures;
         public bool Disposed, FailPublish;
+        public Action Preparing;
         void Check()
         {
             if (Thread.CurrentThread.ManagedThreadId != Owner) throw new Exception("wrong adapter thread");
@@ -40,11 +41,13 @@ class ServiceMain
             if (FailCaptures-- > 0) throw new System.Runtime.InteropServices.ExternalException("busy");
             return Current;
         }
-        public void Publish(ClipboardSnapshot snapshot)
+        public bool Publish(ClipboardSnapshot snapshot, uint expectedSequence, Func<bool> allowed)
         {
             Check();
             if (FailPublish) throw new InvalidOperationException("test-only sensitive data");
-            Current = snapshot; Publishes++; Number++;
+            if (Preparing != null) Preparing();
+            if (Number != expectedSequence || !allowed()) return false;
+            Current = snapshot; Publishes++; Number++; return true;
         }
         public void Release(ClipboardSnapshot snapshot) { Check(); }
         public void Dispose() { Check(); Disposed = true; }
@@ -190,8 +193,77 @@ class ServiceMain
         try { Run(); }
         catch (Exception error) { Console.WriteLine("ERROR " + error.GetType().Name + " " + error.Message); Environment.ExitCode = 1; }
     }
+    static void Reply(NetworkStream stream, long id, byte status)
+    {
+        stream.WriteByte(3);
+        for (int n = 0; n < 8; n++) stream.WriteByte((byte)((ulong)id >> (8 * n)));
+        stream.WriteByte(status); stream.Flush();
+    }
+    static ClipboardSnapshot Receive(NetworkStream stream, string root, string reason)
+    {
+        try { Assert(stream.ReadByte() == 1, reason); }
+        catch (IOException) { throw new Exception(reason); }
+        return ClipboardWire.Read(stream, root, null);
+    }
+    static void Quiet(NetworkStream stream, string reason)
+    {
+        stream.ReadTimeout = 220;
+        try { int marker = stream.ReadByte(); throw new Exception(reason + ": unexpected marker " + marker); }
+        catch (IOException) { Assert(true, reason); }
+        finally { stream.ReadTimeout = 3000; }
+    }
+    static void RejectedCopiesCanRetry()
+    {
+        foreach (byte failure in new byte[] { 1, 2 })
+        using (var fixture = new Fixture())
+        using (var client = fixture.Connect(fixture.Token, true))
+        {
+            NetworkStream stream = client.GetStream();
+            fixture.Do(delegate { fixture.Backend.Copy("retry same content"); });
+            ClipboardSnapshot first = Receive(stream, fixture.Root, "first copy sends");
+            Reply(stream, first.Id, failure);
+            Until(delegate { return fixture.Service.Status == (failure == 1 ? "剪贴板未更新" : "剪贴板更新失败"); }, "failed ACK consumed");
+            Quiet(stream, "failed ACK does not cause automatic retry");
+            fixture.Do(delegate { fixture.Backend.Copy("retry same content"); });
+            ClipboardSnapshot retry = Receive(stream, fixture.Root, "fresh same-content copy retries after failed ACK=" + failure);
+            Assert(ClipboardWire.TextContent(retry) == "retry same content" && retry.Id != first.Id, "retry has fresh ID and exact content");
+            Reply(stream, retry.Id, 0);
+            Until(delegate { return fixture.Service.LastAcknowledgedId == retry.Id; }, "retry successful ACK");
+            Reply(stream, first.Id, failure);
+            fixture.Do(delegate { fixture.Backend.Copy("retry same content"); });
+            Quiet(stream, "late failed ACK cannot invalidate newer success");
+        }
+    }
+    static void AcknowledgmentCannotReplaceNewerPublication()
+    {
+        using (var fixture = new Fixture())
+        using (var client = fixture.Connect(fixture.Token, true))
+        {
+            NetworkStream stream = client.GetStream();
+            fixture.Do(delegate { fixture.Backend.Copy("old outgoing"); });
+            ClipboardSnapshot outgoing = Receive(stream, fixture.Root, "outgoing candidate sends");
+            ClipboardSnapshot incoming = ClipboardWire.Text("new remote publication"); incoming.Id = 9901;
+            byte[] frame = Frame(incoming); stream.Write(frame, 0, frame.Length);
+            Assert(Ack(stream, incoming.Id) == 0, "new remote content published before delayed ACK");
+            Reply(stream, outgoing.Id, 0);
+            Until(delegate { return fixture.Service.LastAcknowledgedId == outgoing.Id; }, "old outgoing ACK consumed");
+            fixture.Do(delegate { fixture.Backend.Copy("new remote publication"); });
+            Quiet(stream, "old success ACK cannot overwrite newer publication fingerprint");
+        }
+    }
     static void Run()
     {
+        RejectedCopiesCanRetry();
+        AcknowledgmentCannotReplaceNewerPublication();
+        using (var fixture = new Fixture())
+        using (var client = fixture.Connect(fixture.Token, true))
+        {
+            fixture.Do(delegate { fixture.Backend.Preparing = delegate { fixture.Backend.Current = ClipboardWire.Text("new native copy during preparation"); fixture.Backend.Number++; }; });
+            ClipboardSnapshot remote = ClipboardWire.Text("old prepared remote"); remote.Id = 9902;
+            byte[] frame = Frame(remote); NetworkStream stream = client.GetStream(); stream.Write(frame, 0, frame.Length);
+            Assert(Ack(stream, remote.Id) == 1, "native change during preparation receives superseded ACK");
+            Assert(fixture.Backend.Publishes == 0 && ClipboardWire.TextContent(fixture.Backend.Current) == "new native copy during preparation", "prepared remote never overwrites newer native copy");
+        }
         Assert(ClipboardPublicationGate.CanPublish(1, 1, 2, 2, 3, 4), "gate accepts current");
         Assert(!ClipboardPublicationGate.CanPublish(1, 2, 2, 2, 3, 4), "gate old generation");
         Assert(!ClipboardPublicationGate.CanPublish(1, 1, 2, 3, 3, 4), "gate native copy");

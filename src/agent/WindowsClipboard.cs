@@ -11,6 +11,12 @@ using System.Windows.Forms;
 
 namespace PcKvm
 {
+    internal interface IWindowsClipboardAccess
+    {
+        uint Sequence { get; }
+        IDataObject GetDataObject();
+        void SetDataObject(IDataObject data);
+    }
     // Clipboard/OLE and the native listener always belong to the dispatcher's STA.
     public sealed class WindowsClipboard : IDisposable
     {
@@ -18,6 +24,7 @@ namespace PcKvm
         const long MaxFile = 1024L * 1024 * 1024;
         const long MaxTotal = 2L * 1024 * 1024 * 1024;
         readonly Control _dispatcher;
+        readonly IWindowsClipboardAccess _access;
         readonly int _thread;
         readonly string _cacheRoot;
         readonly Action _changed;
@@ -29,10 +36,20 @@ namespace PcKvm
 
         [DllImport("user32.dll", SetLastError = true)] static extern bool AddClipboardFormatListener(IntPtr window);
         [DllImport("user32.dll", SetLastError = true)] static extern bool RemoveClipboardFormatListener(IntPtr window);
-        [DllImport("user32.dll")] static extern uint GetClipboardSequenceNumber();
+        sealed class SystemClipboardAccess : IWindowsClipboardAccess
+        {
+            [DllImport("user32.dll")] static extern uint GetClipboardSequenceNumber();
+            public uint Sequence { get { return GetClipboardSequenceNumber(); } }
+            public IDataObject GetDataObject() { return Clipboard.GetDataObject(); }
+            public void SetDataObject(IDataObject data) { Clipboard.SetDataObject(data, true, 0, 0); }
+        }
 
         public WindowsClipboard(Control dispatcher, string cacheRoot, Action changed)
+            : this(dispatcher, cacheRoot, changed, new SystemClipboardAccess()) { }
+        internal WindowsClipboard(Control dispatcher, string cacheRoot, Action changed, IWindowsClipboardAccess access)
         {
+            if (access == null) throw new ArgumentNullException("access");
+            _access = access;
             if (dispatcher == null) throw new ArgumentNullException("dispatcher");
             if (Thread.CurrentThread.GetApartmentState() != ApartmentState.STA || dispatcher.InvokeRequired)
                 throw new InvalidOperationException("Clipboard requires its owning STA thread.");
@@ -51,7 +68,7 @@ namespace PcKvm
             catch { _dispatcher.HandleCreated -= OnHandleCreated; _dispatcher.HandleDestroyed -= OnHandleDestroyed; _dispatcher.Disposed -= OnDispatcherDisposed; throw; }
         }
 
-        public uint Sequence { get { return GetClipboardSequenceNumber(); } }
+        public uint Sequence { get { return _access.Sequence; } }
         public long Revision { get { CheckThread(); return _revision; } }
         public bool IsKnownSequence(uint sequence) { CheckThread(); return sequence != 0 && sequence == _known; }
 
@@ -81,7 +98,7 @@ namespace PcKvm
         {
             CheckThread();
             uint sequence = Sequence;
-            IDataObject data = Clipboard.GetDataObject();
+            IDataObject data = _access.GetDataObject();
             if (data == null) return null;
             ClipboardSnapshot result = null;
             try
@@ -90,14 +107,20 @@ namespace PcKvm
                 if (data.GetDataPresent(DataFormats.FileDrop, false)) result = CaptureFiles(data);
                 else if (data.GetDataPresent("PNG", false)) result = CapturePng(data.GetData("PNG", false));
                 else if (data.GetDataPresent(DataFormats.Bitmap)) { using (Image image = data.GetData(DataFormats.Bitmap) as Image) result = CaptureBitmap(image); }
-                else if (data.GetDataPresent(DataFormats.UnicodeText, false)) result = ClipboardWire.Text(data.GetData(DataFormats.UnicodeText, false) as string ?? "");
-                else if (data.GetDataPresent(DataFormats.Text, false)) result = ClipboardWire.Text(data.GetData(DataFormats.Text, false) as string ?? "");
+                else if (data.GetDataPresent(DataFormats.UnicodeText, false)) result = CaptureText(data, DataFormats.UnicodeText);
+                else if (data.GetDataPresent(DataFormats.Text, false)) result = CaptureText(data, DataFormats.Text);
                 if (sequence != Sequence) throw new ExternalException("Clipboard changed while being captured.");
                 return result;
             }
             catch { if (result != null) Release(result); throw; }
         }
 
+        static ClipboardSnapshot CaptureText(IDataObject data, string format)
+        {
+            string text = data.GetData(format, false) as string;
+            if (text == null) throw new ExternalException("Clipboard text is not ready.");
+            return ClipboardWire.Text(text);
+        }
         ClipboardSnapshot CaptureFiles(IDataObject data)
         {
             string[] paths = data.GetData(DataFormats.FileDrop, false) as string[];
@@ -189,6 +212,8 @@ namespace PcKvm
         }
 
         public void Publish(ClipboardSnapshot snapshot)
+        { TryPublish(snapshot, Sequence, null); }
+        public bool TryPublish(ClipboardSnapshot snapshot, uint expectedSequence, Func<bool> allowed)
         {
             CheckThread();
             if (snapshot == null || snapshot.Items == null) throw new ArgumentNullException("snapshot");
@@ -239,9 +264,12 @@ namespace PcKvm
                 _publishing = true;
                 try
                 {
-                    Clipboard.SetDataObject(data, true, 0, 0);
+                    // Preparation can run long enough for another application to copy new data.
+                    if (Sequence != expectedSequence || (allowed != null && !allowed())) return false;
+                    _access.SetDataObject(data);
                     _known = Sequence;
                     _observed = _known;
+                    return true;
                 }
                 finally { _publishing = false; }
             }

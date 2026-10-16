@@ -14,6 +14,8 @@ public final class AndroidProviders implements AutoCloseable {
                 if(method.getName().equals("equals"))return proxy==args[0];return "PC-KVM content resolver";
             }
             String authority=null;
+            // ContentInterface.call carries authority as a String rather than as a Uri.
+            if(method.getName().equals("call")&&args!=null&&args.length>0&&args[0] instanceof String)authority=(String)args[0];
             if(args!=null)for(Object arg:args)if(arg!=null){try{
                 Method getAuthority=arg.getClass().getMethod("getAuthority");
                 authority=(String)getAuthority.invoke(arg);if(authority!=null)break;

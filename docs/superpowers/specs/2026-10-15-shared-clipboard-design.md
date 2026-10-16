@@ -92,3 +92,7 @@ Windows 读取 Unicode 文本、位图/PNG 与文件列表；Android 读取标�
 - Android 剪贴板接口：https://android.googlesource.com/platform/frameworks/base/+/HEAD/core/java/android/content/IClipboard.aidl
 - Android 内容 URI 与临时访问授权：https://developer.android.com/training/secure-file-sharing
 - 原项目手机端零安装约束：docs/superpowers/specs/2026-09-21-pc-android-kvm-design.md
+
+## 2026-10-16 后续修复
+
+隐藏截图缓存与 Astra 审查修复见 [修复与验证记录](../plans/2026-10-16-shared-clipboard-fixes.md)。本页上述结果保留原验收日期；后续版本的待验项以修复记录为准。

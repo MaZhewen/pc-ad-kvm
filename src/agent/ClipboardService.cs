@@ -12,7 +12,7 @@ namespace PcKvm
     {
         event Action Changed;
         ClipboardSnapshot Capture();
-        void Publish(ClipboardSnapshot snapshot);
+        bool Publish(ClipboardSnapshot snapshot, uint expectedSequence, Func<bool> allowed);
         void Release(ClipboardSnapshot snapshot);
         long Revision { get; }
         uint Sequence { get; }
@@ -174,7 +174,7 @@ namespace PcKvm
             public WindowsBackend(Control dispatcher, string root)
             { _clipboard = new WindowsClipboard(dispatcher, root, delegate { if (Changed != null) Changed(); }); }
             public ClipboardSnapshot Capture() { return _clipboard.Capture(); }
-            public void Publish(ClipboardSnapshot snapshot) { _clipboard.Publish(snapshot); }
+            public bool Publish(ClipboardSnapshot snapshot, uint expectedSequence, Func<bool> allowed) { return _clipboard.TryPublish(snapshot, expectedSequence, allowed); }
             public void Release(ClipboardSnapshot snapshot) { _clipboard.Release(snapshot); }
             public uint Sequence { get { return _clipboard.Sequence; } }
             public long Revision { get { return _clipboard.Revision; } }
@@ -188,6 +188,12 @@ namespace PcKvm
             public long Change;
         }
         sealed class Acknowledgment { public long Id; public byte Status; }
+        sealed class Transmission
+        {
+            public long Id, Change, Publication;
+            public string Hash;
+            public int Result = -1;
+        }
         sealed class Connection
         {
             public readonly TcpClient Client;
@@ -199,7 +205,8 @@ namespace PcKvm
             public ClipboardSnapshot Baseline;
             public Pending Pending;
             public string LastHash;
-            public long LastReceivedId, AwaitingId;
+            public long LastReceivedId, AwaitingId, PublicationVersion;
+            public Transmission Outgoing;
             public readonly Queue<Acknowledgment> Acknowledgments = new Queue<Acknowledgment>();
             public Connection(TcpClient client, long epoch) { Client = client; Stream = client.GetStream(); Epoch = epoch; }
         }
@@ -437,19 +444,31 @@ namespace PcKvm
                     }
                     if (pending != null)
                     {
-                        string hash = pending.Snapshot.Fingerprint(); bool send;
+                        string hash = pending.Snapshot.Fingerprint(); bool send; Transmission outgoing = null;
                         lock (_gate)
                         {
                             if (!CurrentLocked(connection)) return;
                             send = pending.Change == _changes && (pending.Force || hash != connection.LastHash);
-                            if (send) { connection.Writing = true; connection.AwaitingId = pending.Snapshot.Id; _status = "正在同步剪贴板"; }
+                            if (send)
+                            {
+                                outgoing = new Transmission { Id = pending.Snapshot.Id, Change = _changes, Publication = connection.PublicationVersion };
+                                connection.Outgoing = outgoing; connection.LastHash = null;
+                                connection.Writing = true; connection.AwaitingId = outgoing.Id; _status = "正在同步剪贴板";
+                            }
                         }
                         if (send)
                         {
                             connection.Stream.WriteByte(1);
                             ClipboardWire.Write(connection.Stream, pending.Snapshot, delegate { return Canceled(connection); });
                             connection.Stream.Flush();
-                            lock (_gate) { if (CurrentLocked(connection)) { connection.LastHash = hash; connection.Writing = false; } }
+                            lock (_gate)
+                            {
+                                if (CurrentLocked(connection))
+                                {
+                                    outgoing.Hash = pending.Snapshot.Fingerprint(); connection.Writing = false;
+                                    ConfirmOutgoingLocked(connection, outgoing);
+                                }
+                            }
                         }
                         Release(pending.Snapshot); pending = null; lock (_gate) connection.Processing = false; continue;
                     }
@@ -467,6 +486,13 @@ namespace PcKvm
                     connection.Wake.Dispose();
                 }
             }
+        }
+        void ConfirmOutgoingLocked(Connection connection, Transmission outgoing)
+        {
+            // ACK may arrive before Write returns. Commit only the latest completed, successful update.
+            if (connection.Outgoing == outgoing && outgoing.Result == 0 && outgoing.Hash != null &&
+                outgoing.Change == _changes && outgoing.Publication == connection.PublicationVersion)
+                connection.LastHash = outgoing.Hash;
         }
         uint SampleSequence(Connection connection)
         {
@@ -512,6 +538,8 @@ namespace PcKvm
                             if (CurrentLocked(connection) && connection.AwaitingId == id)
                             {
                                 connection.AwaitingId = 0;
+                                Transmission outgoing = connection.Outgoing;
+                                outgoing.Result = status; ConfirmOutgoingLocked(connection, outgoing);
                                 if (status == 0) _lastAcknowledgedId = id;
                                 _status = status == 0 ? "已同步到系统剪贴板" : status == 1 ? "剪贴板未更新" : "剪贴板更新失败";
                             }
@@ -559,7 +587,8 @@ namespace PcKvm
                         !ClipboardPublicationGate.CanPublish(connection.Epoch, _epoch, sequence, _backend.Sequence, previousId, snapshot.Id)) return;
                     string hash = snapshot.Fingerprint();
                     if (hash == connection.LastHash) { status = 0; return; }
-                    _backend.Publish(snapshot); published = true; status = 0; connection.LastHash = hash;
+                    if (!_backend.Publish(snapshot, sequence, delegate { return CurrentLocked(connection) && snapshot.Id == connection.LastReceivedId; })) return;
+                    published = true; status = 0; connection.LastHash = hash; connection.PublicationVersion++;
                     _status = "已同步到系统剪贴板";
                 }
             }

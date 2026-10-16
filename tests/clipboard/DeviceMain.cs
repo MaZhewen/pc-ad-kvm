@@ -19,7 +19,7 @@ class ClipboardDeviceTests{
     if(!DeviceLauncher.EnsureClipboardTunnel(target,CancellationToken.None,out owned))throw new Exception("Test clipboard port in use");
     string hex=BitConverter.ToString(token).Replace("-","").ToLowerInvariant();
     device=new Process{StartInfo=adb.StartInfo(new string[]{"shell","CLASSPATH=/data/local/tmp/pckvm-clipboard-device.jar app_process / ClipboardDeviceProbe "+hex},target,true)};
-    device.OutputDataReceived+=delegate(object sender,DataReceivedEventArgs e){if(e.Data==null)return;lock(gate)lines.Add(e.Data);if(e.Data.StartsWith("DEVICE ")||e.Data.StartsWith("CLIPBOARD unavailable"))Console.WriteLine(e.Data);};
+    device.OutputDataReceived+=delegate(object sender,DataReceivedEventArgs e){if(e.Data==null)return;lock(gate)lines.Add(e.Data);if(e.Data.StartsWith("DEVICE ")||e.Data.StartsWith("CLIPBOARD "))Console.WriteLine(e.Data);};
     device.ErrorDataReceived+=delegate{};device.Start();device.BeginOutputReadLine();device.BeginErrorReadLine();
     Wait(delegate{return Has("DEVICE READY")&&service.Status=="剪贴板已就绪";},"authenticated real clipboard baseline",15000);
     long oldAck=service.LastAcknowledgedId;Put(delegate{Clipboard.SetText(PcText);});Wait(delegate{return service.LastAcknowledgedId!=oldAck;},"Windows to Android text ACK",15000);Command("EXPECT_TEXT");

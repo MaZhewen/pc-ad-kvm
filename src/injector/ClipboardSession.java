@@ -136,13 +136,21 @@ public final class ClipboardSession implements AutoCloseable {
             if(local.revision()!=revision){synchronized(state){forcePending=true;state.notifyAll();}return;}
             if(!forced&&fingerprint.equals(lastFingerprint))return;
             synchronized(state){if(version!=changeVersion){forcePending=true;return;}link.sending=true;}
-            writing=true;ClipboardWire.Snapshot outgoing=tracked(snapshot,sourceFailed);outgoing.id=++nextId;link.awaitingId=outgoing.id;status("pending");
+            writing=true;ClipboardWire.Snapshot outgoing=tracked(snapshot,sourceFailed);outgoing.id=++nextId;
+            Transmission sent=new Transmission(outgoing.id,revision,version,published);
+            synchronized(state){link.outgoing=sent;link.awaitingId=outgoing.id;lastFingerprint=null;}status("pending");
             link.out.write(1);ClipboardWire.write(link.out,outgoing,()->!alive(link,local)||local.revision()!=revision);link.out.flush();
-            if(alive(link,local)&&local.revision()==revision)synchronized(state){if(alive(link,local)&&publicationVersion==published)lastFingerprint=outgoing.fingerprint();}
+            long currentRevision=local.revision();
+            synchronized(state){if(alive(link,local)){sent.fingerprint=outgoing.fingerprint();confirmOutgoing(link,sent,currentRevision);}}
         } catch(Exception e) {
             if(enabled&&!closed)unavailable(e);
             if(writing){if(sourceFailed[0])link.awaitingId=0;link.cancel();}
         } finally {link.sending=false;if(snapshot!=null)local.release(snapshot);}
+    }
+    private void confirmOutgoing(Link link,Transmission sent,long currentRevision) {
+        // A successful ACK and a completed write may arrive in either order.
+        if(link.outgoing==sent&&sent.result==0&&sent.fingerprint!=null&&sent.change==changeVersion&&
+           sent.publication==publicationVersion&&currentRevision==sent.revision)lastFingerprint=sent.fingerprint;
     }
     private static ClipboardWire.Snapshot tracked(ClipboardWire.Snapshot original,boolean[] sourceFailed) {
         ClipboardWire.Snapshot outgoing=new ClipboardWire.Snapshot();outgoing.kind=original.kind;
@@ -170,7 +178,14 @@ public final class ClipboardSession implements AutoCloseable {
                 int marker=link.in.read();if(marker<0)throw new EOFException("Clipboard closed");
                 if(marker==0)continue;
                 if(marker==2){synchronized(state){if(alive(link,local)){forcePending=true;state.notifyAll();}}continue;}
-                if(marker==3){long id=number(link.in);int result=link.in.read();if(id<=0||result<0||result>2)throw new IOException("Invalid clipboard ACK");if(link.awaitingId==id){link.awaitingId=0;status(result==0?"sent":result==1?"superseded":"failed");}continue;}
+                if(marker==3){
+                    long id=number(link.in);int result=link.in.read();if(id<=0||result<0||result>2)throw new IOException("Invalid clipboard ACK");
+                    long currentRevision=local.revision();
+                    synchronized(state){if(alive(link,local)&&link.awaitingId==id){
+                        link.awaitingId=0;Transmission sent=link.outgoing;sent.result=result;confirmOutgoing(link,sent,currentRevision);
+                        status(result==0?"sent":result==1?"superseded":"failed");
+                    }}continue;
+                }
                 if(marker!=1)throw new IOException("Invalid clipboard marker");
                 long revision=local.revision();Object nativeIdentity=local.identity();ClipboardWire.Snapshot snapshot=null;
                 try {
@@ -209,11 +224,15 @@ public final class ClipboardSession implements AutoCloseable {
         long value=0;for(int n=0;n<8;n++){int b=in.read();if(b<0)throw new EOFException();value|=(long)b<<(8*n);}if(value<0)throw new IOException("Clipboard ACK overflow");return value;
     }
     private static final class Ack {final long id;final int status;Ack(long id,int status){this.id=id;this.status=status;}}
+    private static final class Transmission {
+        final long id,revision,change,publication;String fingerprint;int result=-1;
+        Transmission(long id,long revision,long change,long publication){this.id=id;this.revision=revision;this.change=change;this.publication=publication;}
+    }
     private static final class Link {
         final Socket socket=new Socket();final ArrayDeque<Ack> acks=new ArrayDeque<Ack>();
         final long generation;Link(long generation){this.generation=generation;}
         volatile boolean active=true,sending;
-        volatile long awaitingId;
+        volatile long awaitingId;Transmission outgoing;
         InputStream in;OutputStream out;Thread reader;
         void cancel(){active=false;try{socket.close();}catch(IOException ignored){}}
     }

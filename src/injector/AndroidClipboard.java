@@ -91,6 +91,8 @@ public final class AndroidClipboard implements AutoCloseable {
         final AndroidProviders providers;
         final File cache;
         final AndroidClipboardCache mediaCache;
+        final AndroidClipboardImages imageCache;
+        final java.util.Timer cacheTimer;
         Object listener;Class<?> listenerType;String publishedContent;volatile boolean platformClosed;
         final Set<File> captures=new HashSet<File>();
         ReflectivePlatform(File cache)throws Exception{
@@ -111,7 +113,7 @@ public final class AndroidClipboard implements AutoCloseable {
             }catch(NoSuchFieldException ignored){}catch(ClassNotFoundException ignored){}
             Object baseResolver=contextClass.getMethod("getContentResolver").invoke(context);
             providers=new AndroidProviders(context,baseResolver);
-            Object createdThread=null;
+            Object createdThread=null;java.util.Timer createdTimer=null;
             try{
                 resolver=providers.resolver();
                 keyguard=contextClass.getMethod("getSystemService",String.class).invoke(context,"keyguard");
@@ -119,9 +121,18 @@ public final class AndroidClipboard implements AutoCloseable {
                 handlerThread=createdThread;((Thread)handlerThread).start();
                 Object handler=Class.forName("android.os.Handler").getConstructor(looper).newInstance(handlerThread.getClass().getMethod("getLooper").invoke(handlerThread));
                 manager=managerClass.getConstructor(contextClass,Class.forName("android.os.Handler")).newInstance(context,handler);
+                // app_process has no Application attribution for Environment's static storage query.
+                // The shell context and tested primary user use Android's standard /sdcard alias.
+                File shared=new File("/sdcard");
+                imageCache=new AndroidClipboardImages(new File(shared,"Documents/.PC-KVM-Clipboard"),new AndroidClipboardImages.Publisher(){
+                    public String scan(File file)throws Exception{return scanHiddenImage(file);}
+                    public void delete(String uri)throws Exception{ReflectivePlatform.this.delete(uriClass.getMethod("parse",String.class).invoke(null,uri));}
+                });
+                createdTimer=new java.util.Timer("pckvm-clipboard-cache",true);cacheTimer=createdTimer;
+                cacheTimer.schedule(new java.util.TimerTask(){public void run(){if(!platformClosed)sweepMedia();}},60000,60000);
             }catch(Exception|Error failure){
-                final Object failedThread=createdThread;
-                try{closeAll(()->{if(failedThread!=null)failedThread.getClass().getMethod("quitSafely").invoke(failedThread);},providers);}catch(Exception cleanup){failure.addSuppressed(cleanup);}
+                final Object failedThread=createdThread;final java.util.Timer failedTimer=createdTimer;
+                try{closeAll(()->{if(failedTimer!=null)failedTimer.cancel();},()->{if(failedThread!=null)failedThread.getClass().getMethod("quitSafely").invoke(failedThread);},providers);}catch(Exception cleanup){failure.addSuppressed(cleanup);}
                 throw failure;
             }
         }
@@ -224,9 +235,9 @@ public final class AndroidClipboard implements AutoCloseable {
                 }
                 List<String> uris=new ArrayList<String>();List<Long> sizes=new ArrayList<Long>();
                 for(int i=0;i<created.size();i++){uris.add(created.get(i).toString());sizes.add(snapshot.items.get(i).length);}
-                receipt=mediaCache.record(uris,sizes);
+                receipt=mediaCache.recordPending(uris,sizes,snapshot.kind==2);
                 checkAllowed(allowed);publishedContent=signature(clip);managerClass.getMethod("setPrimaryClip",clipClass).invoke(manager,clip);
-                sweepMedia();
+                mediaCache.complete(receipt);sweepMedia();
             }catch(Exception e){for(Object uri:created)try{delete(uri);}catch(Exception ignored){}mediaCache.forget(receipt);throw e;}
         }
         Set<String> currentUris()throws Exception{
@@ -242,13 +253,31 @@ public final class AndroidClipboard implements AutoCloseable {
             });}catch(Exception ignored){}
         }
         void checkAllowed(BooleanSupplier allowed)throws Exception{if(!allowed.getAsBoolean()||!available())throw new InterruptedIOException("Clipboard publication canceled");}
+        String scanHiddenImage(File file)throws Exception{
+            Class<?> bundleClass=Class.forName("android.os.Bundle");
+            Object result=resolverClass.getMethod("call",String.class,String.class,String.class,bundleClass).invoke(resolver,"media","scan_file",file.getAbsolutePath(),null);
+            Object uri=bundleClass.getMethod("getParcelable",String.class).invoke(result,"android.intent.extra.STREAM");
+            if(uri==null)throw new IOException("Hidden image provider unavailable");
+            Object cursor=resolverClass.getMethod("query",uriClass,String[].class,String.class,String[].class,String.class).invoke(resolver,uri,new String[]{"_data","media_type"},null,null,null);
+            Class<?> cursorClass=Class.forName("android.database.Cursor");boolean owned=false;
+            try{
+                if(cursor==null||!(Boolean)cursorClass.getMethod("moveToFirst").invoke(cursor))throw new IOException("Hidden image registration missing");
+                String path=(String)cursorClass.getMethod("getString",int.class).invoke(cursor,0);
+                owned=path!=null&&file.getCanonicalFile().equals(new File(path).getCanonicalFile());
+                if(!owned)throw new IOException("Hidden image provider path changed");
+                if((Integer)cursorClass.getMethod("getInt",int.class).invoke(cursor,1)!=0)throw new IOException("Clipboard image would be visible in gallery");
+                return uri.toString();
+            }catch(Exception error){if(owned)try{delete(uri);}catch(Exception ignored){}throw error;}
+            finally{if(cursor!=null)cursorClass.getMethod("close").invoke(cursor);}
+        }
         Object importFile(ClipboardWire.Item item,boolean image,BooleanSupplier allowed)throws Exception{
+            if(image)return uriClass.getMethod("parse",String.class).invoke(null,imageCache.store(item,allowed));
             Class<?> valuesClass=Class.forName("android.content.ContentValues");Object values=valuesClass.getConstructor().newInstance();
             Method put=valuesClass.getMethod("put",String.class,String.class);
             put.invoke(values,"_display_name",item.name);put.invoke(values,"mime_type",item.mime);
-            put.invoke(values,"relative_path",image?"Pictures/PC-KVM/":"Download/PC-KVM/");
+            put.invoke(values,"relative_path","Download/PC-KVM/");
             valuesClass.getMethod("put",String.class,Integer.class).invoke(values,"is_pending",Integer.valueOf(1));
-            Object collection=uriClass.getMethod("parse",String.class).invoke(null,image?"content://media/external_primary/images/media":"content://media/external_primary/downloads");
+            Object collection=uriClass.getMethod("parse",String.class).invoke(null,"content://media/external_primary/downloads");
             Object uri=resolverClass.getMethod("insert",uriClass,valuesClass).invoke(resolver,collection,values);
             if(uri==null)throw new IOException("Clipboard destination unavailable");
             try{
@@ -272,6 +301,7 @@ public final class AndroidClipboard implements AutoCloseable {
         public void close()throws Exception{
             platformClosed=true;
             closeAll(
+                ()->cacheTimer.cancel(),
                 ()->{if(listener!=null)managerClass.getMethod("removePrimaryClipChangedListener",listenerType).invoke(manager,listener);},
                 ()->handlerThread.getClass().getMethod("quitSafely").invoke(handlerThread),
                 providers,

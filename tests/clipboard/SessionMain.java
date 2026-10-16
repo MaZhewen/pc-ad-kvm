@@ -100,5 +100,21 @@ public final class SessionMain {
   }}
  }
  static void initialCopiedAgain()throws Exception{try(Harness h=new Harness()){h.session.control(1);try(Socket s=h.ready()){h.fake.get().copy("preconnect 中文");check(ClipboardWire.textContent(receive(s,h.root)).equals("preconnect 中文"),"new copy of initial clipboard must synchronize");}}}
- public static void main(String[] args)throws Exception{initialCopiedAgain();basics();canceledPublication();supersededPublication();failedSourceNoRetry();unacknowledgedReconnect();mutatedSourceNoRetry();delayedNativeCallback();canceledSendReconnect();System.out.println("PASS clipboard session "+checks+" assertions");}
+ static void reply(Socket s,long id,int status)throws Exception{OutputStream out=s.getOutputStream();out.write(3);for(int n=0;n<8;n++)out.write((int)(id>>>(8*n))&255);out.write(status);out.flush();}
+ static void rejectedCopiesCanRetry()throws Exception{
+  for(int result:new int[]{1,2})try(Harness h=new Harness()){h.session.control(1);try(Socket s=h.ready()){
+   h.fake.get().copy("retry same content");ClipboardWire.Snapshot first=receive(s,h.root);reply(s,first.id,result);quiet(s,"failure ACK must not automatically retry");
+   h.fake.get().copy("retry same content");ClipboardWire.Snapshot retry;
+   try{retry=receive(s,h.root);}catch(SocketTimeoutException e){throw new AssertionError("fresh same-content copy retries after failed ACK="+result);}
+   check(retry.id!=first.id&&ClipboardWire.textContent(retry).equals("retry same content"),"retry has fresh ID and exact content");
+   reply(s,retry.id,0);quiet(s,"success ACK consumed");reply(s,first.id,result);h.fake.get().copy("retry same content");quiet(s,"late failed ACK cannot invalidate newer success");
+  }}
+ }
+ static void acknowledgmentCannotReplaceNewerPublication()throws Exception{
+  try(Harness h=new Harness()){h.session.control(1);try(Socket s=h.ready()){
+   h.fake.get().copy("old outgoing");ClipboardWire.Snapshot outgoing=receive(s,h.root);send(s,"new remote publication",9901);ack(s,9901,0);
+   reply(s,outgoing.id,0);quiet(s,"old outgoing ACK consumed");h.fake.get().copy("new remote publication");quiet(s,"old success ACK cannot overwrite newer publication fingerprint");
+  }}
+ }
+ public static void main(String[] args)throws Exception{rejectedCopiesCanRetry();acknowledgmentCannotReplaceNewerPublication();initialCopiedAgain();basics();canceledPublication();supersededPublication();failedSourceNoRetry();unacknowledgedReconnect();mutatedSourceNoRetry();delayedNativeCallback();canceledSendReconnect();System.out.println("PASS clipboard session "+checks+" assertions");}
 }
