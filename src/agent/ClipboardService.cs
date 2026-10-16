@@ -185,12 +185,12 @@ namespace PcKvm
         {
             public ClipboardSnapshot Snapshot;
             public bool Force;
-            public long Change;
+            public long Change, Publication;
         }
         sealed class Acknowledgment { public long Id; public byte Status; }
         sealed class Transmission
         {
-            public long Id, Change, Publication;
+            public long Id, Change, Publication, Peer;
             public string Hash;
             public int Result = -1;
         }
@@ -205,7 +205,7 @@ namespace PcKvm
             public ClipboardSnapshot Baseline;
             public Pending Pending;
             public string LastHash;
-            public long LastReceivedId, AwaitingId, PublicationVersion;
+            public long LastReceivedId, AwaitingId, PublicationVersion, PeerVersion;
             public Transmission Outgoing;
             public readonly Queue<Acknowledgment> Acknowledgments = new Queue<Acknowledgment>();
             public Connection(TcpClient client, long epoch) { Client = client; Stream = client.GetStream(); Epoch = epoch; }
@@ -283,6 +283,7 @@ namespace PcKvm
         bool CurrentLocked(Connection connection)
         { return !_disposed && _enabled && connection != null && !connection.Closed && _active == connection && _epoch == connection.Epoch; }
         bool Canceled(Connection connection) { lock (_gate) return !CurrentLocked(connection); }
+        bool Canceled(Connection connection, long publication) { lock (_gate) return !CurrentLocked(connection) || connection.PublicationVersion != publication; }
         static void StartWorker(ThreadStart action) { Thread thread = new Thread(action); thread.IsBackground = true; thread.Start(); }
         void Post(Action action)
         {
@@ -378,7 +379,8 @@ namespace PcKvm
         }
         void CaptureOutgoing(Connection connection, bool force, int attempt, long expectedChange)
         {
-            lock (_gate) { if (!CurrentLocked(connection) || expectedChange != _changes) return; connection.CaptureRequested = false; }
+            long publication;
+            lock (_gate) { if (!CurrentLocked(connection) || expectedChange != _changes) return; connection.CaptureRequested = false; publication = connection.PublicationVersion; }
             ClipboardSnapshot snapshot = null;
             try { snapshot = _backend.Capture(); _retention.Observe(snapshot); _retention.RequestSweep(); }
             catch (System.Runtime.InteropServices.ExternalException)
@@ -396,10 +398,10 @@ namespace PcKvm
             lock (_gate)
             {
                 if (snapshot == null) { if (CurrentLocked(connection)) { _status = "剪贴板暂不可用"; connection.Wake.Set(); } return; }
-                if (!CurrentLocked(connection)) { Release(snapshot); return; }
+                if (!CurrentLocked(connection) || publication != connection.PublicationVersion) { Release(snapshot); return; }
                 snapshot.Id = ++_nextId;
                 old = connection.Pending;
-                connection.Pending = new Pending { Snapshot = snapshot, Force = force || (old != null && old.Force), Change = _changes };
+                connection.Pending = new Pending { Snapshot = snapshot, Force = force || (old != null && old.Force), Change = _changes, Publication = publication };
                 connection.Wake.Set();
             }
             if (old != null) Release(old.Snapshot);
@@ -448,10 +450,10 @@ namespace PcKvm
                         lock (_gate)
                         {
                             if (!CurrentLocked(connection)) return;
-                            send = pending.Change == _changes && (pending.Force || hash != connection.LastHash);
+                            send = pending.Change == _changes && pending.Publication == connection.PublicationVersion && (pending.Force || hash != connection.LastHash);
                             if (send)
                             {
-                                outgoing = new Transmission { Id = pending.Snapshot.Id, Change = _changes, Publication = connection.PublicationVersion };
+                                outgoing = new Transmission { Id = pending.Snapshot.Id, Change = _changes, Publication = connection.PublicationVersion, Peer = connection.PeerVersion };
                                 connection.Outgoing = outgoing; connection.LastHash = null;
                                 connection.Writing = true; connection.AwaitingId = outgoing.Id; _status = "正在同步剪贴板";
                             }
@@ -459,7 +461,7 @@ namespace PcKvm
                         if (send)
                         {
                             connection.Stream.WriteByte(1);
-                            ClipboardWire.Write(connection.Stream, pending.Snapshot, delegate { return Canceled(connection); });
+                            ClipboardWire.Write(connection.Stream, pending.Snapshot, delegate { return Canceled(connection, pending.Publication); });
                             connection.Stream.Flush();
                             lock (_gate)
                             {
@@ -491,7 +493,7 @@ namespace PcKvm
         {
             // ACK may arrive before Write returns. Commit only the latest completed, successful update.
             if (connection.Outgoing == outgoing && outgoing.Result == 0 && outgoing.Hash != null &&
-                outgoing.Change == _changes && outgoing.Publication == connection.PublicationVersion)
+                outgoing.Change == _changes && outgoing.Publication == connection.PublicationVersion && outgoing.Peer == connection.PeerVersion)
                 connection.LastHash = outgoing.Hash;
         }
         uint SampleSequence(Connection connection)
@@ -547,6 +549,8 @@ namespace PcKvm
                     }
                     else if (marker == 1)
                     {
+                        // A peer update invalidates equality even if its eventual local publication fails.
+                        lock (_gate) { if (!CurrentLocked(connection)) return; connection.PeerVersion++; connection.LastHash = null; }
                         uint sequence = SampleSequence(connection);
                         connection.Client.ReceiveTimeout = 30000;
                         ClipboardSnapshot snapshot = ClipboardWire.Read(connection.Stream, _cacheRoot, delegate { return Canceled(connection); });

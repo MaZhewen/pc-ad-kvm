@@ -27,12 +27,12 @@ class ServiceMain
         public ClipboardSnapshot Current = ClipboardWire.Text("before connection");
         public int Publishes, Owner, FailCaptures;
         public bool Disposed, FailPublish;
-        public Action Preparing;
+        public Action Preparing; public ManualResetEvent SequenceObserved;
         void Check()
         {
             if (Thread.CurrentThread.ManagedThreadId != Owner) throw new Exception("wrong adapter thread");
         }
-        public uint Sequence { get { Check(); return Number; } }
+        public uint Sequence { get { Check(); if (SequenceObserved != null) SequenceObserved.Set(); return Number; } }
         public long Revision { get { Check(); return Number; } }
         public bool IsKnownSequence(uint sequence) { Check(); return false; }
         public ClipboardSnapshot Capture()
@@ -212,6 +212,88 @@ class ServiceMain
         catch (IOException) { Assert(true, reason); }
         finally { stream.ReadTimeout = 3000; }
     }
+    static void RemotePublicationCancelsPreparedCopy()
+    {
+        using (var fixture = new Fixture())
+        using (var client = fixture.Connect(fixture.Token, true))
+        using (var entered = new ManualResetEvent(false))
+        using (var resume = new ManualResetEvent(false))
+        {
+            var old = ClipboardWire.Text("old local data"); var source = old.Items[0].Open; int opens = 0;
+            old.Items[0].Open = delegate { return Interlocked.Increment(ref opens) == 1 ? new BlockingRead(System.Text.Encoding.UTF8.GetBytes("old local data"), entered, resume) : source(); };
+            try
+            {
+                fixture.Do(delegate { fixture.Backend.CopySnapshot(old); });
+                Assert(entered.WaitOne(4000), "old snapshot fingerprint started");
+                byte[] frame = Frame(ClipboardWire.Text("new remote data"));
+                NetworkStream stream = client.GetStream(); stream.Write(frame, 0, frame.Length);
+                Until(delegate { return fixture.Backend.Publishes == 1; }, "new remote publication replaces snapshot being hashed");
+                fixture.Do(delegate { }); resume.Set();
+                Assert(Ack(stream, fixture.Backend.Current.Id) == 0, "remote acknowledged before obsolete prepared snapshot");
+                Quiet(stream, "prepared old snapshot cannot follow newer remote publication");
+                fixture.Do(delegate { fixture.Backend.Copy("fresh local after remote"); });
+                Assert(ClipboardWire.TextContent(Receive(stream, fixture.Root, "fresh local frame")) == "fresh local after remote", "new local copy still sends after stale candidate discarded");
+            }
+            finally { resume.Set(); }
+        }
+    }
+    static void RemotePublicationCancelsStreamingCopy()
+    {
+        using (var fixture = new Fixture())
+        using (var client = fixture.Connect(fixture.Token, true))
+        using (var entered = new ManualResetEvent(false))
+        using (var resume = new ManualResetEvent(false))
+        {
+            var old = ClipboardWire.Text("old streaming data"); var source = old.Items[0].Open; int opens = 0;
+            old.Items[0].Open = delegate { return Interlocked.Increment(ref opens) == 2 ? new BlockingRead(System.Text.Encoding.UTF8.GetBytes("old streaming data"), entered, resume) : source(); };
+            try
+            {
+                fixture.Do(delegate { fixture.Backend.CopySnapshot(old); });
+                Assert(entered.WaitOne(4000), "old snapshot streaming started");
+                byte[] frame = Frame(ClipboardWire.Text("new remote data")); NetworkStream stream = client.GetStream(); stream.Write(frame, 0, frame.Length);
+                Until(delegate { return fixture.Backend.Publishes == 1; }, "new remote publication during streaming");
+                // Native adapters recapture materialized clipboard contents rather than received cache paths.
+                fixture.Do(delegate { fixture.Backend.Current = ClipboardWire.Text("new remote data"); }); resume.Set();
+                while (stream.ReadByte() >= 0) { }
+                using (var next = fixture.Connect(fixture.Token, true))
+                    Assert(ClipboardWire.TextContent(Receive(next.GetStream(), fixture.Root, "current content forced after cancellation")) == "new remote data", "reconnect captures current clipboard instead of replaying stale stream");
+            }
+            finally { resume.Set(); }
+        }
+    }
+    static void FailedReceiveInvalidatesPeerConfirmation()
+    {
+        foreach (bool lateAck in new bool[] { false, true })
+        using (var fixture = new Fixture())
+        using (var client = fixture.Connect(fixture.Token, true))
+        {
+            NetworkStream stream = client.GetStream(); ClipboardSnapshot oldOutgoing = null;
+            if (lateAck) { fixture.Do(delegate { fixture.Backend.Copy("shared A"); }); oldOutgoing = Receive(stream, fixture.Root, "old outgoing A"); }
+            else { var a = ClipboardWire.Text("shared A"); a.Id = 5001; byte[] bytes = Frame(a); stream.Write(bytes, 0, bytes.Length); Assert(Ack(stream, a.Id) == 0, "shared A confirmed"); }
+            fixture.Do(delegate { fixture.Backend.FailPublish = true; });
+            var b = ClipboardWire.Text("peer changed B"); b.Id = 5002; byte[] frame = Frame(b); stream.Write(frame, 0, frame.Length); Assert(Ack(stream, b.Id) == 2, "B publication rejected");
+            fixture.Do(delegate { fixture.Backend.FailPublish = false; });
+            if (lateAck) { Reply(stream, oldOutgoing.Id, 0); Quiet(stream, "old A ACK consumed without retry"); }
+            fixture.Do(delegate { fixture.Backend.Copy("shared A"); });
+            Assert(ClipboardWire.TextContent(Receive(stream, fixture.Root, "fresh A must send after peer changed B")) == "shared A", "failed receive and late old ACK cannot suppress fresh local copy");
+        }
+    }
+    static void ReceivingPeerChangeInvalidatesEqualityBeforePayloadCompletes()
+    {
+        using (var fixture = new Fixture())
+        using (var client = fixture.Connect(fixture.Token, true))
+        using (var sampled = new ManualResetEvent(false))
+        {
+            NetworkStream stream = client.GetStream(); var a = ClipboardWire.Text("shared A"); a.Id = 5101; byte[] bytes = Frame(a); stream.Write(bytes, 0, bytes.Length); Assert(Ack(stream, a.Id) == 0, "A initially synchronized");
+            fixture.Do(delegate { fixture.Backend.SequenceObserved = sampled; });
+            var b = ClipboardWire.Text("peer changed B"); b.Id = 5102; byte[] frame = Frame(b); stream.Write(frame, 0, 10);
+            Assert(sampled.WaitOne(4000), "peer update announced before payload completes");
+            fixture.Do(delegate { fixture.Backend.Copy("shared A"); });
+            Assert(ClipboardWire.TextContent(Receive(stream, fixture.Root, "fresh A sends while B payload is incomplete")) == "shared A", "new peer marker immediately invalidates old equality");
+            stream.Write(frame, 10, frame.Length - 10); Assert(Ack(stream, b.Id) == 1, "incomplete B cannot replace newer local copy");
+            fixture.Do(delegate { fixture.Backend.SequenceObserved = null; });
+        }
+    }
     static void RejectedCopiesCanRetry()
     {
         foreach (byte failure in new byte[] { 1, 2 })
@@ -253,6 +335,10 @@ class ServiceMain
     }
     static void Run()
     {
+        ReceivingPeerChangeInvalidatesEqualityBeforePayloadCompletes();
+        FailedReceiveInvalidatesPeerConfirmation();
+        RemotePublicationCancelsPreparedCopy();
+        RemotePublicationCancelsStreamingCopy();
         RejectedCopiesCanRetry();
         AcknowledgmentCannotReplaceNewerPublication();
         using (var fixture = new Fixture())

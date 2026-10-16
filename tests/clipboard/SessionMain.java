@@ -12,7 +12,7 @@ public final class SessionMain {
  static final byte[] TOKEN=new byte[32];
  static final class Fake implements ClipboardSession.Adapter {
   volatile ClipboardWire.Snapshot current;volatile long revision;volatile int captures,publishes,releases;volatile boolean locked,closed;
-  final Runnable changed;volatile CountDownLatch publishing,allowPublish,identityRead;volatile Object nativeIdentity=new Object();
+  final Runnable changed;volatile CountDownLatch publishing,allowPublish,identityRead,committed,finishPublish;volatile boolean failNextPublish;volatile Object nativeIdentity=new Object();
   Fake(Runnable changed)throws Exception{this.changed=changed;current=ClipboardWire.text("preconnect 中文");}
   public ClipboardWire.Snapshot capture(){captures++;return locked?null:current;}
   public long revision(){return revision;}
@@ -20,8 +20,9 @@ public final class SessionMain {
   public boolean publish(ClipboardWire.Snapshot s,long expected,BooleanSupplier allowed)throws Exception{return publish(s,expected,identity(),allowed);}
   public boolean publish(ClipboardWire.Snapshot s,long expected,Object identity,BooleanSupplier allowed)throws Exception{
    CountDownLatch entered=publishing;if(entered!=null){entered.countDown();allowPublish.await(3,TimeUnit.SECONDS);}
+   if(failNextPublish){failNextPublish=false;return false;}
    if(locked||closed||revision!=expected||identity!=nativeIdentity||!allowed.getAsBoolean())return false;
-   current=ClipboardWire.text(ClipboardWire.textContent(s));nativeIdentity=new Object();publishes++;return true;
+   current=ClipboardWire.text(ClipboardWire.textContent(s));nativeIdentity=new Object();publishes++;if(committed!=null){committed.countDown();finishPublish.await(4,TimeUnit.SECONDS);}return true;
   }
   public void release(ClipboardWire.Snapshot s){releases++;}
   public void close(){closed=true;}
@@ -116,5 +117,66 @@ public final class SessionMain {
    reply(s,outgoing.id,0);quiet(s,"old outgoing ACK consumed");h.fake.get().copy("new remote publication");quiet(s,"old success ACK cannot overwrite newer publication fingerprint");
   }}
  }
- public static void main(String[] args)throws Exception{rejectedCopiesCanRetry();acknowledgmentCannotReplaceNewerPublication();initialCopiedAgain();basics();canceledPublication();supersededPublication();failedSourceNoRetry();unacknowledgedReconnect();mutatedSourceNoRetry();delayedNativeCallback();canceledSendReconnect();System.out.println("PASS clipboard session "+checks+" assertions");}
+  static void remotePublicationCancelsPreparedCopy()throws Exception{
+  try(Harness h=new Harness()){h.session.control(1);try(Socket s=h.ready()){
+   CountDownLatch entered=new CountDownLatch(1),resume=new CountDownLatch(1);AtomicInteger opens=new AtomicInteger();
+   ClipboardWire.Snapshot old=ClipboardWire.text("old local data");ClipboardWire.Item item=old.items.get(0);ClipboardWire.Source source=item.open;
+   item.open=()->{if(opens.incrementAndGet()==1){entered.countDown();try{if(!resume.await(4,TimeUnit.SECONDS))throw new IOException("test timeout");}catch(InterruptedException e){throw new IOException(e);}}return source.open();};
+   try{
+    h.fake.get().copy(old);check(entered.await(2,TimeUnit.SECONDS),"old snapshot fingerprint started");send(s,"new remote data",4001);
+    long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(2);while(h.fake.get().publishes==0&&System.nanoTime()<end)Thread.sleep(5);
+    check(h.fake.get().publishes==1,"new remote publication replaces snapshot being hashed");resume.countDown();
+    ack(s,4001,0);quiet(s,"prepared old snapshot cannot follow newer remote publication");
+    h.fake.get().copy("fresh local after remote");check(ClipboardWire.textContent(receive(s,h.root)).equals("fresh local after remote"),"new local copy still sends after stale candidate discarded");
+   }finally{resume.countDown();}
+  }}
+ }
+ static void remotePublicationCancelsStreamingCopy()throws Exception{
+  try(Harness h=new Harness()){h.session.control(1);try(Socket s=h.ready()){
+   CountDownLatch entered=new CountDownLatch(1),resume=new CountDownLatch(1);AtomicInteger opens=new AtomicInteger();
+   ClipboardWire.Snapshot old=ClipboardWire.text("old streaming data");ClipboardWire.Item item=old.items.get(0);ClipboardWire.Source source=item.open;
+   item.open=()->{if(opens.incrementAndGet()==2){entered.countDown();try{if(!resume.await(4,TimeUnit.SECONDS))throw new IOException("test timeout");}catch(InterruptedException e){throw new IOException(e);}}return source.open();};
+   try{
+    h.fake.get().copy(old);check(entered.await(2,TimeUnit.SECONDS),"old snapshot streaming started");send(s,"new remote data",4002);
+    long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(2);while(h.fake.get().publishes==0&&System.nanoTime()<end)Thread.sleep(5);
+    check(h.fake.get().publishes==1,"new remote publication during streaming");resume.countDown();while(s.getInputStream().read()!=-1){}
+    try(Socket next=h.ready()){check(ClipboardWire.textContent(receive(next,h.root)).equals("new remote data"),"reconnect captures current clipboard instead of replaying stale stream");}
+   }finally{resume.countDown();}
+  }}
+ }
+ static void publicationInProgressProtectsPreparedCopy(boolean success)throws Exception{
+  try(Harness h=new Harness()){h.session.control(1);try(Socket s=h.ready()){
+   Fake f=h.fake.get();CountDownLatch entered=new CountDownLatch(1),resume=new CountDownLatch(1);AtomicInteger opens=new AtomicInteger();
+   ClipboardWire.Snapshot old=ClipboardWire.text("old local data");ClipboardWire.Item item=old.items.get(0);ClipboardWire.Source source=item.open;
+   item.open=()->{if(opens.incrementAndGet()==1){entered.countDown();try{if(!resume.await(4,TimeUnit.SECONDS))throw new IOException("test timeout");}catch(InterruptedException e){throw new IOException(e);}}return source.open();};
+   CountDownLatch waiting=new CountDownLatch(1),finish=new CountDownLatch(1);
+   if(success){f.committed=waiting;f.finishPublish=finish;}else{f.publishing=waiting;f.allowPublish=finish;f.failNextPublish=true;}
+   try{
+    f.copy(old);check(entered.await(2,TimeUnit.SECONDS),"old fingerprint blocked before publication");send(s,"new remote data",4003);
+    check(waiting.await(2,TimeUnit.SECONDS),"native publication paused before returning");resume.countDown();quiet(s,"old prepared snapshot waits for publication to return");
+    finish.countDown();ack(s,4003,success?0:1);
+    if(success)quiet(s,"old snapshot discarded after committed publication");
+    else check(ClipboardWire.textContent(receive(s,h.root)).equals("old local data"),"failed publication recaptures pending local copy instead of losing it");
+   }finally{resume.countDown();finish.countDown();}
+  }}
+ }
+ static void failedReceiveInvalidatesPeerConfirmation()throws Exception{
+  for(boolean lateAck:new boolean[]{false,true})try(Harness h=new Harness()){h.session.control(1);try(Socket s=h.ready()){
+   Fake f=h.fake.get();ClipboardWire.Snapshot old=null;
+   if(lateAck){f.copy("shared A");old=receive(s,h.root);}else{send(s,"shared A",5001);ack(s,5001,0);}
+   f.locked=true;send(s,"peer changed B",5002);ack(s,5002,1);f.locked=false;
+   if(lateAck){reply(s,old.id,0);quiet(s,"old A ACK consumed without retry");}
+   f.copy("shared A");check(ClipboardWire.textContent(receive(s,h.root)).equals("shared A"),"failed receive and late old ACK cannot suppress fresh local copy");
+  }}
+ }
+ static void receivingPeerChangeInvalidatesEqualityBeforePayloadCompletes()throws Exception{
+  try(Harness h=new Harness()){h.session.control(1);try(Socket s=h.ready()){
+   Fake f=h.fake.get();send(s,"shared A",5101);ack(s,5101,0);f.identityRead=new CountDownLatch(1);
+   ClipboardWire.Snapshot b=ClipboardWire.text("peer changed B");b.id=5102;ByteArrayOutputStream bytes=new ByteArrayOutputStream();bytes.write(1);ClipboardWire.write(bytes,b,null);byte[] frame=bytes.toByteArray();s.getOutputStream().write(frame,0,10);s.getOutputStream().flush();
+   check(f.identityRead.await(2,TimeUnit.SECONDS),"peer update announced before payload completes");f.copy("shared A");
+   check(ClipboardWire.textContent(receive(s,h.root)).equals("shared A"),"new peer marker immediately invalidates old equality");
+   s.getOutputStream().write(frame,10,frame.length-10);s.getOutputStream().flush();ack(s,5102,1);
+  }}
+ }
+ public static void main(String[] args)throws Exception{receivingPeerChangeInvalidatesEqualityBeforePayloadCompletes();failedReceiveInvalidatesPeerConfirmation();publicationInProgressProtectsPreparedCopy(true);publicationInProgressProtectsPreparedCopy(false);remotePublicationCancelsStreamingCopy();remotePublicationCancelsPreparedCopy();rejectedCopiesCanRetry();acknowledgmentCannotReplaceNewerPublication();initialCopiedAgain();basics();canceledPublication();supersededPublication();failedSourceNoRetry();unacknowledgedReconnect();mutatedSourceNoRetry();delayedNativeCallback();canceledSendReconnect();System.out.println("PASS clipboard session "+checks+" assertions");}
 }

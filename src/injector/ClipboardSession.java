@@ -119,6 +119,7 @@ public final class ClipboardSession implements AutoCloseable {
             synchronized(state) {
                 if(!alive(link,local))return;
                 if(!link.acks.isEmpty())ack=link.acks.removeFirst();
+                else if(link.publishing){state.wait(500);continue;}
                 else if(forcePending||pendingChange){work=true;forced=forcePending;forcePending=false;pendingChange=false;version=changeVersion;}
                 else {state.wait(500);continue;}
             }
@@ -135,11 +136,11 @@ public final class ClipboardSession implements AutoCloseable {
             if(!alive(link,local)){if(forced)synchronized(state){forcePending=true;}return;}
             if(local.revision()!=revision){synchronized(state){forcePending=true;state.notifyAll();}return;}
             if(!forced&&fingerprint.equals(lastFingerprint))return;
-            synchronized(state){if(version!=changeVersion){forcePending=true;return;}link.sending=true;}
+            synchronized(state){if(version!=changeVersion){forcePending=true;return;}if(link.publishing){pendingChange=true;if(forced)forcePending=true;state.notifyAll();return;}if(published!=publicationVersion)return;link.sending=true;}
             writing=true;ClipboardWire.Snapshot outgoing=tracked(snapshot,sourceFailed);outgoing.id=++nextId;
-            Transmission sent=new Transmission(outgoing.id,revision,version,published);
-            synchronized(state){link.outgoing=sent;link.awaitingId=outgoing.id;lastFingerprint=null;}status("pending");
-            link.out.write(1);ClipboardWire.write(link.out,outgoing,()->!alive(link,local)||local.revision()!=revision);link.out.flush();
+            Transmission sent;
+            synchronized(state){sent=new Transmission(outgoing.id,revision,version,published,link.peerVersion);link.outgoing=sent;link.awaitingId=outgoing.id;lastFingerprint=null;}status("pending");
+            link.out.write(1);ClipboardWire.write(link.out,outgoing,()->!alive(link,local)||local.revision()!=revision||publicationChanged(link,published));link.out.flush();
             long currentRevision=local.revision();
             synchronized(state){if(alive(link,local)){sent.fingerprint=outgoing.fingerprint();confirmOutgoing(link,sent,currentRevision);}}
         } catch(Exception e) {
@@ -147,10 +148,11 @@ public final class ClipboardSession implements AutoCloseable {
             if(writing){if(sourceFailed[0])link.awaitingId=0;link.cancel();}
         } finally {link.sending=false;if(snapshot!=null)local.release(snapshot);}
     }
+    private boolean publicationChanged(Link link,long expected) { synchronized(state){return link.publishing||publicationVersion!=expected;} }
     private void confirmOutgoing(Link link,Transmission sent,long currentRevision) {
         // A successful ACK and a completed write may arrive in either order.
         if(link.outgoing==sent&&sent.result==0&&sent.fingerprint!=null&&sent.change==changeVersion&&
-           sent.publication==publicationVersion&&currentRevision==sent.revision)lastFingerprint=sent.fingerprint;
+           sent.publication==publicationVersion&&sent.peer==link.peerVersion&&currentRevision==sent.revision)lastFingerprint=sent.fingerprint;
     }
     private static ClipboardWire.Snapshot tracked(ClipboardWire.Snapshot original,boolean[] sourceFailed) {
         ClipboardWire.Snapshot outgoing=new ClipboardWire.Snapshot();outgoing.kind=original.kind;
@@ -187,16 +189,19 @@ public final class ClipboardSession implements AutoCloseable {
                     }}continue;
                 }
                 if(marker!=1)throw new IOException("Invalid clipboard marker");
+                // The peer changed before the payload completes, whether or not we can publish it.
+                synchronized(state){if(alive(link,local)){link.peerVersion++;lastFingerprint=null;}}
                 long revision=local.revision();Object nativeIdentity=local.identity();ClipboardWire.Snapshot snapshot=null;
                 try {
                     snapshot=ClipboardWire.read(link.in,incoming,()->!alive(link,local));int result=1;
+                    synchronized(state){if(alive(link,local))link.publishing=true;}
                     try {
                         if(alive(link,local)&&local.revision()==revision&&local.publish(snapshot,revision,nativeIdentity,()->alive(link,local))) {
                             synchronized(state){if(alive(link,local)){lastFingerprint=snapshot.fingerprint();publicationVersion++;}}result=0;status("received");
                         }
                     } catch(Exception e){result=2;unavailable(e);}
                     synchronized(state){if(alive(link,local)){if(link.acks.size()>=128)throw new IOException("Clipboard ACK queue limit");link.acks.addLast(new Ack(snapshot.id,result));state.notifyAll();}}
-                } finally {releaseIncoming(snapshot);}
+                } finally {synchronized(state){link.publishing=false;state.notifyAll();}releaseIncoming(snapshot);}
             }
         } catch(Exception e) {if(alive(link,local))unavailable(e);}
         finally {link.cancel();synchronized(state){state.notifyAll();}}
@@ -225,14 +230,14 @@ public final class ClipboardSession implements AutoCloseable {
     }
     private static final class Ack {final long id;final int status;Ack(long id,int status){this.id=id;this.status=status;}}
     private static final class Transmission {
-        final long id,revision,change,publication;String fingerprint;int result=-1;
-        Transmission(long id,long revision,long change,long publication){this.id=id;this.revision=revision;this.change=change;this.publication=publication;}
+        final long id,revision,change,publication,peer;String fingerprint;int result=-1;
+        Transmission(long id,long revision,long change,long publication,long peer){this.id=id;this.revision=revision;this.change=change;this.publication=publication;this.peer=peer;}
     }
     private static final class Link {
         final Socket socket=new Socket();final ArrayDeque<Ack> acks=new ArrayDeque<Ack>();
         final long generation;Link(long generation){this.generation=generation;}
-        volatile boolean active=true,sending;
-        volatile long awaitingId;Transmission outgoing;
+        volatile boolean active=true,sending,publishing;
+        volatile long awaitingId;long peerVersion;Transmission outgoing;
         InputStream in;OutputStream out;Thread reader;
         void cancel(){active=false;try{socket.close();}catch(IOException ignored){}}
     }
