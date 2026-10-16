@@ -187,6 +187,7 @@ public final class SessionLink {
 
     static int payloadLength(int type) {
         switch (type) {
+            case 0x0f: return 1;
             case 0x0b: return 12; case 0x0c: return 9;
             case 0x01: case 0x02: case 0x04: case 0x05: case 0x08: case 0x09: return 4;
             case 0x03: return 2; case 0x06: case 0x0a: return 0;

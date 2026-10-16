@@ -51,6 +51,7 @@ public class Injector {
         SessionLink link = null;
         UhidDevice dev = null;
         AbsoluteSession pointer = null;
+        ClipboardSession clipboard = new ClipboardSession(token);
         RandomAccessFile lockFile = null;
         FileLock processLock = null;
         WifiLatencyGuard wifiLatency = WifiLatencyGuard.forAndroid(wifiLowLatency);
@@ -90,7 +91,8 @@ public class Injector {
                 if (frame == null) continue;
                 link.beginProcessing(frame);
                 try {
-                    if (!pointer.handle(frame.type, frame.payload, out))
+                    if (frame.type == 0x0f) clipboard.control(frame.payload[0] & 255);
+                    else if (!pointer.handle(frame.type, frame.payload, out))
                         handle(dev, out, (byte)frame.type, frame.payload);
                 } finally { link.completeProcessing(frame); }
             }
@@ -100,6 +102,7 @@ public class Injector {
             if (link != null) link.close();
             else try { sock.close(); } catch (Exception ignored) { }
             wifiLatency.close();
+            clipboard.close();
             // Every release step is independent: a failed UHID report must not skip FD closure.
             buttonsDown = 0;
             if (dev != null) try { KeyState.releaseAll(dev); } catch (Exception ignored) { }
@@ -185,6 +188,7 @@ public class Injector {
 
     static int payloadLength(int type) {
         switch (type) {
+            case 0x0f: return 1;
             case 0x0b: return 12; // epoch, sequence, x, y
             case 0x0c: return 9;  // epoch, width, height, display rotation
             case MSG_ENTER:  return 4;

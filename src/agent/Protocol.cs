@@ -9,6 +9,12 @@ namespace PcKvm
         public const byte MsgGeometry = 0x0C;
         public const byte MsgPointerReady = 0x0D;
         public const byte MsgPointerAck = 0x0E;
+        public const byte MsgClipboardControl = 0x0F;
+        public static byte[] EncodeClipboardControl(byte flags)
+        {
+            if (flags > 2) throw new ArgumentOutOfRangeException("flags");
+            return new byte[] { MsgClipboardControl, flags };
+        }
         public static byte[] EncodeGeometry(uint epoch, ushort width, ushort height, byte rotation)
         {
             byte[] b = new byte[10]; b[0] = MsgGeometry;
@@ -104,6 +110,7 @@ namespace PcKvm
         {
             switch (type)
             {
+                case MsgClipboardControl: return 1;
                 case MsgPointer: return 12;
                 case MsgGeometry: return 9;
                 case MsgPointerReady: return 4;

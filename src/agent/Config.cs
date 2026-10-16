@@ -33,6 +33,7 @@ namespace PcKvm
         public bool AllowKillAdb = false;
         public int ReconnectSeconds = 5;
         public bool EnableEdgeSwitch = true;
+        public bool EnableClipboard = true;
         public HotkeyBinding SwitchHotkey = HotkeyBinding.Default;
         public string ConnectionMode = "Usb";
         public string AdbPath = "";
@@ -102,6 +103,12 @@ namespace PcKvm
                     HotkeyBinding binding;
                     if (HotkeyBinding.TryParse(v, out binding)) c.SwitchHotkey = binding;
                     else Warn(warnings, "SwitchHotkey=" + v + " 无效，使用默认 Ctrl+Alt+Space");
+                }
+                else if (Same(k, "EnableClipboard"))
+                {
+                    bool b;
+                    if (TryParseBool(v, out b)) c.EnableClipboard = b;
+                    else Warn(warnings, "EnableClipboard 无效，使用默认 true");
                 }
                 else if (Same(k, "EnableEdgeSwitch"))
                 {
@@ -181,6 +188,7 @@ namespace PcKvm
                 sb.AppendLine("ReconnectSeconds=" + ReconnectSeconds);
                 sb.AppendLine("SwitchHotkey=" + SwitchHotkey);
                 sb.AppendLine("EnableEdgeSwitch=" + (EnableEdgeSwitch ? "true" : "false"));
+                sb.AppendLine("EnableClipboard=" + (EnableClipboard ? "true" : "false"));
                 sb.AppendLine("ConnectionMode=" + ConnectionMode);
                 sb.AppendLine("AdbPath=" + AdbPath);
                 sb.AppendLine("UsbSerial=" + UsbSerial);

@@ -28,6 +28,7 @@ namespace PcKvm
         volatile bool _active;
 
         public event Action Connected;
+        public event Action<byte[], long> SessionConfigured;
         public event Action Disconnected;
         public event Action<byte, byte[]> MessageReceived;   // (type, payload)
         public event Action<long> SessionConnected;
@@ -47,6 +48,8 @@ namespace PcKvm
                 _sessionToken = (byte[])token.Clone();
                 _generation = generation;
             }
+            Action<byte[], long> configured = SessionConfigured;
+            if (configured != null) configured((byte[])token.Clone(), generation);
         }
 
         public void CloseSession()
