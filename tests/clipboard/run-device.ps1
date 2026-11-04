@@ -5,7 +5,7 @@ $out=Join-Path $root 'dist\clipboard-device-test'
 New-Item -ItemType Directory -Force $out | Out-Null
 $jdk='C:\Program Files\JetBrains\PyCharm 2026.2.0.1\jbr\bin'
 $sources=@('ClipboardWire.java','ClipboardSession.java','AndroidClipboard.java','AndroidProviders.java','AndroidClipboardCache.java','AndroidClipboardImages.java','SessionLink.java','InputFrameQueue.java') | ForEach-Object {Join-Path $root ('src\injector\'+$_)}
-& "$jdk\javac.exe" --release 8 -encoding UTF-8 -nowarn -d $out "$root\probes\05-clipboard\ClipboardDeviceProbe.java" @sources
+& "$jdk\javac.exe" --release 8 -encoding UTF-8 -nowarn -sourcepath "$root\src\injector" -d $out "$root\probes\05-clipboard\ClipboardDeviceProbe.java" @sources
 if($LASTEXITCODE -ne 0){throw 'Device probe compile failed'}
 $r8=if($env:PCKVM_R8_JAR){$env:PCKVM_R8_JAR}else{Join-Path $root 'tools\r8.jar'}
 & "$jdk\java.exe" -cp $r8 com.android.tools.r8.D8 --release --min-api 28 --output $out (Get-ChildItem $out -Filter '*.class' | ForEach-Object FullName)

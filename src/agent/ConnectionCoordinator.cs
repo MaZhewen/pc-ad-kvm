@@ -23,6 +23,7 @@ namespace PcKvm
         readonly PointerSession _pointer;
         readonly Action _releaseInput;
         readonly Action<string> _log;
+        readonly Func<int?> _directClipboardPort;
         readonly object _gate = new object();
         readonly AutoResetEvent _wake = new AutoResetEvent(false);
         Thread _worker;
@@ -39,6 +40,8 @@ namespace PcKvm
         int _usbRecoveryLevel;
         int _sessionRequestVersion = -1;
         long _generation;
+        volatile DirectConnection _direct;
+        int _directRequestVersion = -1;
         AdbTarget _pendingTarget;
         ConnectionProfile _session;
         Process _injector;
@@ -53,7 +56,7 @@ namespace PcKvm
             lock (_gate)
             {
                 return new ConnectionSnapshot {
-                    Ready = _ready && _sessionRequestVersion == _requestVersion,
+                    Ready = IsReady && _sessionRequestVersion == _requestVersion,
                     Desired = _desired && (_worker != null || _requestVersion > 0) && !_stopping,
                     Pairing = _pairCancel != null,
                     Attempting = _attemptActive,
@@ -65,18 +68,26 @@ namespace PcKvm
 
         public event Action<string> StateChanged;
         public event Action<bool, string> PairCompleted;
+        public event Action<long> DirectReady;
 
         public ConnectionCoordinator(Config config, AdbClient adb, Transport transport, PointerSession pointer,
-                                     Action releaseInput, Action<string> log)
+                                     Action releaseInput, Action<string> log, Func<int?> directClipboardPort = null)
         {
             _config = config; _adb = adb; _transport = transport; _pointer = pointer;
             _releaseInput = releaseInput; _log = log;
+            _directClipboardPort = directClipboardPort;
             _mode = config.ConnectionMode;
             _desired = config.ConnectionConfigError.Length == 0;
             DeviceLauncher.UseClient(adb);
+            _transport.SessionConnected += OnDirectConnected;
+            _transport.SessionDisconnected += OnDirectDisconnected;
         }
 
-        public bool IsReady { get { return _ready; } }
+        public bool IsReady
+        {
+            get { return _ready && (_direct == null || (_heartbeatHealthy != null && _heartbeatHealthy())); }
+        }
+        public bool IsDirect { get { return _direct != null; } }
         public long Generation { get { return Interlocked.Read(ref _generation); } }
         public AdbTarget CurrentTarget { get { lock (_gate) return _pendingTarget; } }
         public string State { get { lock (_gate) return _state; } }
@@ -113,6 +124,12 @@ namespace PcKvm
         }
 
         public void SetHealthProbe(Func<bool> probe) { _heartbeatHealthy = probe; }
+
+        public void RefreshDirectClipboard()
+        {
+            DirectConnection direct = _direct;
+            if (direct != null && _directClipboardPort != null) direct.Gateway.SetClipboardPort(_directClipboardPort());
+        }
 
         public void Start()
         {
@@ -161,16 +178,18 @@ namespace PcKvm
 
         public void Disconnect()
         {
+            bool direct;
             lock (_gate)
             {
                 if (_stopping) return;
+                direct = _direct != null;
                 _desired = false; _requestVersion++;
                 _lastError = "";
                 _attemptCancel.Cancel(); _attemptCancel.Dispose(); _attemptCancel = new CancellationTokenSource();
             }
             _ready = false;
             _releaseInput();
-            _transport.CloseSession();
+            if (!direct) _transport.CloseSession();
             Publish("已断开（手动）");
             _wake.Set();
         }
@@ -191,7 +210,7 @@ namespace PcKvm
             _ready = false;
             _releaseInput();
             _transport.CloseSession();
-            Publish("心跳失联，正在恢复连接", true);
+            if (_direct == null) Publish("心跳失联，正在恢复连接", true);
             _wake.Set();
         }
 
@@ -239,16 +258,18 @@ namespace PcKvm
 
         public void Stop()
         {
+            bool direct;
             lock (_gate)
             {
                 if (_stopping) return;
+                direct = _direct != null;
                 _stopping = true; _desired = false; _requestVersion++;
                 _attemptCancel.Cancel();
                 if (_pairCancel != null) _pairCancel.Cancel();
             }
             _ready = false;
             _releaseInput();
-            _transport.CloseSession();
+            if (!direct) _transport.CloseSession();
             _wake.Set();
             if (_worker != null && _worker != Thread.CurrentThread) _worker.Join(10000);
         }
@@ -273,6 +294,13 @@ namespace PcKvm
                     _wake.WaitOne(1000);
                     continue;
                 }
+                if (mode == "WirelessTls" && version == _directRequestVersion)
+                {
+                    try { TickDirect(); }
+                    catch (Exception e) { PublishFailure("独立 Wi-Fi：" + e.Message, token); DeactivateDirect(false); }
+                    _wake.WaitOne(250);
+                    continue;
+                }
                 if (_ready && version == _sessionRequestVersion && _transport.IsConnected)
                 {
                     _wake.WaitOne(250);
@@ -292,8 +320,28 @@ namespace PcKvm
                         continue;
                     }
                     if (token.IsCancellationRequested || _stopping || version != _requestVersion) continue;
-                    Deactivate();
+                    DirectConnection previous = mode == "WirelessTls" ? _direct : null;
+                    if (previous == null) Deactivate();
                     if (token.IsCancellationRequested || _stopping) continue;
+                    if (mode == "WirelessTls")
+                    {
+                        _directRequestVersion = version;
+                        try { DeployDirect(resolved, version, token); }
+                        catch (Exception e)
+                        {
+                            if (previous != null && Object.ReferenceEquals(_direct, previous))
+                            {
+                                lock (_gate) if (version == _requestVersion) _sessionRequestVersion = version;
+                                PublishFailure("独立 Wi-Fi 重新启动失败：" + e.Message, token);
+                            }
+                            else
+                            {
+                                DeactivateDirect(true);
+                                PublishFailure("独立 Wi-Fi 启动失败：" + e.Message, token);
+                            }
+                        }
+                        continue;
+                    }
                     if (Deploy(mode, resolved, token))
                     {
                         if (_stopping || token.IsCancellationRequested || version != _requestVersion)
@@ -351,6 +399,180 @@ namespace PcKvm
             public string Endpoint;
         }
 
+        sealed class DirectConnection
+        {
+            public DirectBootstrap Bootstrap;
+            public DirectNetworkGateway Gateway;
+            public Resolved Target;
+            public byte[] Token;
+            public long Generation, Deadline;
+            public bool EverReady, Saved;
+        }
+
+        void DeployDirect(Resolved resolved, int version, CancellationToken cancel)
+        {
+            Publish("独立 Wi-Fi：准备启动…");
+            var bootstrap = new DirectBootstrap(_adb, resolved.Device.Target, resolved.Identity);
+            object release = Microsoft.Win32.Registry.GetValue(
+                @"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full", "Release", null);
+            if (!(release is int) || (int)release < 528040)
+                throw new InvalidOperationException("独立 Wi-Fi 需要 .NET Framework 4.8 或更高版本");
+            var direct = new DirectConnection { Bootstrap = bootstrap, Target = resolved,
+                Token = new byte[32] };
+            using (RandomNumberGenerator random = RandomNumberGenerator.Create()) random.GetBytes(direct.Token);
+            try
+            {
+                var host = bootstrap.LocalAddress(cancel);
+                direct.Gateway = new DirectNetworkGateway(host, _transport.ListeningPort,
+                    _directClipboardPort == null ? null : _directClipboardPort(),
+                    bootstrap.InstanceId, direct.Token, delegate { return BeginDirectInput(direct); }, OnDirectFrameSent);
+                direct.Gateway.Start();
+                string jar = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "pckvm.jar");
+                bootstrap.Start(jar, host, direct.Gateway.Port, direct.Gateway.CertificateSha256,
+                    BitConverter.ToString(direct.Token).Replace("-", ""), cancel,
+                    delegate { ActivateDirect(direct, version, cancel); });
+                lock (_gate)
+                    if (!direct.EverReady) direct.Deadline = HeartbeatLease.ElapsedMilliseconds + 60000;
+            }
+            catch
+            {
+                if (!Object.ReferenceEquals(_direct, direct))
+                {
+                    if (direct.Gateway != null) direct.Gateway.Dispose();
+                    Array.Clear(direct.Token, 0, direct.Token.Length);
+                }
+                throw;
+            }
+        }
+
+        void ActivateDirect(DirectConnection direct, int version, CancellationToken cancel)
+        {
+            DirectConnection previous;
+            lock (_gate)
+            {
+                cancel.ThrowIfCancellationRequested();
+                previous = _direct;
+                _ready = false;
+                _pendingTarget = direct.Target.Device.Target;
+                _sessionRequestVersion = version;
+                _direct = direct;
+                if (previous != null)
+                {
+                    _pointer.EndDirect(previous.Generation);
+                    Interlocked.Increment(ref _generation);
+                }
+            }
+            if (previous != null)
+            {
+                previous.Gateway.StopAccepting();
+                _releaseInput();
+                _transport.DisableSession();
+                try { previous.Gateway.Dispose(); }
+                finally { Array.Clear(previous.Token, 0, previous.Token.Length); }
+            }
+            Publish("独立 Wi-Fi：等待输入认证…");
+        }
+
+        long BeginDirectInput(DirectConnection direct)
+        {
+            lock (_gate)
+            {
+                if (!Object.ReferenceEquals(_direct, direct) || !_desired || _stopping || _mode != "WirelessTls")
+                    return 0;
+                long generation = Interlocked.Increment(ref _generation);
+                direct.Generation = generation;
+                _pointer.BeginDirect(generation);
+                _transport.ConfigureSession(direct.Token, generation, true);
+                return generation;
+            }
+        }
+
+        void OnDirectConnected(long generation)
+        {
+            lock (_gate)
+            {
+                if (_direct == null || generation != _direct.Generation || !_desired || _stopping) return;
+                Publish("独立 Wi-Fi：等待设备就绪…");
+            }
+        }
+
+        void OnDirectDisconnected(long generation)
+        {
+            lock (_gate)
+            {
+                DirectConnection direct = _direct;
+                if (direct == null || generation != direct.Generation || !_desired || _stopping) return;
+                _ready = false;
+                _pointer.EndDirect(generation);
+                direct.Generation = 0;
+                Interlocked.Increment(ref _generation);
+                if (direct.EverReady && direct.Deadline == 0)
+                    direct.Deadline = HeartbeatLease.ElapsedMilliseconds + 1800000;
+                Publish("独立 Wi-Fi：等待重新连接");
+            }
+            _releaseInput();
+            _wake.Set();
+        }
+
+        public void DirectGeometryPreparing(long generation)
+        {
+            lock (_gate)
+            {
+                if (_direct == null || generation != _direct.Generation || !_desired || _stopping) return;
+                _ready = false;
+                Publish("独立 Wi-Fi：等待设备就绪…");
+            }
+        }
+
+        public void TryConfirmDirectReady(long generation)
+        {
+            if (_direct == null || generation != Generation || !_transport.IsConnected) return;
+            byte[] frame = _pointer.TakeReadyConfirmation(generation, _heartbeatHealthy != null && _heartbeatHealthy());
+            if (frame != null) _transport.SendForGeneration(generation, frame);
+        }
+
+        void OnDirectFrameSent(long generation, byte[] frame)
+        {
+            if (frame[0] != Protocol.MsgSessionReady) return;
+            lock (_gate)
+            {
+                DirectConnection direct = _direct;
+                if (direct == null || generation != direct.Generation || !_desired || _stopping
+                    || !_transport.IsConnected || !_pointer.ConfirmReadySent(generation, frame, _heartbeatHealthy != null && _heartbeatHealthy()))
+                    return;
+                _ready = true;
+                direct.EverReady = true;
+                direct.Deadline = 0;
+                Publish("独立 Wi-Fi：已就绪");
+            }
+            Action<long> ready = DirectReady;
+            if (ready != null) ready(generation);
+            _wake.Set();
+        }
+
+        void TickDirect()
+        {
+            string error;
+            lock (_gate)
+            {
+                DirectConnection direct = _direct;
+                if (direct == null || !_desired || _stopping) return;
+                if (_ready && !direct.Saved)
+                {
+                    SaveVerified("WirelessTls", direct.Target);
+                    direct.Saved = true;
+                    _selectedSerial = ""; _endpoint = ""; _manual = false;
+                }
+                if (direct.Deadline == 0 || HeartbeatLease.ElapsedMilliseconds < direct.Deadline) return;
+                error = direct.EverReady ? "独立 Wi-Fi：需要重新启动设备连接"
+                    : direct.Gateway.InputAuthenticated ? "独立 Wi-Fi：设备几何或心跳就绪超时，请重新启动连接"
+                    : direct.Gateway.VersionMismatch ? "独立 Wi-Fi：设备组件版本不符，请使用配套的 exe 和 jar"
+                    : "独立 Wi-Fi：平板未建立加密连接，请检查局域网可达性与防火墙";
+            }
+            DeactivateDirect(false);
+            Publish(error, true);
+        }
+
         Resolved Resolve(string mode, string serial, string endpoint, bool manual, CancellationToken cancel)
         {
             Publish("查找设备…");
@@ -366,9 +588,9 @@ namespace PcKvm
             if (serial.Length > 0)
             {
                 foreach (AdbDevice d in devices)
-                    if (d.IsOnline && !d.IsUsb && d.Serial == serial)
-                        return CheckIdentity(d, endpoint, manual, cancel);
-                PublishFailure("所选无线设备未在线", cancel); return null;
+                    if (d.IsOnline && d.Serial == serial)
+                        return CheckIdentity(d, d.IsUsb ? "" : endpoint, manual, cancel);
+                PublishFailure("所选 ADB 设备未在线", cancel); return null;
             }
             if (!manual && _config.WirelessDeviceSerial.Length == 0)
             {
@@ -383,6 +605,8 @@ namespace PcKvm
                 if (ambiguous) { PublishFailure("多个无线设备报告同一身份，需要手动选择", cancel); return null; }
                 if (saved != null)
                     return new Resolved { Device = saved, Identity = _config.WirelessDeviceSerial, Endpoint = endpoint };
+                AdbDevice usb = ConnectionProfile.ChooseUsb(devices, _config.WirelessDeviceSerial);
+                if (usb != null) return CheckIdentity(usb, "", manual, cancel);
             }
             List<string> candidates = new List<string>();
             if (endpoint.Length > 0) candidates.Add(endpoint);
@@ -429,7 +653,7 @@ namespace PcKvm
         Resolved CheckIdentity(AdbDevice device, string endpoint, bool manual, CancellationToken cancel)
         {
             string identity = DeviceLauncher.GetIdentity(device.Target, cancel);
-            if (identity.Length == 0 && !manual) { PublishFailure("设备身份不可读取，需要手动选择", cancel); return null; }
+            if (identity.Length == 0) { PublishFailure("设备身份不可读取，请检查 ADB 授权", cancel); return null; }
             if (_config.WirelessDeviceSerial.Length > 0 && identity != _config.WirelessDeviceSerial)
             {
                 PublishFailure("设备身份变化；如需改绑，请先点“忘记设备”再选择", cancel); return null;
@@ -513,6 +737,7 @@ namespace PcKvm
 
         void Deactivate()
         {
+            if (_direct != null) { DeactivateDirect(true); return; }
             if (_pendingTarget == null && _injector == null && !_ownsReverse && !_ownsClipboardReverse && !_pushedJar && !_transport.IsConnected)
                 return;
             _ready = false;
@@ -528,6 +753,39 @@ namespace PcKvm
             if (clipboardOwned) DeviceLauncher.CleanupClipboardTunnel(target);
             _session = null;
             _pointer.Reset();
+        }
+
+        void DeactivateDirect(bool tryAdbCleanup)
+        {
+            DirectConnection direct;
+            lock (_gate)
+            {
+                direct = _direct;
+                if (direct == null) return;
+                _direct = null;
+                _pendingTarget = null;
+                _ready = false;
+                _pointer.EndDirect(direct.Generation);
+                Interlocked.Increment(ref _generation);
+            }
+            try
+            {
+                direct.Gateway.StopAccepting();
+                _releaseInput();
+                if (_transport.IsConnected)
+                {
+                    _transport.SendControl(Protocol.EncodeStopDaemon());
+                    Stopwatch stopBudget = Stopwatch.StartNew();
+                    while (_transport.IsConnected && stopBudget.ElapsedMilliseconds < 1000) Thread.Sleep(20);
+                }
+            }
+            finally
+            {
+                _transport.DisableSession();
+                try { direct.Gateway.Dispose(); }
+                finally { Array.Clear(direct.Token, 0, direct.Token.Length); }
+            }
+            if (tryAdbCleanup) direct.Bootstrap.Stop();
         }
 
         void PublishFailure(string status, CancellationToken cancellation)

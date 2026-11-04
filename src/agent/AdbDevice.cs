@@ -44,6 +44,10 @@ namespace PcKvm
                     else if (words[i].StartsWith("usb:", StringComparison.Ordinal)) usb = true;
                     else if (words[i].StartsWith("model:", StringComparison.Ordinal)) model = words[i].Substring(6);
                 }
+                // The Windows LIBADBUSB backend can omit the usb: field for physical devices.
+                if (!usb && model.Length != 0 && words[0].IndexOf(':') < 0
+                    && words[0].IndexOf("._adb-", StringComparison.OrdinalIgnoreCase) < 0
+                    && !words[0].StartsWith("emulator-", StringComparison.OrdinalIgnoreCase)) usb = true;
                 devices.Add(new AdbDevice(words[0], words[1], id, usb, model));
             }
             return devices;

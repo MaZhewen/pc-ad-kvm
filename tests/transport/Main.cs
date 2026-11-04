@@ -19,7 +19,7 @@ class TransportTest
     static void Check(bool ok, string message) { if (!ok) throw new Exception(message); Console.WriteLine("PASS " + message); }
     static int Main(string[] args)
     {
-        try { CheckDispatchScheduling(); CheckWriterOrdering(); CheckWriterShutdown(); }
+        try { CheckDispatchScheduling(); CheckWriterOrdering(); CheckWriterShutdown(); DirectPointerReadiness(); }
         catch (Exception e) { Console.WriteLine("FAIL: " + e.Message); return 1; }
         if (args.Length > 0 && args[0] == "--dispatch-only") return 0;
         var ordered = new FrameQueue(4);
@@ -233,6 +233,30 @@ class TransportTest
         public override int Read(byte[] buffer, int offset, int count) { throw new NotSupportedException(); }
         public override long Seek(long offset, SeekOrigin origin) { throw new NotSupportedException(); }
         public override void SetLength(long value) { throw new NotSupportedException(); }
+    }
+
+    static void DirectPointerReadiness()
+    {
+        var sent = new List<byte[]>();
+        var pointer = new PointerSession(sent.Add);
+        pointer.BeginDirect(9);
+        pointer.Configure(200, 300, 0);
+        uint epoch = Protocol.GetU32(sent[0], 1);
+        byte[] ack = { (byte)epoch, (byte)(epoch >> 8), (byte)(epoch >> 16), (byte)(epoch >> 24) };
+        pointer.Receive(8, Protocol.MsgPointerReady, ack);
+        Check(pointer.TakeReadyConfirmation(9, true) == null, "old generation cannot prepare pointer");
+        pointer.Receive(9, Protocol.MsgPointerReady, ack);
+        Check(pointer.TakeReadyConfirmation(9, false) == null && !pointer.Ready, "pointer alone cannot publish readiness");
+        byte[] confirmation = pointer.TakeReadyConfirmation(9, true);
+        Check(confirmation != null && !pointer.Ready && pointer.TakeReadyConfirmation(9, true) == null,
+            "readiness remains pending until one confirmation is written");
+        Check(!pointer.ConfirmReadySent(8, confirmation, true) && !pointer.Ready,
+            "stale writer completion does not ready the new connection");
+        Check(pointer.ConfirmReadySent(9, confirmation, true) && pointer.Ready, "matching written confirmation enables input");
+        pointer.Configure(300, 200, 1);
+        Check(!pointer.ConfirmReadySent(9, confirmation, true) && !pointer.Ready, "rotation invalidates the old epoch");
+        pointer.EndDirect(9);
+        Check(!pointer.Ready, "disconnect clears readiness");
     }
     static void CheckWriterOrdering()
     {

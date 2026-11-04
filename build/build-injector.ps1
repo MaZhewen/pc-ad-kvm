@@ -1,3 +1,5 @@
+﻿param([string]$OutputDirectory)
+
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $src = Join-Path $root 'src\injector'
@@ -23,10 +25,10 @@ try {
 
     $zip = Join-Path $out 'payload.zip'
     Compress-Archive -Path $dex -DestinationPath $zip
-    $dist = Join-Path $root 'dist'
+    $dist = if ($OutputDirectory) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputDirectory) } else { Join-Path $root 'dist' }
     if (-not (Test-Path -LiteralPath $dist)) { New-Item -ItemType Directory -Path $dist | Out-Null }
     Copy-Item -LiteralPath $zip -Destination (Join-Path $dist 'pckvm.jar') -Force
-    Write-Host "已生成 dist\pckvm.jar；连接时会推送到所选设备。" -ForegroundColor Green
+    Write-Host "已生成 $dist\pckvm.jar；连接时会推送到所选设备。" -ForegroundColor Green
 }
 finally {
     $tempRoot = [IO.Path]::GetFullPath($env:TEMP).TrimEnd('\') + '\'

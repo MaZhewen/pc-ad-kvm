@@ -5,6 +5,7 @@ import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.util.concurrent.TimeUnit;
 import java.util.Locale;
+import java.util.function.LongSupplier;
 
 /** Sole socket reader for the production injector. PING remains live during UHID initialization. */
 public final class SessionLink {
@@ -66,10 +67,19 @@ public final class SessionLink {
     volatile boolean formal;
     volatile boolean alive = true;
     volatile Frame latestGeometry;
+    final LongSupplier directClock;
+    volatile long directLastPing;
+    volatile boolean directPingSeen;
     Thread reader, watcher;
 
     public SessionLink(Socket socket) throws IOException {
+        this(socket, null);
+    }
+
+    SessionLink(Socket socket, LongSupplier directClock) throws IOException {
         this.socket = socket;
+        this.directClock = directClock;
+        if (directClock != null) directLastPing = directClock.getAsLong();
         socket.setSoTimeout(250);
         input = socket.getInputStream();
         final OutputStream raw = socket.getOutputStream();
@@ -106,7 +116,16 @@ public final class SessionLink {
 
     public OutputStream output() { return output; }
     public boolean isAlive() { return alive; }
-    public Frame poll() throws InterruptedException { return frames.poll(200, TimeUnit.MILLISECONDS); }
+    public Frame poll() throws InterruptedException {
+        if (!checkDirectLease()) return null;
+        Frame frame = frames.poll(200, TimeUnit.MILLISECONDS);
+        return checkDirectLease() ? frame : null;
+    }
+    boolean directHeartbeatValid() { return directPingSeen && checkDirectLease(); }
+    private boolean checkDirectLease() {
+        if (alive && directClock != null && directClock.getAsLong() - directLastPing >= 2000) close();
+        return alive;
+    }
     /** Call immediately before submitting a dequeued frame to its input handler. */
     public void beginProcessing(Frame frame) { timings.begin(frame, System.nanoTime()); }
     /** Call in the handler's finally block, including failed submissions. */
@@ -134,8 +153,10 @@ public final class SessionLink {
             while (alive) {
                 long now = System.nanoTime();
                 flushTimings(now, false);
-                if (formal ? now - lastPing > TimeUnit.SECONDS.toNanos(3)
-                           : now - initializedAt > TimeUnit.SECONDS.toNanos(20)) { close(); return; }
+                if (directClock != null) {
+                    if (!checkDirectLease()) return;
+                } else if (formal ? now - lastPing > TimeUnit.SECONDS.toNanos(3)
+                                  : now - initializedAt > TimeUnit.SECONDS.toNanos(20)) { close(); return; }
                 try { Thread.sleep(100); } catch (InterruptedException e) { return; }
             }
         } }, "pckvm-session-watchdog");
@@ -144,11 +165,12 @@ public final class SessionLink {
 
     void readLoop() {
         try {
-            while (alive) {
+            while (checkDirectLease()) {
                 int type;
                 try { type = input.read(); }
                 catch (SocketTimeoutException e) { continue; }
                 if (type < 0) return;
+                if (directClock != null && type == 9) throw new IOException("PONG in the wrong direction");
                 int length = payloadLength(type);
                 if (length < 0) throw new IOException("Unknown frame type");
                 byte[] payload = new byte[length];
@@ -162,8 +184,13 @@ public final class SessionLink {
                         got += n;
                     } catch (SocketTimeoutException e) { /* bounded by the whole-frame deadline */ }
                 }
+                if (!checkDirectLease()) return;
                 if (type == 8) {
                     lastPing = System.nanoTime();
+                    if (directClock != null) {
+                        directLastPing = directClock.getAsLong();
+                        directPingSeen = true;
+                    }
                     byte[] pong = new byte[5]; pong[0] = 9;
                     System.arraycopy(payload, 0, pong, 1, 4);
                     output.write(pong); output.flush();
@@ -187,6 +214,8 @@ public final class SessionLink {
 
     static int payloadLength(int type) {
         switch (type) {
+            case 0x11: return 0;
+            case 0x12: return 4;
             case 0x0f: return 1;
             case 0x0b: return 12; case 0x0c: return 9;
             case 0x01: case 0x02: case 0x04: case 0x05: case 0x08: case 0x09: return 4;

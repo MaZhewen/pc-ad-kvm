@@ -1,11 +1,13 @@
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
 import java.io.PrintStream;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicLong;
 
 public class TestMain {
     static void check(boolean ok, String message) { if (!ok) throw new AssertionError(message); System.out.println("PASS " + message); }
@@ -126,8 +128,42 @@ public class TestMain {
     static void writeFrame(OutputStream output, SessionLink.Frame frame) throws Exception {
         output.write(frame.type); output.write(frame.payload);
     }
+    static void directHeartbeat() throws Exception {
+        try (ServerSocket listener = new ServerSocket(0);
+             Socket client = new Socket("127.0.0.1", listener.getLocalPort());
+             Socket peer = listener.accept()) {
+            AtomicLong elapsed = new AtomicLong(100);
+            SessionLink link = new SessionLink(client, elapsed::get);
+            link.start();
+            peer.setSoTimeout(2000);
+            OutputStream output = peer.getOutputStream();
+            DataInputStream input = new DataInputStream(peer.getInputStream());
+            check(!link.directHeartbeatValid(), "direct session requires a real PING before readiness");
+            output.write(new byte[] {8, 2, 0, 0, 0}); output.flush();
+            byte[] pong = new byte[5]; input.readFully(pong);
+            check(pong[0] == 9 && link.directHeartbeatValid(), "direct PING refreshes liveness and sends PONG");
+            output.write(new byte[] {0x12, 4, 3, 2, 1}); output.flush();
+            SessionLink.Frame ready = link.poll();
+            check(ready != null && ready.type == 0x12 && integer(ready.payload, 0) == 0x01020304,
+                "direct SESSION_READY carries the full little-endian epoch");
+            link.frames.offer(event(5, 11));
+            elapsed.set(2100);
+            check(link.poll() == null && !link.isAlive(), "elapsed two-second gap discards queued input before processing");
+            check(input.read() == -1, "expired direct session closes independently of TCP EOF");
+        }
+        try (ServerSocket listener = new ServerSocket(0);
+             Socket client = new Socket("127.0.0.1", listener.getLocalPort());
+             Socket peer = listener.accept()) {
+            SessionLink link = new SessionLink(client, () -> 100);
+            link.start();
+            peer.setSoTimeout(2000);
+            peer.getOutputStream().write(new byte[] {9, 2, 0, 0, 0});
+            check(peer.getInputStream().read() == -1, "device rejects PONG in the PC-to-Android direction");
+        }
+    }
     public static void main(String[] args) throws Exception {
         timingTests();
+        directHeartbeat();
         byte[] token = SessionLink.parseToken("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
         check(token.length == 32 && token[0] == 0 && token[31] == 31, "token preserves leading zero");
         boolean rejected = false;

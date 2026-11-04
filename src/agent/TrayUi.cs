@@ -84,6 +84,7 @@ namespace PcKvm
                 _cfg.EnableClipboard = !_cfg.EnableClipboard;
                 clipboardToggle.Checked = _cfg.EnableClipboard;
                 if (Clipboard != null) Clipboard.SetEnabled(_cfg.EnableClipboard);
+                _connection.RefreshDirectClipboard();
                 _transport.Send(Protocol.EncodeClipboardControl((byte)(_cfg.EnableClipboard && Clipboard != null ? 1 : 0)));
                 if (!_cfg.Save()) _log.WriteLine("# 剪贴板开关配置保存失败");
             };
@@ -93,7 +94,7 @@ namespace PcKvm
             {
                 ConnectionSnapshot snapshot = _connection.Snapshot();
                 string caption = snapshot.Ready ? (_supp.IsEngaged ? "正在控制 Android" : "已连接 · 当前控制电脑")
-                    : snapshot.Desired ? "正在连接设备" : "未连接设备";
+                    : snapshot.Desired ? (snapshot.Mode == "WirelessTls" ? snapshot.Status : "正在连接设备") : "未连接设备";
                 status.Text = caption;
                 clipboardStatus.Text = "剪贴板：" + (Clipboard == null ? "不可用" : Clipboard.Status);
                 string tip = "PC-KVM · " + caption + (snapshot.Ready ? " · " + snapshot.Device : "");

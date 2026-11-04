@@ -25,6 +25,8 @@ namespace PcKvm
         readonly object _sendLock = new object();
         byte[] _sessionToken;
         long _generation;
+        bool _direct;
+        bool _admissionEnabled = true;
         volatile bool _active;
 
         public event Action Connected;
@@ -39,17 +41,31 @@ namespace PcKvm
 
         public bool IsConnected { get { return _active; } }
 
-        public void ConfigureSession(byte[] token, long generation)
+        public void ConfigureSession(byte[] token, long generation, bool direct = false)
         {
             if (token == null || token.Length != 32) throw new ArgumentException("Session token must be 32 bytes", "token");
             CloseSession();
             lock (_sendLock)
             {
+                if (_sessionToken != null) Array.Clear(_sessionToken, 0, _sessionToken.Length);
                 _sessionToken = (byte[])token.Clone();
                 _generation = generation;
+                _direct = direct;
+                _admissionEnabled = true;
             }
             Action<byte[], long> configured = SessionConfigured;
             if (configured != null) configured((byte[])token.Clone(), generation);
+        }
+
+        public void DisableSession()
+        {
+            lock (_sendLock)
+            {
+                _admissionEnabled = false;
+                if (_sessionToken != null) Array.Clear(_sessionToken, 0, _sessionToken.Length);
+                _sessionToken = null;
+            }
+            CloseSession();
         }
 
         public void CloseSession()
@@ -121,16 +137,19 @@ namespace PcKvm
                     c.SendTimeout = 500;
                     stream = c.GetStream();
                     byte[] token;
+                    bool direct;
                     lock (_sendLock)
                     {
+                        if (!_admissionEnabled) continue;
                         _candidate = c;
                         token = _sessionToken == null ? null : (byte[])_sessionToken.Clone();
                         generation = _generation;
+                        direct = _direct;
                     }
                     if (token != null && !VerifyPreamble(stream, token)) continue;
                     lock (_sendLock)
                     {
-                        if (!_running || _generation != generation || !Object.ReferenceEquals(_candidate, c)) continue;
+                        if (!_running || !_admissionEnabled || _generation != generation || !Object.ReferenceEquals(_candidate, c)) continue;
                         if (token != null) stream.WriteByte(1);
                         _candidate = null;
                         _client = c;
@@ -154,7 +173,7 @@ namespace PcKvm
                     if (generationConnected != null) generationConnected(generation);
                     Action conn = Connected;
                     if (conn != null) conn();
-                    ReadLoop(stream, generation);
+                    ReadLoop(stream, generation, direct);
                 }
                 catch (Exception)
                 {
@@ -208,7 +227,7 @@ namespace PcKvm
             return true;
         }
 
-        void ReadLoop(NetworkStream stream, long generation)
+        void ReadLoop(NetworkStream stream, long generation, bool direct)
         {
             byte[] head = new byte[1];
             while (_running)
@@ -218,12 +237,20 @@ namespace PcKvm
                 if (plen < 0) return;                      // 未知类型，认为流已错位
                 byte[] payload = new byte[plen];
                 if (plen > 0 && !ReadExact(stream, payload, plen)) return;
+                if (direct && !ValidDirectFrame(head[0], payload)) return;
                 if (!_active || generation != _generation) return;
                 Action<long, byte, byte[]> sg = SessionMessageReceived;
                 if (sg != null) sg(generation, head[0], payload);
                 Action<byte, byte[]> h = MessageReceived;
                 if (h != null) h(head[0], payload);
             }
+        }
+
+        static bool ValidDirectFrame(byte type, byte[] payload)
+        {
+            if (type == Protocol.MsgPong || type == Protocol.MsgPointerReady || type == Protocol.MsgPointerAck) return true;
+            int width, height, rotation;
+            return type == Protocol.MsgDeviceGeometry && Protocol.TryDecodeDeviceGeometry(payload, out width, out height, out rotation);
         }
 
         static bool ReadExact(NetworkStream stream, byte[] buf, int n)
@@ -244,6 +271,13 @@ namespace PcKvm
         public void Send(byte[] frame)
         {
             FrameWriter writer = _writer;
+            if (writer != null) writer.Send(frame);
+        }
+
+        public void SendForGeneration(long generation, byte[] frame)
+        {
+            FrameWriter writer;
+            lock (_sendLock) writer = _active && _generation == generation ? _writer : null;
             if (writer != null) writer.Send(frame);
         }
 

@@ -1,4 +1,5 @@
 import java.io.OutputStream;
+import java.util.function.BooleanSupplier;
 /** Versioned mouse session; socket thread owns all mutable state. */
 public final class AbsoluteSession {
  interface TouchAction { boolean down(int x,int y); boolean move(int x,int y); boolean up(int x,int y); void cancel(); }
@@ -14,8 +15,12 @@ public final class AbsoluteSession {
  AbsoluteTransform transform;
  long nextCaptureAt;
  final Class<?> input;
+ final BooleanSupplier allowed;
  public AbsoluteSession() throws Exception {
   this(new TouchPointer());
+ }
+ AbsoluteSession(BooleanSupplier allowed) throws Exception {
+  this(new TouchPointer(),DragCursor.create(),NativeCursor.create(),allowed);
  }
  AbsoluteSession(TouchAction touchAction) throws Exception {
   this(touchAction,DragCursor.create());
@@ -24,11 +29,17 @@ public final class AbsoluteSession {
   this(touchAction,dragCursor,NativeCursor.create());
  }
  AbsoluteSession(TouchAction touchAction,DragCursor.View dragCursor,NativeCursor.Control nativeCursor) throws Exception {
+  this(touchAction,dragCursor,nativeCursor,()->true);
+ }
+ AbsoluteSession(TouchAction touchAction,DragCursor.View dragCursor,NativeCursor.Control nativeCursor,BooleanSupplier allowed) throws Exception {
   this.touchAction=touchAction;
   this.dragCursor=dragCursor;
   this.nativeCursor=nativeCursor;
+  this.allowed=allowed;
   input=Class.forName("android.view.InputDevice");
  }
+ boolean isPrepared(int readyEpoch) { return readyEpoch!=0 && readyEpoch==epoch && transform!=null; }
+ void retryReady(OutputStream out) throws Exception { if(mouse!=null && transform==null) tryReady(out); }
  public boolean handle(int type,byte[] p,OutputStream out) throws Exception {
   if(type==0x0c) {
    release(); if(mouse!=null) { mouse.close(); mouse=null; inputDevice=null; transform=null; }
@@ -127,7 +138,7 @@ public final class AbsoluteSession {
   }
  }
  Object waitForInputDevice() throws Exception {
-  for(int attempt=0;attempt<500;attempt++) {
+  for(int attempt=0;attempt<500 && allowed.getAsBoolean();attempt++) {
    int[] ids=(int[])input.getMethod("getDeviceIds").invoke(null);
    for(int id:ids) {
     Object d=input.getMethod("getDevice",int.class).invoke(null,id);

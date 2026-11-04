@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
@@ -33,6 +34,88 @@ namespace PcKvm
 
         [DllImport("user32.dll")]
         static extern short GetKeyState(int vKey);
+
+        [DllImport("user32.dll")]
+        static extern short GetAsyncKeyState(int vKey);
+
+        sealed class ForwardedKey
+        {
+            public readonly ushort Scancode;
+            public readonly int VirtualKey;
+            public readonly long PressedAt;
+
+            public ForwardedKey(ushort scancode, int virtualKey, long pressedAt)
+            {
+                Scancode = scancode; VirtualKey = virtualKey; PressedAt = pressedAt;
+            }
+        }
+
+        static byte PhysicalModifierMask()
+        {
+            byte mask = 0;
+            if ((GetAsyncKeyState(0xA2) & 0x8000) != 0) mask |= 0x01; // 左 Ctrl
+            if ((GetAsyncKeyState(0xA0) & 0x8000) != 0) mask |= 0x02; // 左 Shift
+            if ((GetAsyncKeyState(0xA4) & 0x8000) != 0) mask |= 0x04; // 左 Alt
+            if ((GetAsyncKeyState(0x5B) & 0x8000) != 0) mask |= 0x08; // 左 Win
+            if ((GetAsyncKeyState(0xA3) & 0x8000) != 0) mask |= 0x10; // 右 Ctrl
+            if ((GetAsyncKeyState(0xA1) & 0x8000) != 0) mask |= 0x20; // 右 Shift
+            if ((GetAsyncKeyState(0xA5) & 0x8000) != 0) mask |= 0x40; // 右 Alt
+            if ((GetAsyncKeyState(0x5C) & 0x8000) != 0) mask |= 0x80; // 右 Win
+            return mask;
+        }
+
+        static ushort ModifierScancode(byte bit)
+        {
+            switch (bit)
+            {
+                case 0x01: return 0x001D; // 左 Ctrl
+                case 0x02: return 0x002A; // 左 Shift
+                case 0x04: return 0x0038; // 左 Alt
+                case 0x08: return 0xE05B; // 左 Win
+                case 0x10: return 0xE01D; // 右 Ctrl
+                case 0x20: return 0x0036; // 右 Shift
+                case 0x40: return 0xE038; // 右 Alt
+                case 0x80: return 0xE05C; // 右 Win
+                default: return 0;
+            }
+        }
+
+        static void ReconcileKeyboard(Transport transport, Dictionary<ushort, ForwardedKey> heldKeys,
+                                      ref byte modifiers, Action<string> log)
+        {
+            byte physicalModifiers = PhysicalModifierMask();
+            byte releasedModifiers = (byte)(modifiers & ~physicalModifiers);
+            if (releasedModifiers != 0)
+            {
+                modifiers = physicalModifiers;
+                for (int i = 0; i < 8; i++)
+                {
+                    byte bit = (byte)(1 << i);
+                    if ((releasedModifiers & bit) == 0) continue;
+                    transport.Send(Protocol.EncodeKey(ModifierScancode(bit), 0, modifiers));
+                }
+                log("# 按键状态校准：修饰键已松开");
+            }
+
+            long now = Stopwatch.GetTimestamp();
+            List<ushort> stale = null;
+            foreach (KeyValuePair<ushort, ForwardedKey> pair in heldKeys)
+            {
+                ForwardedKey key = pair.Value;
+                if (key.VirtualKey <= 0 || key.VirtualKey >= 0xFF
+                    || now - key.PressedAt < Stopwatch.Frequency / 4
+                    || (GetAsyncKeyState(key.VirtualKey) & 0x8000) != 0) continue;
+
+                transport.Send(Protocol.EncodeKey(key.Scancode, 0, modifiers));
+                if (stale == null) stale = new List<ushort>();
+                stale.Add(pair.Key);
+            }
+            if (stale != null)
+            {
+                foreach (ushort scancode in stale) heldKeys.Remove(scancode);
+                log("# 按键状态校准：普通键已松开 数量=" + stale.Count);
+            }
+        }
 
         [STAThread]
         static void Main()
@@ -174,7 +257,7 @@ namespace PcKvm
             transport.SessionMessageReceived += delegate(long generation, byte type, byte[] payload)
             { latency.RecordReceived(type, payload, Stopwatch.GetTimestamp()); };
             PointerSession pointer = new PointerSession(transport.Send);
-            transport.MessageReceived += pointer.Receive;
+            transport.SessionMessageReceived += pointer.Receive;
             log.WriteLine("# TCP 监听 127.0.0.1:" + transport.ListeningPort
                 + (transport.ListeningPort != DeviceLauncher.Port ? "（默认端口被占用，已自动切换）" : ""));
 
@@ -183,6 +266,7 @@ namespace PcKvm
             // 修饰键位图（HID 键盘报告的 modifier 字节）。必须声明在 KeyChanged 订阅之前：
             // 处理器会捕获并修改它，而 C# 局部变量不支持前向引用（Task 4 与 Task 7 都栽过）
             byte modifiers = 0;
+            Dictionary<ushort, ForwardedKey> heldKeys = new Dictionary<ushort, ForwardedKey>();
             ShortcutKeyGate shortcutGate = new ShortcutKeyGate();
             CursorModel cursor = null;
 
@@ -255,11 +339,12 @@ namespace PcKvm
             // 但 Start() 要等最后才调——过早启动重连监督会抢在首次建隧道之前动手。
             Watchers watchers = new Watchers(transport, tracker, supp, host,
                 delegate(string s) { log.WriteLine(s); });
-            ConnectionCoordinator coordinator = new ConnectionCoordinator(cfg,
+            ConnectionCoordinator coordinator = null;
+            coordinator = new ConnectionCoordinator(cfg,
                 new AdbClient(cfg.AdbPath.Length > 0 ? cfg.AdbPath : AdbClient.ResolvePath()), transport, pointer,
                 delegate
                 {
-                    transport.SendControl(Protocol.EncodeLeave());
+                    if (!coordinator.IsDirect) transport.SendControl(Protocol.EncodeLeave());
                     tracker.AbortTakeover();
                     supp.Release();
                     modifiers = 0;
@@ -267,7 +352,8 @@ namespace PcKvm
                     shortcutGate.Reset();
                     try { host.BeginInvoke((MethodInvoker)delegate { host.SetStatus("IDLE"); }); }
                     catch (Exception) { }
-                }, delegate(string s) { log.WriteLine(s); });
+                }, delegate(string s) { log.WriteLine(s); },
+                delegate { return clipboard != null && cfg.EnableClipboard ? (int?)clipboard.ListeningPort : null; });
             watchers.AttachConnection(coordinator);
             coordinator.SetHealthProbe(delegate { return watchers.HeartbeatHealthy; });
             long geometryGeneration = -1;
@@ -279,6 +365,7 @@ namespace PcKvm
                 {
                     if (generation != coordinator.Generation || !transport.IsConnected) return;
                     if (generation == geometryGeneration && w == _phoneW && h == _phoneH && rotation == _phoneRotation) return;
+                    coordinator.DirectGeometryPreparing(generation);
                     geometryGeneration = generation;
                     bool keepTakeover = tracker.Current == KvmState.Takeover && supp.IsEngaged;
                     int oldW = _phoneW, oldH = _phoneH, oldRotation = _phoneRotation;
@@ -315,7 +402,8 @@ namespace PcKvm
                         resumeAfterRotation = false;
                         rotationTimeout.Stop();
                     }
-                    pointer.Configure(w, h, rotation);
+                    if (coordinator.IsDirect) pointer.ConfigureDirect(generation, w, h, rotation);
+                    else pointer.Configure(w, h, rotation);
                     _geometryChanged = false;
                     log.WriteLine("# 几何已应用 " + w + "x" + h + " rotation=" + rotation);
                 });
@@ -340,6 +428,8 @@ namespace PcKvm
                 }
                 host.SetStatus("TAKEOVER → 手机");
                 if (clipboard != null && cfg.EnableClipboard) clipboard.RequestSync();
+                heldKeys.Clear();
+                modifiers = PhysicalModifierMask();
                 cursor.Reset();
                 cursor.SetPosition(px, py);
                 scaler.Reset();   // 归零的同时清掉小数余量，避免带着跨越前的零头
@@ -367,6 +457,7 @@ namespace PcKvm
 
             ri.MouseMoved += delegate(RawMouseEvent e)
             {
+                if (coordinator.IsDirect && !coordinator.IsReady && tracker.Current == KvmState.Takeover) return;
                 mc++;
                 if (mc % 50 == 0)
                     log.WriteLine("MOUSE dx=" + e.Dx + " dy=" + e.Dy
@@ -412,7 +503,8 @@ namespace PcKvm
 
                 // 滚轮与鼠标键只在接管期转发：IDLE 态用户是在操作 PC，
                 // 此时转发会在手机光标停留处产生误点击/误滚动（既有缺陷，Ruling 27）
-                if (cursor != null && tracker.Current == KvmState.Takeover)
+                if (cursor != null && tracker.Current == KvmState.Takeover
+                    && (!coordinator.IsDirect || pointer.Ready))
                 {
                     // 接管期的按钮事件**不抽样**记录：MOUSE 行是每 50 事件一条（2% 采样），
                     // 而一次点击只有 2 个事件，几乎必然被漏掉——本项目正因此无法证伪
@@ -434,6 +526,11 @@ namespace PcKvm
             };
             ri.KeyChanged += delegate(RawKeyEvent e)
             {
+                if (coordinator.IsDirect && !coordinator.IsReady && tracker.Current == KvmState.Takeover) return;
+                if (tracker.Current == KvmState.Takeover && transport.IsConnected)
+                    ReconcileKeyboard(transport, heldKeys, ref modifiers,
+                        delegate(string s) { log.WriteLine(s); });
+
                 byte bit = KeyMap.ModifierBit(e.Scancode, e.IsE0);
                 if (bit != 0)
                 {
@@ -454,7 +551,11 @@ namespace PcKvm
 
                 int sendSc = numpad.Translate(e.Scancode, e.IsUp,
                     (GetKeyState(VK_NUMLOCK) & 1) != 0);
+                if (e.IsUp) heldKeys.Remove((ushort)e.Scancode);
                 if (sendSc == 0) return;
+                if (!e.IsUp && !heldKeys.ContainsKey((ushort)e.Scancode))
+                    heldKeys.Add((ushort)e.Scancode,
+                        new ForwardedKey((ushort)sendSc, e.VirtualKey, Stopwatch.GetTimestamp()));
                 transport.Send(Protocol.EncodeKey((ushort)sendSc, (byte)(e.IsUp ? 0 : 1), modifiers));
             };
 
@@ -500,24 +601,35 @@ namespace PcKvm
                     host.BeginInvoke((MethodInvoker)delegate { host.SetStatus("IDLE"); });
                 }
             };
-            transport.MessageReceived += delegate(byte type, byte[] payload)
+            Action<long> resumeRotation = delegate(long generation)
             {
-                if (type == Protocol.MsgPointerReady)
+                host.BeginInvoke((MethodInvoker)delegate
+                {
+                    if (generation != coordinator.Generation || !resumeAfterRotation || !pointer.Ready) return;
+                    resumeAfterRotation = false;
+                    rotationTimeout.Stop();
+                    if (tracker.Current != KvmState.Takeover || !supp.IsEngaged
+                        || !transport.IsConnected) return;
+                    if (coordinator.IsDirect)
+                    {
+                        heldKeys.Clear();
+                        modifiers = PhysicalModifierMask();
+                        numpad.Reset();
+                    }
+                    pointer.Begin(cursor.X, cursor.Y);
+                    host.SetStatus("TAKEOVER → 手机");
+                    log.WriteLine("# 旋转后接管已恢复 phone(" + cursor.X + "," + cursor.Y + ")");
+                });
+            };
+            transport.SessionMessageReceived += delegate(long generation, byte type, byte[] payload)
+            {
+                if (type == Protocol.MsgPointerReady && !coordinator.IsDirect)
                 {
                     log.WriteLine("# 绝对指针已就绪 epoch=" + Protocol.GetU32(payload, 0));
-                    host.BeginInvoke((MethodInvoker)delegate
-                    {
-                        if (!resumeAfterRotation || !pointer.Ready) return;
-                        resumeAfterRotation = false;
-                        rotationTimeout.Stop();
-                        if (tracker.Current != KvmState.Takeover || !supp.IsEngaged
-                            || !transport.IsConnected) return;
-                        pointer.Begin(cursor.X, cursor.Y);
-                        host.SetStatus("TAKEOVER → 手机");
-                        log.WriteLine("# 旋转后接管已恢复 phone(" + cursor.X + "," + cursor.Y + ")");
-                    });
+                    resumeRotation(generation);
                 }
             };
+            coordinator.DirectReady += resumeRotation;
 
             // Aggregate timing in memory; one short line every five seconds avoids per-mouse-event disk I/O.
             Timer latencyTimer = new Timer();
@@ -527,7 +639,21 @@ namespace PcKvm
                 writeLatencySummary(latency.TakeSummary(), "");
             };
             latencyTimer.Start();
-            Application.ApplicationExit += delegate { latencyTimer.Stop(); latencyTimer.Dispose(); };
+            Timer keyboardStateTimer = new Timer();
+            keyboardStateTimer.Interval = 250;
+            keyboardStateTimer.Tick += delegate
+            {
+                if (tracker.Current == KvmState.Takeover && transport.IsConnected
+                    && (!coordinator.IsDirect || coordinator.IsReady))
+                    ReconcileKeyboard(transport, heldKeys, ref modifiers,
+                        delegate(string s) { log.WriteLine(s); });
+            };
+            keyboardStateTimer.Start();
+            Application.ApplicationExit += delegate
+            {
+                latencyTimer.Stop(); latencyTimer.Dispose();
+                keyboardStateTimer.Stop(); keyboardStateTimer.Dispose();
+            };
 
             // 托盘与生命周期集中到 TrayUi（Ruling 33）。必须在 Application.Run 之前 Install。
             trayUi = new TrayUi(host, supp, watchers, coordinator, transport, log, cfg,

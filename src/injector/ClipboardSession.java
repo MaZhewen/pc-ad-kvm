@@ -15,6 +15,8 @@ public final class ClipboardSession implements AutoCloseable {
     }
     interface AdapterFactory { Adapter create(File cache,Runnable changed) throws Exception; }
     private final byte[] token;
+    private DirectSessionConfig direct;
+    private byte[] directSessionId;
     private final int port;
     private final File cacheRoot,incoming;
     private final AdapterFactory factory;
@@ -40,6 +42,11 @@ public final class ClipboardSession implements AutoCloseable {
                 public void close(){clipboard.close();}
             };
         });
+    }
+    public ClipboardSession(DirectSessionConfig direct, byte[] sessionId) {
+        this(direct.token);
+        this.direct=direct;
+        this.directSessionId=sessionId.clone();
     }
     ClipboardSession(byte[] token,int port,File root,AdapterFactory factory) {
         if(token==null||token.length!=32)throw new IllegalArgumentException("Clipboard token length");
@@ -108,7 +115,17 @@ public final class ClipboardSession implements AutoCloseable {
     }
     private void connect(Link link,Adapter local)throws IOException {
         if(!alive(link,local))throw new InterruptedIOException();
-        link.socket.connect(new InetSocketAddress("127.0.0.1",port),2000);link.socket.setSoTimeout(2000);
+        if(direct==null)link.socket.connect(new InetSocketAddress("127.0.0.1",port),2000);
+        else {
+            // PinnedTls bounds connect and handshake time; a canceled attempt must never publish its socket.
+            Socket connected=PinnedTls.connect(direct.host,direct.port,direct.pin,token,
+                direct.instanceId,2,directSessionId,()->alive(link,local)).socket;
+            synchronized(link) {
+                if(!alive(link,local)){connected.close();throw new InterruptedIOException();}
+                link.socket.close();link.socket=connected;
+            }
+        }
+        link.socket.setSoTimeout(2000);
         link.in=new BufferedInputStream(link.socket.getInputStream(),65536);link.out=new BufferedOutputStream(link.socket.getOutputStream(),65536);
         link.out.write(new byte[]{'P','K','C','B',1});link.out.write(token);link.out.flush();
         if(link.in.read()!=1)throw new IOException("Clipboard authentication rejected");link.socket.setSoTimeout(0);lastFailure=null;
@@ -234,11 +251,11 @@ public final class ClipboardSession implements AutoCloseable {
         Transmission(long id,long revision,long change,long publication,long peer){this.id=id;this.revision=revision;this.change=change;this.publication=publication;this.peer=peer;}
     }
     private static final class Link {
-        final Socket socket=new Socket();final ArrayDeque<Ack> acks=new ArrayDeque<Ack>();
+        volatile Socket socket=new Socket();final ArrayDeque<Ack> acks=new ArrayDeque<Ack>();
         final long generation;Link(long generation){this.generation=generation;}
         volatile boolean active=true,sending,publishing;
         volatile long awaitingId;long peerVersion;Transmission outgoing;
         InputStream in;OutputStream out;Thread reader;
-        void cancel(){active=false;try{socket.close();}catch(IOException ignored){}}
+        synchronized void cancel(){active=false;try{socket.close();}catch(IOException ignored){}}
     }
 }

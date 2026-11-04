@@ -1,7 +1,9 @@
-﻿$ErrorActionPreference = 'Stop'
+﻿param([string]$OutputDirectory)
+
+$ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $src  = Join-Path $root 'src\agent'
-$dist = Join-Path $root 'dist'
+$dist = if ($OutputDirectory) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputDirectory) } else { Join-Path $root 'dist' }
 $csc  = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 
 if (-not (Test-Path $csc)) { throw "找不到 csc.exe: $csc" }

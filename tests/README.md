@@ -24,9 +24,12 @@ pwsh -File tests\coordinator\run.ps1
 pwsh -File tests\connection-form\run.ps1
 pwsh -File tests\transport\run.ps1
 pwsh -File tests\session\run.ps1
+pwsh -File tests\direct-network\run.ps1
+pwsh -File tests\direct-bootstrap\run.ps1
+pwsh -File tests\direct-daemon\run.ps1
 ```
 
-它们覆盖 ADB 目标选择与超时、手动选择时的设备身份校验、手动配对与连接窗口、会话握手与断线通知、Android 侧心跳及半帧超时。`coordinator` 和 `connection-form` 使用假 ADB，确保身份不匹配或配对时不会部署注入器。真机的无线调试、反向隧道和 UHID 仍需按设计文档的验收步骤验证。
+这些用例覆盖设备身份、部署事务、owner 锁、DKVM v2 互通、私钥回收、剪贴板会话隔离、心跳和几何就绪。`coordinator` 使用假 ADB 与真实本机 TLS 验证 ADB 离线时重连。`direct-network`、`coordinator`、`transport` 和 `session` 需要本机套接字权限，`connection-form` 需要 Windows 桌面会话。真机步骤见[验证记录](../docs/validation/2026-11-direct-network.md)。
 
 三个纯逻辑 harness，**不需要手机、不需要 adb、不需要用户在场**（对比：本项目大多数验收是真机 + 人眼）。
 

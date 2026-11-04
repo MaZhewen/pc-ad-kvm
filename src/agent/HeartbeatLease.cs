@@ -1,10 +1,14 @@
 using System;
+using System.Runtime.InteropServices;
 
 namespace PcKvm
 {
     /** Monotonic, generation-bound PING/PONG lease. */
     public sealed class HeartbeatLease
     {
+        [DllImport("kernel32.dll")]
+        static extern ulong GetTickCount64();
+        internal static long ElapsedMilliseconds { get { return (long)GetTickCount64(); } }
         readonly long _frequency;
         readonly object _gate = new object();
         long _generation, _lastPong;

@@ -1,4 +1,5 @@
 import java.io.BufferedReader;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
@@ -7,7 +8,10 @@ import java.net.Socket;
 import java.io.RandomAccessFile;
 import java.nio.channels.FileLock;
 import java.nio.channels.OverlappingFileLockException;
+import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
+import java.util.function.LongSupplier;
 
 public class Injector {
 
@@ -18,7 +22,8 @@ public class Injector {
                       MSG_HOME = 0x0A;
 
     /** 当前按下的鼠标按钮位图（bit0 左, bit1 右, bit2 中）。 */
-    static int buttonsDown = 0;
+    private int buttonsDown;
+    private final KeyState keyState = new KeyState();
 
     static boolean wifiLatencyRequested(String[] args) {
         if (args == null || (args.length != 2 && args.length != 3) || !"--session".equals(args[0])
@@ -28,6 +33,10 @@ public class Injector {
     }
 
     public static void main(String[] args) throws Exception {
+        if (args.length == 2 && "--direct".equals(args[0])) {
+            DirectDaemon.run(DirectSessionConfig.load(args[1]));
+            return;
+        }
         if (args.length > 0 && args[0].equals("--stdin")) {
             StdinMode.run();
             return;
@@ -48,52 +57,100 @@ public class Injector {
             }
         }
         if (sock == null) throw new IllegalStateException("Cannot connect to PC reverse tunnel");
+        runSession(sock, token, wifiLowLatency, null, null, () -> {}, () -> true, null);
+        System.out.println("INJECTOR exit");
+    }
+
+    static void runSession(Socket sock, byte[] token, boolean wifiLowLatency,
+                           DirectSessionConfig direct, byte[] directSessionId,
+                           Runnable ready, BooleanSupplier allowed, LongSupplier directClock) throws Exception {
+        Injector inputState = new Injector();
         SessionLink link = null;
         UhidDevice dev = null;
         AbsoluteSession pointer = null;
-        ClipboardSession clipboard = new ClipboardSession(token);
+        ClipboardSession clipboard = direct == null ? new ClipboardSession(token) : new ClipboardSession(direct, directSessionId);
         RandomAccessFile lockFile = null;
         FileLock processLock = null;
         WifiLatencyGuard wifiLatency = WifiLatencyGuard.forAndroid(wifiLowLatency);
         final AtomicBoolean finished = new AtomicBoolean(false);
         try {
             SessionLink.handshake(sock, token);
-            link = new SessionLink(sock);
+            link = new SessionLink(sock, directClock);
             link.start();
             final SessionLink observed = link;
             Thread shutdownGuard = new Thread(new Runnable() { public void run() {
                 while (!finished.get() && observed.isAlive()) {
+                    if (!allowed.getAsBoolean()) { observed.close(); break; }
                     try { Thread.sleep(100); } catch (InterruptedException e) { return; }
                 }
-                if (finished.get()) return;
+                if (finished.get() || direct != null) return;
                 try { Thread.sleep(1000); } catch (InterruptedException e) { return; }
                 if (!finished.get()) Runtime.getRuntime().halt(0);
             } }, "pckvm-shutdown-guard");
             shutdownGuard.setDaemon(true);
             shutdownGuard.start();
 
+            if (direct != null) {
+                Thread geometry = new Thread(() -> {
+                    byte[] previous = null;
+                    try {
+                        while (observed.isAlive() && allowed.getAsBoolean()) {
+                            byte[] current = DeviceGeometry.capture();
+                            if (!Arrays.equals(previous, current)) {
+                                observed.output().write(current);
+                                observed.output().flush();
+                                previous = current;
+                            }
+                            Thread.sleep(500);
+                        }
+                    } catch (Exception e) {
+                        if (observed.isAlive()) System.out.println("DIRECT geometry unavailable " + e.getClass().getSimpleName());
+                        observed.close();
+                    }
+                }, "pckvm-device-geometry");
+                geometry.setDaemon(true); geometry.start();
+            }
+
             lockFile = new RandomAccessFile("/data/local/tmp/pckvm.lock", "rw");
             long lockDeadline = System.nanoTime() + 20000000000L;
-            while (processLock == null && link.isAlive() && System.nanoTime() < lockDeadline) {
+            while (processLock == null && link.isAlive() && allowed.getAsBoolean() && System.nanoTime() < lockDeadline) {
                 try { processLock = lockFile.getChannel().tryLock(); }
                 catch (OverlappingFileLockException busy) { /* previous session in same process */ }
                 if (processLock == null) Thread.sleep(50);
             }
-            if (processLock == null || !link.isAlive()) throw new IllegalStateException("Injector lock unavailable");
+            if (processLock == null || !link.isAlive() || !allowed.getAsBoolean()) throw new IllegalStateException("Injector lock unavailable");
             wifiLatency.start();
             dev = new UhidDevice("PC-KVM Keyboard", HidDescriptor.keyboardOnly());
-            pointer = new AbsoluteSession();
+            pointer = new AbsoluteSession(() -> observed.isAlive() && allowed.getAsBoolean());
             OutputStream out = link.output();
             link.activate();
+            boolean inputReady = direct == null;
             SessionLink.Frame frame;
             while (link.isAlive()) {
                 frame = link.poll();
-                if (frame == null) continue;
+                if (frame == null) {
+                    if (direct != null && link.isAlive()) pointer.retryReady(out);
+                    continue;
+                }
                 link.beginProcessing(frame);
                 try {
-                    if (frame.type == 0x0f) clipboard.control(frame.payload[0] & 255);
-                    else if (!pointer.handle(frame.type, frame.payload, out))
-                        handle(dev, out, (byte)frame.type, frame.payload);
+                    if (frame.type == 0x11) {
+                        if (direct == null) throw new IOException("STOP outside a direct session");
+                        direct.stop();
+                        link.close();
+                    } else if (frame.type == 0x12) {
+                        if (direct == null) throw new IOException("SESSION_READY outside a direct session");
+                        if (pointer.isPrepared(i32(frame.payload, 0)) && link.directHeartbeatValid()) {
+                            inputReady = true;
+                            ready.run();
+                        }
+                    } else if (frame.type == 0x0c && direct != null) {
+                        inputReady = false;
+                        inputState.keyState.releaseAll(dev);
+                        pointer.handle(frame.type, frame.payload, out);
+                    } else if (frame.type == 0x0f) clipboard.control(frame.payload[0] & 255);
+                    else if ((inputReady || frame.type == 0x06) && !pointer.handle(frame.type, frame.payload, out))
+                        inputState.handle(dev, out, (byte)frame.type, frame.payload);
                 } finally { link.completeProcessing(frame); }
             }
         } catch (Exception e) {
@@ -104,18 +161,16 @@ public class Injector {
             wifiLatency.close();
             clipboard.close();
             // Every release step is independent: a failed UHID report must not skip FD closure.
-            buttonsDown = 0;
-            if (dev != null) try { KeyState.releaseAll(dev); } catch (Exception ignored) { }
+            if (dev != null) try { inputState.keyState.releaseAll(dev); } catch (Exception ignored) { }
             if (pointer != null) try { pointer.close(); } catch (Exception ignored) { }
             if (dev != null) try { dev.close(); } catch (Exception ignored) { }
             if (processLock != null) try { processLock.release(); } catch (Exception ignored) { }
             if (lockFile != null) try { lockFile.close(); } catch (Exception ignored) { }
             finished.set(true);
         }
-        System.out.println("INJECTOR exit");
     }
 
-    static void handle(UhidDevice dev, OutputStream out, byte type, byte[] p) throws Exception {
+    void handle(UhidDevice dev, OutputStream out, byte type, byte[] p) throws Exception {
         if (type == MSG_MOVE) {
             sendRelative(dev, i16(p, 0), i16(p, 1 + 1));
         } else if (type == MSG_ENTER) {
@@ -139,7 +194,7 @@ public class Injector {
             int dy = i16(p, 2);
             dev.sendMouse((byte) buttonsDown, (byte) 0, (byte) 0, (byte) clamp127(dy));
         } else if (type == MSG_KEY) {
-            KeyState.apply(dev, u16(p, 0), p[2] != 0, p[3]);
+            keyState.apply(dev, u16(p, 0), p[2] != 0, p[3]);
         } else if (type == MSG_PING) {
             int seq = i32(p, 0);
             byte[] r = new byte[5];
@@ -158,7 +213,7 @@ public class Injector {
             // 防修饰键/鼠标键卡在按下态（遥控类软件经典 bug）：接管期间按着 Ctrl 或鼠标键
             // 退出，不清理的话手机上会一直"按住"。PC 侧所有放弃路径都会补发 LEAVE。
             buttonsDown = 0;
-            KeyState.releaseAll(dev);
+            keyState.releaseAll(dev);
         }
         // MSG_CONFIG 由后续任务接管（MSG_ENTER 已实现，见 MSG_ENTER 分支）
     }
@@ -170,7 +225,7 @@ public class Injector {
      * 把一次相对位移拆成多条 ≤127 的报告发出去（HID 相对轴是 int8）。
      * MSG_MOVE / MSG_ENTER / MSG_HOME 共用它；拆分算法在 PointerPlan（纯函数，有离线用例）。
      */
-    static void sendRelative(UhidDevice dev, int dx, int dy) throws Exception {
+    void sendRelative(UhidDevice dev, int dx, int dy) throws Exception {
         int n = PointerPlan.stepCount(dx, dy);
         for (int i = 0; i < n; i++) {
             dev.sendMouse((byte) buttonsDown,
@@ -188,6 +243,7 @@ public class Injector {
 
     static int payloadLength(int type) {
         switch (type) {
+            case 0x11: return 0;
             case 0x0f: return 1;
             case 0x0b: return 12; // epoch, sequence, x, y
             case 0x0c: return 9;  // epoch, width, height, display rotation

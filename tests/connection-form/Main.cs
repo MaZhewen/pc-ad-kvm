@@ -79,6 +79,7 @@ class ConnectionFormTests
             Check(mode != null && devices != null && endpoint != null && pairIp != null
                 && pairPort != null && pairCode != null && pair != null,
                 "manual connection and pairing fields are present");
+            Check(mode.SelectedIndex == 1 && mode.Text == "独立 Wi-Fi", "saved WirelessTls opens the independent Wi-Fi setup");
             Check(form.Controls.Find("ScanPorts", true).Length == 0
                 && form.Controls.Find("CancelScan", true).Length == 0
                 && form.Controls.Find("FindPairPort", true).Length == 0,
@@ -145,6 +146,11 @@ class ConnectionFormTests
                 && Find<Label>(form, "ErrorDetails").Text.Contains("failure detail")
                 && Find<Panel>(form, "ErrorCard").Visible,
                 "retry state retains failure reason");
+            form.RenderState(new ConnectionSnapshot { Desired = true, Device = "", Mode = "WirelessTls",
+                Status = "独立 Wi-Fi：等待重新连接", Error = "" });
+            Check(Find<Label>(form, "DeviceSummary").Text.Contains("等待重新连接")
+                && Find<Button>(form, "RetryConnection").Visible && Find<Button>(form, "RetryConnection").Text == "重新启动连接",
+                "waiting for the direct network offers a distinct restart action");
             connection.Disconnect();
             form.RenderState();
             Check(Find<Button>(form, "ConnectDevice").Enabled

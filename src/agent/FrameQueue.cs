@@ -19,14 +19,16 @@ namespace PcKvm {
   }
   public bool AddControl(byte[] frame) { return AddControl(frame,Stopwatch.GetTimestamp()); }
   public bool AddControl(byte[] frame,long queuedAt) {
-   Entry pendingGeometry=null;
+   Entry pendingGeometry=null,pendingReady=null;
    if(frame[0]==Protocol.MsgLeave && _capacity>=2) {
     for(var node=_items.First;node!=null;node=node.Next)
      if(node.Value.Frame[0]==Protocol.MsgGeometry) pendingGeometry=node.Value;
+     else if(node.Value.Frame[0]==Protocol.MsgSessionReady) pendingReady=node.Value;
    }
    _items.Clear();
    _items.AddLast(new Entry(frame,queuedAt));
    if(pendingGeometry!=null) _items.AddLast(pendingGeometry);
+   else if(pendingReady!=null) _items.AddLast(pendingReady);
    return true;
   }
   public byte[] Take() { long ignored; return Take(out ignored); }

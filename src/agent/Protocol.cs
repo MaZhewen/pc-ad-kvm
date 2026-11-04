@@ -10,6 +10,9 @@ namespace PcKvm
         public const byte MsgPointerReady = 0x0D;
         public const byte MsgPointerAck = 0x0E;
         public const byte MsgClipboardControl = 0x0F;
+        public const byte MsgDeviceGeometry = 0x10;
+        public const byte MsgStopDaemon = 0x11;
+        public const byte MsgSessionReady = 0x12;
         public static byte[] EncodeClipboardControl(byte flags)
         {
             if (flags > 2) throw new ArgumentOutOfRangeException("flags");
@@ -96,6 +99,18 @@ namespace PcKvm
 
         public static byte[] EncodePing(uint seq) { return EncodeU32(MsgPing, seq); }
         public static byte[] EncodePong(uint seq) { return EncodeU32(MsgPong, seq); }
+        public static byte[] EncodeSessionReady(uint epoch) { return EncodeU32(MsgSessionReady, epoch); }
+        public static byte[] EncodeStopDaemon() { return new byte[] { MsgStopDaemon }; }
+
+        public static bool TryDecodeDeviceGeometry(byte[] payload, out int width, out int height, out int rotation)
+        {
+            width = height = rotation = 0;
+            if (payload == null || payload.Length != 5) return false;
+            width = GetU16(payload, 0);
+            height = GetU16(payload, 2);
+            rotation = payload[4];
+            return width > 0 && height > 0 && rotation <= 3;
+        }
 
         static byte[] EncodeU32(byte type, uint v)
         {
@@ -110,6 +125,9 @@ namespace PcKvm
         {
             switch (type)
             {
+                case MsgDeviceGeometry: return 5;
+                case MsgStopDaemon: return 0;
+                case MsgSessionReady: return 4;
                 case MsgClipboardControl: return 1;
                 case MsgPointer: return 12;
                 case MsgGeometry: return 9;

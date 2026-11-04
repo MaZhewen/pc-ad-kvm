@@ -101,8 +101,8 @@ namespace PcKvm
             deviceLayout.Controls.Add(FieldLabel("连接方式"), 0, 0);
             _mode = new ComboBox { Name = "ConnectionMode", DropDownStyle = ComboBoxStyle.DropDownList,
                 Width = 260, Margin = new Padding(0, 1, 0, 7) };
-            _mode.Items.Add("USB");
-            _mode.Items.Add("无线调试 (Android 11+)");
+            _mode.Items.Add("USB 传输");
+            _mode.Items.Add("独立 Wi-Fi");
             _mode.SelectedIndex = config.ConnectionMode == "WirelessTls" ? 1 : 0;
             deviceLayout.Controls.Add(_mode, 1, 0);
             deviceLayout.Controls.Add(FieldLabel("在线设备"), 0, 1);
@@ -132,7 +132,7 @@ namespace PcKvm
             _endpoint = new TextBox { Name = "ConnectionEndpoint", Dock = DockStyle.Fill,
                 Text = config.WirelessLastEndpoint, Margin = new Padding(0, 0, 0, 7) };
             connectionLayout.Controls.Add(_endpoint, 1, 0);
-            Label endpointHint = Hint("手动输入无线调试主页面的 IP:连接端口；与配对端口不同。");
+            Label endpointHint = Hint("用无线调试启动时，请填写主页面的 IP 和连接端口。也可直接选择已授权的 USB 设备启动。");
             connectionLayout.Controls.Add(endpointHint, 0, 1);
             connectionLayout.SetColumnSpan(endpointHint, 2);
             Button showPairing = StyledButton("添加新设备 / 首次配对", "ShowPairing", false,
@@ -229,7 +229,7 @@ namespace PcKvm
                 _connection.StateChanged -= OnStateChanged;
                 _connection.PairCompleted -= OnPairCompleted;
             };
-            Shown += delegate { RefreshDevices(); };
+            Shown += delegate { if (!_connection.IsDirect) RefreshDevices(); };
             _statusTimer = new System.Windows.Forms.Timer { Interval = 250 };
             _statusTimer.Tick += delegate { RenderState(); };
             _statusTimer.Start();
@@ -247,21 +247,24 @@ namespace PcKvm
         {
             bool controlling = state.Ready && _isControlling();
             bool wireless = _mode.SelectedIndex == 1;
+            bool direct = state.Mode == "WirelessTls";
+            bool waitingForNetwork = direct && state.Status.Contains("等待重新连接");
             string deviceName = state.Device;
             foreach (AdbDevice device in _knownDevices)
                 if (device.Serial == state.Device && device.Model.Length > 0)
                     deviceName = device.Model + " · " + device.Serial;
             _summary.Text = state.Ready
                 ? (controlling ? "正在控制 Android" : "已连接 · 当前控制电脑")
-                    + "\n" + (state.Mode == "Usb" ? "USB" : "无线") + " · " + deviceName
-                : state.Desired ? (state.Error.Length > 0 ? "连接未完成 · 正在重试" : "正在连接设备") : "未连接设备";
+                    + "\n" + (direct ? "独立 Wi-Fi" : "USB") + " · " + deviceName
+                : state.Desired ? (direct ? state.Status : state.Error.Length > 0 ? "连接未完成 · 正在重试" : "正在连接设备") : "未连接设备";
             _summary.ForeColor = state.Ready ? Color.SeaGreen : Ink;
             _instructions.Text = state.Ready
                 ? (!_switchingAvailable() ? "切换快捷键暂不可用；请关闭设置或检查快捷键注册。 " : "按 " + _config.SwitchHotkey + " 切换。 ")
                     + (_config.EnableEdgeSwitch ? "向" + (_config.PhoneOnLeft ? "左" : "右") + "侧双次贴边可进入 Android。 " : "贴边切换已关闭。 ")
                     + "Ctrl+Alt+Esc 紧急返回电脑。"
-                : state.Error.Length > 0 ? "请根据下方提示修正连接信息，或重试连接。"
-                    : state.Desired ? state.Status : "选择 USB 或无线设备开始连接。";
+                    + (direct ? " 保留 Android 的 USB 调试开关，可关闭无线调试并拔线。" : "")
+                : state.Error.Length > 0 ? "请根据下方提示修正连接信息，或重新启动设备连接。"
+                    : state.Desired ? state.Status : "选择 USB 传输或独立 Wi-Fi 开始连接。";
             _errorDetails.Text = state.Error;
             Named("ErrorCard").Visible = !state.Ready && state.Error.Length > 0;
             Named("DeviceCard").Visible = !state.Ready;
@@ -271,7 +274,9 @@ namespace PcKvm
             Named("PairCard").Visible = wireless && !state.Ready && _showPairing;
             Named("ConnectDevice").Visible = !state.Ready;
             Named("ConnectDevice").Enabled = !state.Pairing && !state.Attempting;
-            Named("RetryConnection").Visible = !state.Ready && state.Error.Length > 0;
+            Named("RetryConnection").Visible = !state.Ready && (state.Error.Length > 0 || waitingForNetwork);
+            Named("RetryConnection").Text = direct ? "重新启动连接" : "重试";
+            Named("RetryConnection").Width = direct ? 106 : 78;
             Named("DisconnectDevice").Visible = state.Ready || state.Desired;
             Named("DisconnectDevice").Text = state.Ready ? "断开连接" : "停止连接";
             _pairButton.Enabled = wireless && !state.Pairing && !state.Ready;
@@ -403,9 +408,10 @@ namespace PcKvm
             _devices.Items.Add(new DeviceChoice("", wireless ? "使用下方连接地址" : "自动选择 USB 设备"));
             foreach (AdbDevice device in _knownDevices)
             {
-                if (device.IsUsb == wireless) continue;
+                if (!wireless && !device.IsUsb) continue;
                 _devices.Items.Add(new DeviceChoice(device.Serial,
                     device.Serial + (device.Model.Length > 0 ? "  ·  " + device.Model : "")
+                    + (wireless && device.IsUsb ? " · USB 启动" : "")
                     + (device.IsOnline ? "" : device.State == "unauthorized" ? " · 请在手机允许 USB 调试" : " · 设备离线")));
             }
             _devices.SelectedIndex = 0;

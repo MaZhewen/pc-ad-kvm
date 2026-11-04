@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Security.Cryptography;
 using System.Threading;
 
 class FakeAdb
@@ -24,7 +25,18 @@ class FakeAdb
                 : "List of devices attached\n" + endpoint + " "
                   + (mode == "unauthorized" ? "unauthorized" : mode == "existingoffline" ? "offline" : "device") + " transport_id:3");
         else if (command.Contains("getprop ro.serialno"))
-            Console.WriteLine(mode == "matching" ? "tablet-A" : mode == "unknownidentity" ? "unknown" : "tablet-B");
+            Console.WriteLine(mode == "matching" || mode == "direct" ? "tablet-A" : mode == "unknownidentity" ? "unknown" : "tablet-B");
+        else if (command.Contains("ip -4 route")) Console.WriteLine("192.168.1.0/24 dev wlan0 src 192.168.1.3");
+        else if (command.Contains("settings get global adb_enabled")) Console.WriteLine("1");
+        else if (mode == "direct" && command.Contains("cat >"))
+            File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "direct-config"), Console.In.ReadToEnd());
+        else if (mode == "direct" && command.Contains("sha256sum "))
+        {
+            string name = command.EndsWith("/config") ? "direct-config" : "pckvm.jar";
+            using (var hash = SHA256.Create())
+                Console.WriteLine(BitConverter.ToString(hash.ComputeHash(File.ReadAllBytes(
+                    Path.Combine(AppDomain.CurrentDomain.BaseDirectory, name)))).Replace("-", "") + "  " + name);
+        }
         else if (command.Contains("connect ") && (mode == "failedconnect" || mode == "existingoffline"))
         { Console.WriteLine("failed to connect"); return 1; }
         else if (command.Contains("mdns services"))
