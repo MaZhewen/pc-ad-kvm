@@ -4,3 +4,9 @@ probes/**/*.exe
 probes/**/*.log
 dist/
 *.log
+
+# Generated previews, release binaries, and local recovery copies.
+/.superpowers/brainstorm/
+/local-backup-*/
+/release/*
+!/release/*-notes.md
